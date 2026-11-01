@@ -1,0 +1,39 @@
+# --- EVE Online Secrets & Auth ---
+token_*.json
+sso_token.json
+**/sso_token.json
+
+# --- Large Databases & Analytics Dumps ---
+*.db
+*.sqlite
+*.duckdb
+*.duckdb.wal
+data/latest-sqlite.db
+data/eve_analytics.duckdb
+
+# --- Heavy Data Exports & Local CSVs ---
+*.csv
+!templates/*.csv
+compose.yaml.bak
+
+# --- Cache, Runtime States & Ephemeral Telemetry ---
+ledgers/*.json
+ledgers/*.csv
+!ledgers/.gitkeep
+data/*.csv
+!data/.gitkeep
+
+# --- Python Bytecode & Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# --- System & Editor Artifacts ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

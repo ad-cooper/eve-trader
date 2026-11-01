@@ -1,0 +1,24 @@
+services:
+  eve-trading-desk:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eve-trading-desk:latest
+    container_name: eve-trading-desk
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./ledgers:/app/ledgers
+      - ./templates:/app/templates
+      - ./static:/app/static
+      - ./services:/app/services
+      - ./scripts:/app/scripts
+      - ./app.py:/app/app.py
+    environment:
+      - TZ=UTC
+      - PYTHONUNBUFFERED=1
+      - EVE_CLIENT_ID=c2dfe86e7fce4f39b9e87a1076e8d61b
+      - EVE_CLIENT_SECRET=eat_1mH4QAqBnvDWx6ZOe13XGvgmraU60sMWz_45wGgJ
+      - EVE_CALLBACK_URL=http://localhost:8000/sso/callback
