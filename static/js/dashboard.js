@@ -278,24 +278,41 @@ function renderChart(chartData) {
 
 function renderSniperTable(deals) {
   const tbody = document.getElementById('sniper-table-body');
-  document.getElementById('sniper-deal-count').innerText = `${deals.length} deals detected`;
-  if (!deals.length) {
+  if (!tbody) return;
+  const countEl = document.getElementById('sniper-deal-count');
+  if (countEl) countEl.innerText = `${deals ? deals.length : 0} deals detected`;
+
+  if (!deals || !deals.length) {
     tbody.innerHTML = '<tr><td colspan="10" class="p-6 text-center text-slate-500">No active firesales detected. Click "Run Deal Sniper" above to trigger a fresh scan.</td></tr>';
     return;
   }
-  tbody.innerHTML = deals.map((d, i) => `
+
+  tbody.innerHTML = deals.map((d, i) => {
+    const name = d.name || d.item_name || 'Unknown Item';
+    const typeId = d.type_id || '';
+    const qty = d.qty || d.quantity || 1;
+    const discount = Math.abs(d.discount_pct || 0).toFixed(1);
+    const askPrice = d.ask_price || 0;
+    const targetExit = d.target_exit || d.target_sell || 0;
+    const netMargin = (d.net_margin || 0).toFixed(1);
+    const capital = d.capital || d.total_cost || 0;
+    const profit = d.profit || d.est_profit || 0;
+    const isFiresale = d.deal_type && d.deal_type.includes('FIRESALE');
+
+    return `
     <tr class="hover:bg-slate-800/40 transition">
       <td class="p-3 text-slate-500">${i + 1}</td>
-      <td class="p-3"><span class="${d.deal_type.includes('FIRESALE') ? 'bg-amber-950/70 text-amber-300 border-amber-600/80' : 'bg-cyan-950/70 text-cyan-300 border-cyan-600/80'} border px-2 py-0.5 rounded text-[10px] font-bold">${d.deal_type}</span></td>
-      <td class="p-3 font-semibold text-white"><a href="https://evetycoon.com/market/${d.type_id}" target="_blank" class="hover:text-eveCyan hover:underline">${d.name}</a></td>
-      <td class="p-3 text-right text-slate-300">${d.qty}</td>
-      <td class="p-3 text-right text-amber-400 font-semibold">-${d.discount_pct.toFixed(1)}%</td>
-      <td class="p-3 text-right text-slate-200 font-semibold">${fmtISK(d.ask_price)}</td>
-      <td class="p-3 text-right text-slate-300">${fmtISK(d.target_exit)}</td>
-      <td class="p-3 text-right text-eveCyan font-bold">${d.net_margin.toFixed(1)}%</td>
-      <td class="p-3 text-right text-slate-300 font-semibold">${fmtISK(d.capital)}</td>
-      <td class="p-3 text-right text-eveGreen font-bold">+${fmtISK(d.profit)}</td>
-    </tr>`).join('');
+      <td class="p-3"><span class="${isFiresale ? 'bg-amber-950/70 text-amber-300 border-amber-600/80' : 'bg-cyan-950/70 text-cyan-300 border-cyan-600/80'} border px-2 py-0.5 rounded text-[10px] font-bold">${d.deal_type || 'DEAL'}</span></td>
+      <td class="p-3 font-semibold text-white"><a href="https://evetycoon.com/market/${typeId}" target="_blank" class="hover:text-eveCyan hover:underline">${name}</a></td>
+      <td class="p-3 text-right text-slate-300">${qty}</td>
+      <td class="p-3 text-right text-amber-400 font-semibold">-${discount}%</td>
+      <td class="p-3 text-right text-slate-200 font-semibold">${fmtISK(askPrice)}</td>
+      <td class="p-3 text-right text-slate-300">${fmtISK(targetExit)}</td>
+      <td class="p-3 text-right text-eveCyan font-bold">${netMargin}%</td>
+      <td class="p-3 text-right text-slate-300 font-semibold">${fmtISK(capital)}</td>
+      <td class="p-3 text-right text-eveGreen font-bold">+${fmtISK(profit)}</td>
+    </tr>`;
+  }).join('');
 }
 
 function renderTableRows(rows) {
@@ -361,15 +378,21 @@ function renderTableRows(rows) {
 }
 
 async function triggerSniper() {
+  // Immediately switch view to the Deal Sniper tab
+  if (typeof switchTab === 'function') {
+    switchTab('sniper');
+  }
+
+  // Set scanning indicators
   const spinner = document.getElementById('spinner-snipe');
   const text = document.getElementById('text-snipe');
-  spinner.classList.remove('hidden');
-  text.innerText = 'Scanning...';
+  if (spinner) spinner.classList.remove('hidden');
+  if (text) text.innerText = 'Scanning...';
+
   try {
     await fetch('/api/sniper/run', { method: 'POST' });
-    setTimeout(fetchData, 1500);
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error('Failed to trigger deal sniper:', e);
   }
 }
 
@@ -584,8 +607,6 @@ async function copyMultiSellImportText(btn) {
 setInterval(fetchData, 3000);
 fetchData();
 
-
-
 // ==========================================
 // UNIFIED MULTISELL & INVENTORY ADVISOR
 // ==========================================
@@ -611,19 +632,16 @@ async function openInventoryAdvisor(customText = null) {
     } else {
       res = await fetch('/api/inventory/advisor');
     }
-    if (!res.ok) throw new Error('Failed to load inventory advice');
+    if (!res.ok) throw new Error('API returned status ' + res.status);
     advisorData = await res.json();
     renderAdvisorView();
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8 text-rose-400 font-sans">Error: ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8 text-rose-400 font-sans">Error loading inventory: ${err.message}</td></tr>`;
   }
 }
 
-// Backward compatibility alias: clicking MultiSell opens this unified window
-
 window.openMultiSellModal = () => openInventoryAdvisor();
 window.openMultisell = () => openInventoryAdvisor();
-
 
 function closeInventoryAdvisor() {
   const modal = document.getElementById('advisor-modal');
@@ -667,36 +685,44 @@ function filterAdvisor(filterType) {
 function renderAdvisorView() {
   if (!advisorData) return;
 
-  const totalCount = advisorData.items.length;
-  const readyItems = advisorData.items.filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
+  const totalCount = advisorData.items ? advisorData.items.length : 0;
+  const readyItems = (advisorData.items || []).filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
 
-  document.getElementById('adv-total-val').textContent = fmtISK(advisorData.total_value);
-  document.getElementById('adv-total-count').textContent = `${totalCount} items evaluated`;
+  const totalValEl = document.getElementById('adv-total-val');
+  if (totalValEl) totalValEl.textContent = fmtISK(advisorData.total_value);
 
-  document.getElementById('adv-cost-val').textContent = fmtISK(advisorData.total_cost);
+  const totalCountEl = document.getElementById('adv-total-count');
+  if (totalCountEl) totalCountEl.textContent = `${totalCount} items evaluated`;
 
-  // Profit Card formatting
+  const costValEl = document.getElementById('adv-cost-val');
+  if (costValEl) costValEl.textContent = fmtISK(advisorData.total_cost);
+
   const pCard = document.getElementById('adv-profit-card');
   const pVal = document.getElementById('adv-profit-val');
   const mVal = document.getElementById('adv-margin-val');
-  const isProfit = advisorData.total_profit >= 0;
+  const isProfit = (advisorData.total_profit || 0) >= 0;
 
-  pVal.textContent = (isProfit ? '+' : '') + fmtISK(advisorData.total_profit);
+  if (pVal) pVal.textContent = (isProfit ? '+' : '') + fmtISK(advisorData.total_profit);
   const blendedMargin = advisorData.total_cost > 0 ? (advisorData.total_profit / advisorData.total_cost * 100).toFixed(1) : '0.0';
-  mVal.textContent = `${isProfit ? '+' : ''}${blendedMargin}% net return`;
+  if (mVal) mVal.textContent = `${isProfit ? '+' : ''}${blendedMargin}% net return`;
 
-  if (isProfit) {
-    pCard.className = "bg-emerald-950/20 border border-emerald-800/40 rounded-lg p-3";
-    pVal.className = "text-base font-bold text-emerald-300 mt-0.5";
-    mVal.className = "text-[11px] text-emerald-400/80";
-  } else {
-    pCard.className = "bg-rose-950/20 border border-rose-800/40 rounded-lg p-3";
-    pVal.className = "text-base font-bold text-rose-300 mt-0.5";
-    mVal.className = "text-[11px] text-rose-400/80";
+  if (pCard && pVal && mVal) {
+    if (isProfit) {
+      pCard.className = "bg-emerald-950/20 border border-emerald-800/40 rounded-lg p-3";
+      pVal.className = "text-base font-bold text-emerald-300 mt-0.5";
+      mVal.className = "text-[11px] text-emerald-400/80";
+    } else {
+      pCard.className = "bg-rose-950/20 border border-rose-800/40 rounded-lg p-3";
+      pVal.className = "text-base font-bold text-rose-300 mt-0.5";
+      mVal.className = "text-[11px] text-rose-400/80";
+    }
   }
 
-  document.getElementById('adv-ready-val').textContent = fmtISK(advisorData.ready_value);
-  document.getElementById('adv-ready-count').textContent = `${readyItems.length} items ready to list`;
+  const readyValEl = document.getElementById('adv-ready-val');
+  if (readyValEl) readyValEl.textContent = fmtISK(advisorData.ready_value);
+
+  const readyCountEl = document.getElementById('adv-ready-count');
+  if (readyCountEl) readyCountEl.textContent = `${readyItems.length} items ready to list`;
 
   renderAdvisorTable();
 }
@@ -704,8 +730,9 @@ function renderAdvisorView() {
 function renderAdvisorTable() {
   if (!advisorData) return;
   const tbody = document.getElementById('advisor-table-body');
+  if (!tbody) return;
 
-  let rows = advisorData.items;
+  let rows = advisorData.items || [];
   if (currentAdvisorFilter === 'ready') {
     rows = rows.filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
   } else if (currentAdvisorFilter === 'hold') {
@@ -715,13 +742,12 @@ function renderAdvisorTable() {
   }
 
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-500 font-sans">No items matching this filter.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-500 font-sans">No loose items matching this filter. (Items inside containers or other regions are ignored)</td></tr>';
     return;
   }
 
   let html = '';
   rows.forEach(item => {
-    // Desk Badge
     let deskBadge = '<span class="text-slate-400 font-semibold text-[10px] bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">UNMANAGED</span>';
     if (item.desk === 'EVERGREEN') {
       deskBadge = '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-950/70 text-cyan-300 border border-cyan-800">EVERGREEN</span>';
@@ -731,7 +757,6 @@ function renderAdvisorTable() {
       deskBadge = '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950/70 text-amber-300 border border-amber-800">HOLD</span>';
     }
 
-    // Action Badge
     let actionBadge = '';
     if (item.action_type === 'flip') {
       actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-950/80 border border-emerald-700 text-emerald-300">FAST FLIP</span>';
@@ -743,14 +768,12 @@ function renderAdvisorTable() {
       actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-indigo-950/80 border border-indigo-700 text-indigo-300">MARKET EXIT</span>';
     }
 
-    // Cost basis & Source Indicator
     let costDisplay = '<span class="text-slate-500 font-sans">--</span>';
     if (item.unit_cost > 0) {
       let tagColor = item.cost_source === 'WALLET' ? 'text-cyan-400' : (item.cost_source === 'LEDGER' ? 'text-amber-400' : 'text-slate-400');
       costDisplay = `<div>${fmtISK(item.unit_cost)}</div><div class="text-[9px] ${tagColor}">${item.cost_source}</div>`;
     }
 
-    // P&L Display
     let plDisplay = '';
     if (item.cost_source === 'UNKNOWN') {
       plDisplay = `<span class="text-slate-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-slate-500">Gross Proceeds</div>`;

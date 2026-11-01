@@ -205,6 +205,19 @@ async def api_inventory_advisor(request: Request):
 async def api_market_multisell_legacy(request: Request):
     return await api_inventory_advisor(request)
 
+import threading
+
+
+import threading
+
+@app.post("/api/sniper/run")
+def api_sniper_run():
+    if not STATE.get("sniper_running", False):
+        t = threading.Thread(target=run_sniper_subprocess, daemon=True)
+        t.start()
+        return {"status": "started", "sniper_running": True}
+    return {"status": "already_running", "sniper_running": True}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)

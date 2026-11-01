@@ -29,12 +29,15 @@ def load_cached_orders():
     return {"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0}
 
 def load_sniper_deals():
-    if os.path.exists(SNIPER_DEALS_FILE):
-        try:
-            with open(SNIPER_DEALS_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
+    for fpath in ["ledgers/live_deals.json", "ledgers/sniper_deals.json", "data/live_deals.json"]:
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+                    if data:
+                        import time; from datetime import datetime, timezone; STATE = getattr(__import__("app", fromlist=["STATE"]), "STATE", {}); STATE["last_sniper_run"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"); return data
+            except Exception:
+                pass
     return []
 
 def load_market_prices_cache():
