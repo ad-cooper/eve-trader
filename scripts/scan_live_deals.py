@@ -1,3 +1,4 @@
+from services.blacklist import load_active_blacklist
 #!/usr/bin/env python3
 """
 EVE Online Jita 4-4 High-Speed Deal Sniper (Velocity-Gated)
@@ -33,20 +34,6 @@ EXIT_FEE_JITA = 0.04605 # 1.23% broker + 3.375% sales tax (Hippie Father)
 CONCURRENT_WORKERS = 16
 MAX_CANDIDATE_BOOKS = 900
 
-EXCLUSION_BLACKLIST = [
-    "Precursor Turret",
-    "Protective Components",
-    "Capital Construction Components",
-    "Construction Components",
-    "Structure Components",
-    "Planetary Commodities",
-    "Fuel Block",
-    "Zero-Point Field Manipulator",
-    "Babaroga",
-    "Stormbringer",
-    "Skybreaker",
-    "Thunderchild"
-]
 
 def create_session():
     session = requests.Session()
@@ -209,8 +196,9 @@ def main():
     event_filter = "Radiance|Cerebral|Booster|Keypass|Cipher|Harvest|Tetrimon|Shortcut|Gauntlet|Medallion|Voucher|Token|Ticket|Pamphlet"
     xl_weapon_filter = "Dual Giga|Quad Mega|XL |Extra Large"
 
-    mask = ~df["group_name"].isin(EXCLUSION_BLACKLIST)
-    mask &= ~df["item_name"].isin(EXCLUSION_BLACKLIST)
+    bl_items, bl_groups, _ = load_active_blacklist()
+    mask = ~df["group_name"].isin(bl_groups)
+    mask &= ~df["item_name"].isin(bl_items)
     mask &= ~df["category_name"].isin(["Personalization", "SKINs", "Special Edition Assets", "Apparel"])
     mask &= ~df["item_name"].str.contains(event_filter, case=False, na=False)
     mask &= ~df["item_name"].str.contains(xl_weapon_filter, case=False, na=False)

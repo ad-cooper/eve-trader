@@ -1,3 +1,4 @@
+from services.blacklist import load_active_blacklist
 #!/usr/bin/env python3
 """
 EVE Online 50B Multi-Desk Waterfall Allocator (Strict Waterfall Partitioning)
@@ -30,24 +31,6 @@ CAPITAL_FLOORS = {
     "evergreen": 28.0e9
 }
 
-EXCLUSION_BLACKLIST = [
-    "Precursor Turret",
-    "Protective Components",
-    "Capital Construction Components",
-    "Construction Components",
-    "Structure Components",
-    "Planetary Commodities",
-    "Fuel Block",
-    "Zero-Point Field Manipulator",
-    "Babaroga",
-    "Stormbringer",
-    "Skybreaker",
-    "Thunderchild",
-    "Rhea",
-    "Anshar",
-    "Nomad",
-    "Ark"
-]
 
 def load_cached_market_telemetry() -> dict:
     if os.path.exists(MARKET_CACHE_FILE):
@@ -130,8 +113,9 @@ def load_market_universe():
 def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market_telemetry: dict, claimed_ids: set) -> list:
     # Base Sanity Filter
     mask = ~df["type_id"].isin(claimed_ids)
-    mask &= ~df["group_name"].isin(EXCLUSION_BLACKLIST)
-    mask &= ~df["item_name"].isin(EXCLUSION_BLACKLIST)
+    bl_items, bl_groups, _ = load_active_blacklist()
+    mask &= ~df["group_name"].isin(bl_groups)
+    mask &= ~df["item_name"].isin(bl_items)
     mask &= ~df["category_name"].isin(["Personalization", "SKINs", "Special Edition Assets", "Apparel"])
     mask &= ~df["item_name"].str.contains("Modified|Voucher|Token|Certificate", regex=True)
     if desk_type == "evergreen":

@@ -1,0 +1,98 @@
+{
+  "Precursor Turret": {
+    "type": "group",
+    "reason": "Abyssal triglavian component rebalance; irregular supply spikes",
+    "category": "patch_notes",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  },
+  "Fuel Block": {
+    "type": "group",
+    "reason": "High m3 volume freight bottleneck; poor profit-to-cargo ratio",
+    "category": "logistics",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  },
+  "Planetary Commodities": {
+    "type": "group",
+    "reason": "Equinox patch customs office tax rebalance; price volatility",
+    "category": "patch_notes",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  },
+  "Zero-Point Field Manipulator": {
+    "type": "item",
+    "reason": "T2 capital component speculation dump following balance pass",
+    "category": "market_trend",
+    "added_date": "2026-10-28",
+    "expires_at": "2026-12-01",
+    "active": true
+  },
+  "Stormbringer": {
+    "type": "item",
+    "reason": "Vorton projector capacitor nerfs reduced fleet demand",
+    "category": "meta_shift",
+    "added_date": "2026-10-29",
+    "expires_at": "2026-11-30",
+    "active": true
+  },
+  "Skybreaker": {
+    "type": "item",
+    "reason": "Low daily turnover; EDENCOM frigate doctrine stagnation",
+    "category": "meta_shift",
+    "added_date": "2026-10-29",
+    "expires_at": null,
+    "active": true
+  },
+  "Thunderchild": {
+    "type": "item",
+    "reason": "High capital commitment with long liquidation cycle (>14 days)",
+    "category": "velocity",
+    "added_date": "2026-10-29",
+    "expires_at": null,
+    "active": true
+  },
+  "Babaroga": {
+    "type": "item",
+    "reason": "New hull release price discovery phase; downward price slide",
+    "category": "market_trend",
+    "added_date": "2026-11-01",
+    "expires_at": "2026-11-20",
+    "active": true
+  },
+  "Rhea": {
+    "type": "item",
+    "reason": "Jump Freighter capital footprint exceeds safe desk line allocation",
+    "category": "capital_cap",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  },
+  "Anshar": {
+    "type": "item",
+    "reason": "Jump Freighter capital footprint exceeds safe desk line allocation",
+    "category": "capital_cap",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  },
+  "Nomad": {
+    "type": "item",
+    "reason": "Jump Freighter capital footprint exceeds safe desk line allocation",
+    "category": "capital_cap",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  },
+  "Ark": {
+    "type": "item",
+    "reason": "Jump Freighter capital footprint exceeds safe desk line allocation",
+    "category": "capital_cap",
+    "added_date": "2026-10-25",
+    "expires_at": null,
+    "active": true
+  }
+}
