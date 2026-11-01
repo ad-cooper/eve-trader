@@ -53,10 +53,11 @@
           <svg class="w-4 h-4 animate-spin hidden" id="spinner-missing" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
           <span id="text-missing">Missing Buy Orders</span>
         </button>
-        <button id="btn-multisell-nav" onclick="openMultiSellModal()" class="flex items-center gap-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 px-3.5 py-2 rounded text-sm font-semibold transition font-mono">
-          <span>MultiSell Stock</span>
+        <button id="btn-inventory-advisor" onclick="openInventoryAdvisor()" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/50 text-indigo-200 hover:text-white text-xs font-semibold shadow-sm transition">
+          <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+          MultiSell & Inventory Advisor
         </button>
-      </div>
+        </div>
     </header>
 
     <!-- Top Metrics Overview -->
@@ -456,6 +457,111 @@
     </div>
   </div>
 
-  <script src="/static/js/dashboard.js?v=stockout_v1"></script>
+  <!-- UNIFIED MULTISELL & INVENTORY ADVISOR MODAL -->
+  <div id="advisor-modal" class="fixed inset-0 z-50 hidden bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      
+      <!-- Header -->
+      <div class="px-6 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+        <div class="flex items-center gap-3">
+          <div class="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse"></div>
+          <div>
+            <h3 class="text-base font-bold text-slate-100 flex items-center gap-2">
+              Hangar MultiSell & Inventory Advisor
+            </h3>
+            <p class="text-xs text-slate-400">Live suggested sell pricing, cost basis, estimated profit/loss & MultiSell export</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="toggleCustomPasteDrawer()" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+            📋 Custom MultiSell Paste
+          </button>
+          <button onclick="reloadHangarAssets()" title="Reload Hangar" class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+            ⟳ Refresh Hangar
+          </button>
+          <button onclick="closeInventoryAdvisor()" class="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Collapsible Custom Paste Drawer -->
+      <div id="custom-paste-drawer" class="hidden px-6 py-3 bg-slate-950 border-b border-slate-800 transition-all">
+        <div class="text-xs text-slate-400 mb-1.5 font-medium">Paste in-game inventory list or item quantities:</div>
+        <textarea id="adv-custom-paste-text" rows="3" placeholder="Gila 2&#10;Pithum C-Type Medium Shield Booster 5" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500"></textarea>
+        <div class="flex justify-end gap-2 mt-2">
+          <button onclick="toggleCustomPasteDrawer()" class="px-3 py-1 bg-slate-800 text-xs text-slate-400 hover:text-slate-200 rounded">Cancel</button>
+          <button onclick="submitCustomPaste()" class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-semibold rounded">Analyze & Price MultiSell</button>
+        </div>
+      </div>
+
+      <!-- Financial KPI Summary Cards -->
+      <div class="grid grid-cols-4 gap-3 px-6 py-3 bg-slate-950/40 border-b border-slate-800">
+        <div class="bg-slate-800/40 border border-slate-700/50 rounded-lg p-3">
+          <div class="text-[10px] font-bold tracking-wider text-slate-400 uppercase">Gross Exit Value</div>
+          <div id="adv-total-val" class="text-base font-bold text-slate-100 mt-0.5">--</div>
+          <div id="adv-total-count" class="text-[11px] text-slate-400">0 items</div>
+        </div>
+        <div class="bg-slate-800/40 border border-slate-700/50 rounded-lg p-3">
+          <div class="text-[10px] font-bold tracking-wider text-slate-400 uppercase">Invested Cost Basis</div>
+          <div id="adv-cost-val" class="text-base font-bold text-slate-300 mt-0.5">--</div>
+          <div id="adv-cost-sub" class="text-[11px] text-slate-400">Recorded purchases</div>
+        </div>
+        <div id="adv-profit-card" class="bg-emerald-950/20 border border-emerald-800/40 rounded-lg p-3">
+          <div class="text-[10px] font-bold tracking-wider text-emerald-400 uppercase">Net Est. Profit / Loss</div>
+          <div id="adv-profit-val" class="text-base font-bold text-emerald-300 mt-0.5">--</div>
+          <div id="adv-margin-val" class="text-[11px] text-emerald-400/80">0.0% net margin</div>
+        </div>
+        <div class="bg-indigo-950/20 border border-indigo-800/40 rounded-lg p-3">
+          <div class="text-[10px] font-bold tracking-wider text-indigo-400 uppercase">Ready to Liquidate</div>
+          <div id="adv-ready-val" class="text-base font-bold text-indigo-300 mt-0.5">--</div>
+          <div id="adv-ready-count" class="text-[11px] text-indigo-400/80">0 items ready</div>
+        </div>
+      </div>
+
+      <!-- Filter Tabs & MultiSell Clipboard Actions -->
+      <div class="px-6 py-2.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+        <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+          <button onclick="filterAdvisor('all')" id="tab-adv-all" class="px-2.5 py-1 rounded font-semibold bg-slate-800 text-slate-200 transition">All Items</button>
+          <button onclick="filterAdvisor('ready')" id="tab-adv-ready" class="px-2.5 py-1 rounded font-semibold text-slate-400 hover:text-slate-200 transition">Ready to Sell</button>
+          <button onclick="filterAdvisor('hold')" id="tab-adv-hold" class="px-2.5 py-1 rounded font-semibold text-slate-400 hover:text-slate-200 transition">Hold Cycle</button>
+          <button onclick="filterAdvisor('unmanaged')" id="tab-adv-unmanaged" class="px-2.5 py-1 rounded font-semibold text-slate-400 hover:text-slate-200 transition">Unmanaged / Custom</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="copyAdvisorMultisell('ready')" class="px-3 py-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/50 text-emerald-200 rounded text-xs font-semibold flex items-center gap-1.5 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"/></svg>
+            Copy Ready-to-Sell (MultiSell)
+          </button>
+          <button onclick="copyAdvisorMultisell('all')" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 rounded text-xs font-semibold transition">
+            Copy All Strategy Prices
+          </button>
+        </div>
+      </div>
+
+      <!-- Table Content -->
+      <div class="flex-1 overflow-y-auto px-6 py-3">
+        <table class="w-full text-left border-collapse text-xs">
+          <thead>
+            <tr class="border-b border-slate-800 text-slate-400 text-[11px] uppercase tracking-wider">
+              <th class="py-2.5 px-3">Item Name</th>
+              <th class="py-2.5 px-2">Desk</th>
+              <th class="py-2.5 px-2 text-right">Qty</th>
+              <th class="py-2.5 px-2 text-right">Cost Basis</th>
+              <th class="py-2.5 px-2 text-right">Live Ask</th>
+              <th class="py-2.5 px-2 text-right font-bold text-slate-300">Suggested Sell</th>
+              <th class="py-2.5 px-3 text-right">Est. Net P&L</th>
+              <th class="py-2.5 px-3 text-center">Action</th>
+            </tr>
+          </thead>
+          <tbody id="advisor-table-body" class="divide-y divide-slate-800/60 font-mono">
+            <tr><td colspan="8" class="text-center py-8 text-slate-500">Loading hangar inventory telemetry...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="/static/js/dashboard.js?v=advisor_clean_v6"></script>
 </body>
 </html>

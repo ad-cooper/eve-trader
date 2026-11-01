@@ -186,6 +186,28 @@ async def api_multisell_price(req: MultiSellRequest):
     data = get_live_multisell_prices(req.raw_text)
     return JSONResponse(data)
 
+
+from fastapi import Request
+
+@app.api_route("/api/inventory/advisor", methods=["GET", "POST"])
+async def api_inventory_advisor(request: Request):
+    from services.market import get_live_multisell_prices
+    raw_text = None
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            raw_text = body.get("raw_text")
+        except Exception:
+            pass
+    return get_live_multisell_prices(raw_text=raw_text)
+
+@app.post("/api/market/multisell")
+async def api_market_multisell_legacy(request: Request):
+    return await api_inventory_advisor(request)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+
+
+

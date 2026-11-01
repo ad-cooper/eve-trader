@@ -583,3 +583,206 @@ async function copyMultiSellImportText(btn) {
 
 setInterval(fetchData, 3000);
 fetchData();
+
+
+
+// ==========================================
+// UNIFIED MULTISELL & INVENTORY ADVISOR
+// ==========================================
+let advisorData = null;
+let currentAdvisorFilter = 'all';
+
+async function openInventoryAdvisor(customText = null) {
+  const modal = document.getElementById('advisor-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+
+  const tbody = document.getElementById('advisor-table-body');
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-400 font-sans"><div class="inline-block animate-spin mr-2">⟳</div> Scanning inventory, live Jita books & cost basis...</td></tr>';
+
+  try {
+    let res;
+    if (customText && customText.trim()) {
+      res = await fetch('/api/inventory/advisor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw_text: customText })
+      });
+    } else {
+      res = await fetch('/api/inventory/advisor');
+    }
+    if (!res.ok) throw new Error('Failed to load inventory advice');
+    advisorData = await res.json();
+    renderAdvisorView();
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="8" class="text-center py-8 text-rose-400 font-sans">Error: ${err.message}</td></tr>`;
+  }
+}
+
+// Backward compatibility alias: clicking MultiSell opens this unified window
+
+window.openMultiSellModal = () => openInventoryAdvisor();
+window.openMultisell = () => openInventoryAdvisor();
+
+
+function closeInventoryAdvisor() {
+  const modal = document.getElementById('advisor-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function toggleCustomPasteDrawer() {
+  const drawer = document.getElementById('custom-paste-drawer');
+  if (drawer) drawer.classList.toggle('hidden');
+}
+
+function submitCustomPaste() {
+  const textarea = document.getElementById('adv-custom-paste-text');
+  if (!textarea || !textarea.value.trim()) return;
+  openInventoryAdvisor(textarea.value.trim());
+}
+
+function reloadHangarAssets() {
+  const textarea = document.getElementById('adv-custom-paste-text');
+  if (textarea) textarea.value = '';
+  const drawer = document.getElementById('custom-paste-drawer');
+  if (drawer) drawer.classList.add('hidden');
+  openInventoryAdvisor(null);
+}
+
+function filterAdvisor(filterType) {
+  currentAdvisorFilter = filterType;
+  ['all', 'ready', 'hold', 'unmanaged'].forEach(t => {
+    const btn = document.getElementById(`tab-adv-${t}`);
+    if (btn) {
+      if (t === filterType) {
+        btn.className = "px-2.5 py-1 rounded font-semibold bg-slate-800 text-slate-200 transition";
+      } else {
+        btn.className = "px-2.5 py-1 rounded font-semibold text-slate-400 hover:text-slate-200 transition";
+      }
+    }
+  });
+  renderAdvisorTable();
+}
+
+function renderAdvisorView() {
+  if (!advisorData) return;
+
+  const totalCount = advisorData.items.length;
+  const readyItems = advisorData.items.filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
+
+  document.getElementById('adv-total-val').textContent = fmtISK(advisorData.total_value);
+  document.getElementById('adv-total-count').textContent = `${totalCount} items evaluated`;
+
+  document.getElementById('adv-cost-val').textContent = fmtISK(advisorData.total_cost);
+
+  // Profit Card formatting
+  const pCard = document.getElementById('adv-profit-card');
+  const pVal = document.getElementById('adv-profit-val');
+  const mVal = document.getElementById('adv-margin-val');
+  const isProfit = advisorData.total_profit >= 0;
+
+  pVal.textContent = (isProfit ? '+' : '') + fmtISK(advisorData.total_profit);
+  const blendedMargin = advisorData.total_cost > 0 ? (advisorData.total_profit / advisorData.total_cost * 100).toFixed(1) : '0.0';
+  mVal.textContent = `${isProfit ? '+' : ''}${blendedMargin}% net return`;
+
+  if (isProfit) {
+    pCard.className = "bg-emerald-950/20 border border-emerald-800/40 rounded-lg p-3";
+    pVal.className = "text-base font-bold text-emerald-300 mt-0.5";
+    mVal.className = "text-[11px] text-emerald-400/80";
+  } else {
+    pCard.className = "bg-rose-950/20 border border-rose-800/40 rounded-lg p-3";
+    pVal.className = "text-base font-bold text-rose-300 mt-0.5";
+    mVal.className = "text-[11px] text-rose-400/80";
+  }
+
+  document.getElementById('adv-ready-val').textContent = fmtISK(advisorData.ready_value);
+  document.getElementById('adv-ready-count').textContent = `${readyItems.length} items ready to list`;
+
+  renderAdvisorTable();
+}
+
+function renderAdvisorTable() {
+  if (!advisorData) return;
+  const tbody = document.getElementById('advisor-table-body');
+
+  let rows = advisorData.items;
+  if (currentAdvisorFilter === 'ready') {
+    rows = rows.filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
+  } else if (currentAdvisorFilter === 'hold') {
+    rows = rows.filter(i => i.action_type === 'hold');
+  } else if (currentAdvisorFilter === 'unmanaged') {
+    rows = rows.filter(i => i.desk === 'UNMANAGED');
+  }
+
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-500 font-sans">No items matching this filter.</td></tr>';
+    return;
+  }
+
+  let html = '';
+  rows.forEach(item => {
+    // Desk Badge
+    let deskBadge = '<span class="text-slate-400 font-semibold text-[10px] bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">UNMANAGED</span>';
+    if (item.desk === 'EVERGREEN') {
+      deskBadge = '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-950/70 text-cyan-300 border border-cyan-800">EVERGREEN</span>';
+    } else if (item.desk === 'TACTICAL') {
+      deskBadge = '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-950/70 text-purple-300 border border-purple-800">TACTICAL</span>';
+    } else if (item.desk === 'HOLD') {
+      deskBadge = '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950/70 text-amber-300 border border-amber-800">HOLD</span>';
+    }
+
+    // Action Badge
+    let actionBadge = '';
+    if (item.action_type === 'flip') {
+      actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-950/80 border border-emerald-700 text-emerald-300">FAST FLIP</span>';
+    } else if (item.action_type === 'met') {
+      actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-blue-950/80 border border-blue-700 text-blue-300">TARGET MET</span>';
+    } else if (item.action_type === 'hold') {
+      actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-amber-950/80 border border-amber-700 text-amber-300">HOLD CYCLE</span>';
+    } else {
+      actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-indigo-950/80 border border-indigo-700 text-indigo-300">MARKET EXIT</span>';
+    }
+
+    // Cost basis & Source Indicator
+    let costDisplay = '<span class="text-slate-500 font-sans">--</span>';
+    if (item.unit_cost > 0) {
+      let tagColor = item.cost_source === 'WALLET' ? 'text-cyan-400' : (item.cost_source === 'LEDGER' ? 'text-amber-400' : 'text-slate-400');
+      costDisplay = `<div>${fmtISK(item.unit_cost)}</div><div class="text-[9px] ${tagColor}">${item.cost_source}</div>`;
+    }
+
+    // P&L Display
+    let plDisplay = '';
+    if (item.cost_source === 'UNKNOWN') {
+      plDisplay = `<span class="text-slate-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-slate-500">Gross Proceeds</div>`;
+    } else if (item.profit >= 0) {
+      plDisplay = `<span class="text-emerald-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-emerald-500/80 font-bold">+${item.margin_pct}%</div>`;
+    } else {
+      plDisplay = `<span class="text-rose-400 font-bold">${fmtISK(item.profit)}</span><div class="text-[9px] text-rose-500/80 font-bold">${item.margin_pct}%</div>`;
+    }
+
+    const liveAskStr = item.lowest_ask ? fmtISK(item.lowest_ask) : '<span class="text-amber-500 font-sans font-bold text-[10px]">STOCKOUT</span>';
+
+    html += `
+      <tr class="hover:bg-slate-800/40 transition">
+        <td class="py-2.5 px-3 text-slate-200 font-medium font-sans">${item.name}</td>
+        <td class="py-2.5 px-2">${deskBadge}</td>
+        <td class="py-2.5 px-2 text-right text-slate-300">${item.qty}</td>
+        <td class="py-2.5 px-2 text-right font-sans">${costDisplay}</td>
+        <td class="py-2.5 px-2 text-right text-slate-300">${liveAskStr}</td>
+        <td class="py-2.5 px-2 text-right font-bold text-slate-100">${fmtISK(item.recommended_sell)}</td>
+        <td class="py-2.5 px-3 text-right font-sans">${plDisplay}</td>
+        <td class="py-2.5 px-3 text-center">${actionBadge}</td>
+      </tr>
+    `;
+  });
+
+  tbody.innerHTML = html;
+}
+
+function copyAdvisorMultisell(type) {
+  if (!advisorData) return;
+  const text = (type === 'ready') ? advisorData.ready_multisell_text : advisorData.multisell_text;
+  navigator.clipboard.writeText(text).then(() => {
+    alert(`Copied ${type === 'ready' ? 'Ready-to-Sell' : 'All Strategy'} items in EVE MultiSell format!`);
+  });
+}

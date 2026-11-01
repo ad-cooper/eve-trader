@@ -4,6 +4,7 @@ import json
 import duckdb
 import requests
 from datetime import datetime, timezone
+from collections import defaultdict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,12 +41,6 @@ def fetch_lowest_sell_order(session: requests.Session, type_id: int):
     return type_id, None
 
 def fetch_top_buy_order(session: requests.Session, type_id: int):
-    """
-    Finds the highest buy order competing in the Jita trading cluster:
-    1. Direct station orders at Jita 4-4 (60003760)
-    2. Region-wide buy orders in The Forge
-    3. Upwell Citadel buy orders in Jita / Perimeter covering Jita
-    """
     url = f"https://esi.evetech.net/latest/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=buy&type_id={type_id}"
     try:
         r = session.get(url, timeout=7)
@@ -64,7 +59,7 @@ def fetch_top_buy_order(session: requests.Session, type_id: int):
                 # 2. Region-wide order
                 elif rng == "region":
                     competing.append(o["price"])
-                # 3. Upwell Citadel orders reaching Jita 4-4 (must have range >= 1 or region)
+                # 3. Upwell Citadel in Jita/Perimeter hub covering Jita 4-4
                 elif loc and loc >= 1_000_000_000_000 and rng in ["1", "2", "3", "4", "5", "region"]:
                     competing.append(o["price"])
 
@@ -168,6 +163,106 @@ def parse_multisell_export_text(raw_text: str):
                 items.append({"name": line.strip(), "qty": 1})
     return items
 
+def get_historical_ledger_targets(type_ids: list) -> dict:
+    if not type_ids:
+        return {}
+    try:
+        con = duckdb.connect(DUCKDB_PATH, read_only=True)
+        has_table = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'ledger_history'").fetchone()[0]
+        if has_table == 0:
+            con.close()
+            return {}
+        id_str = ",".join(str(int(t)) for t in set(type_ids))
+        query = f"""
+            WITH RankedHistory AS (
+                SELECT 
+                    type_id,
+                    name,
+                    desk_type,
+                    target_buy,
+                    target_sell,
+                    snapshot_time,
+                    ROW_NUMBER() OVER(PARTITION BY type_id ORDER BY snapshot_time DESC) as rn
+                FROM ledger_history
+                WHERE type_id IN ({id_str})
+            )
+            SELECT type_id, name, desk_type, target_buy, target_sell 
+            FROM RankedHistory 
+            WHERE rn = 1;
+        """
+        res = con.execute(query).fetchall()
+        con.close()
+        return {
+            r[0]: {
+                "name": r[1],
+                "desk": str(r[2]).upper(),
+                "target_buy": float(r[3]),
+                "target_sell": float(r[4])
+            }
+            for r in res
+        }
+    except Exception:
+        return {}
+
+def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
+    if not type_ids:
+        return {}
+    cost_map = {}
+
+    # 1. From character wallet buy transactions (exact executed fill price)
+    try:
+        from services.esi import fetch_wallet_transactions
+        txs = fetch_wallet_transactions()
+        if txs:
+            buys_by_type = defaultdict(list)
+            for tx in txs:
+                if tx.get("is_buy"):
+                    buys_by_type[tx["type_id"]].append((tx.get("quantity", 1), tx.get("unit_price", 0.0)))
+            for tid in type_ids:
+                if tid in buys_by_type:
+                    total_q = sum(q for q, p in buys_by_type[tid])
+                    if total_q > 0:
+                        avg_p = sum(q * p for q, p in buys_by_type[tid]) / total_q
+                        cost_map[tid] = {"unit_cost": avg_p, "source": "WALLET"}
+    except Exception:
+        pass
+
+    # 2. From historical ledger snapshots (target_buy)
+    for tid in type_ids:
+        if tid not in cost_map and tid in history_map:
+            tb = history_map[tid].get("target_buy")
+            if tb and tb > 0:
+                cost_map[tid] = {"unit_cost": float(tb), "source": "LEDGER"}
+
+    # 3. Fallback: 30d VWAP from DuckDB forge_market_history for unmatched items
+    unmatched_tids = [tid for tid in type_ids if tid not in cost_map]
+    if unmatched_tids:
+        try:
+            con = duckdb.connect(DUCKDB_PATH, read_only=True)
+            id_str = ",".join(str(int(t)) for t in set(unmatched_tids))
+            query = f"""
+                SELECT 
+                    type_id, 
+                    SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap
+                FROM forge_market_history
+                WHERE type_id IN ({id_str}) AND date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history)
+                GROUP BY type_id;
+            """
+            vwap_rows = con.execute(query).fetchall()
+            con.close()
+            for r in vwap_rows:
+                if r[1] and r[1] > 0:
+                    cost_map[r[0]] = {"unit_cost": float(r[1]), "source": "EST_VWAP"}
+        except Exception:
+            pass
+
+    # 4. Unknown fallback
+    for tid in type_ids:
+        if tid not in cost_map:
+            cost_map[tid] = {"unit_cost": 0.0, "source": "UNKNOWN"}
+
+    return cost_map
+
 def get_live_multisell_prices(raw_text: str = None):
     targets = []
     if raw_text and raw_text.strip():
@@ -183,16 +278,53 @@ def get_live_multisell_prices(raw_text: str = None):
             assets = fetch_character_assets()
 
         if assets:
+            container_ids = set()
+            for a in assets:
+                if a.get("location_type") == "item":
+                    container_ids.add(a.get("location_id"))
+                loc = a.get("location_id")
+                if (loc == JITA_STATION_ID or (loc and loc >= 1_000_000_000_000)) and a.get("is_singleton"):
+                    container_ids.add(a.get("item_id"))
+
             type_counts = {}
             for a in assets:
+                loc = a.get("location_id")
+                loc_type = a.get("location_type")
+                loc_flag = a.get("location_flag")
+
+                is_hub = (loc == JITA_STATION_ID) or (loc is not None and loc >= 1_000_000_000_000)
+                if not is_hub:
+                    continue
+
+                if loc_flag != "Hangar" or loc_type not in ["station", "other"]:
+                    continue
+
+                if loc_type == "item" or loc in container_ids or a.get("is_singleton"):
+                    continue
+
                 tid = a["type_id"]
                 type_counts[tid] = type_counts.get(tid, 0) + a.get("quantity", 1)
+
             name_map = resolve_type_ids(list(type_counts.keys()))
             for tid, qty in type_counts.items():
                 targets.append({"type_id": tid, "name": name_map.get(tid, f"Type {tid}"), "qty": qty})
 
     if not targets:
-        return {"multisell_text": "", "items": [], "total_items": 0, "total_value": 0.0}
+        return {
+            "multisell_text": "",
+            "ready_multisell_text": "",
+            "items": [],
+            "total_items": 0,
+            "total_value": 0.0,
+            "total_cost": 0.0,
+            "total_profit": 0.0,
+            "ready_value": 0.0,
+            "ready_cost": 0.0,
+            "ready_profit": 0.0,
+            "hold_value": 0.0,
+            "hold_cost": 0.0,
+            "hold_profit": 0.0
+        }
 
     session = create_session()
     type_ids = [t["type_id"] for t in targets]
@@ -204,24 +336,83 @@ def get_live_multisell_prices(raw_text: str = None):
             tid, lowest_ask = fut.result()
             lowest_asks[tid] = lowest_ask
 
+    history_map = get_historical_ledger_targets(type_ids)
+    cost_basis_map = get_cost_basis_map(type_ids, history_map)
+
     items_result = []
     multisell_lines = []
+    ready_lines = []
+    
     total_value = 0.0
+    total_cost = 0.0
+    total_profit = 0.0
+    
+    ready_value = 0.0
+    ready_cost = 0.0
+    ready_profit = 0.0
+    
+    hold_value = 0.0
+    hold_cost = 0.0
+    hold_profit = 0.0
 
     for t in targets:
         tid = t["type_id"]
         name = t["name"]
         qty = t["qty"]
         lowest_ask = lowest_asks.get(tid)
+        hist = history_map.get(tid)
+        cost_info = cost_basis_map.get(tid, {"unit_cost": 0.0, "source": "UNKNOWN"})
+        unit_cost = cost_info.get("unit_cost", 0.0)
+        cost_source = cost_info.get("source", "UNKNOWN")
 
-        if lowest_ask is not None and lowest_ask > 0.01:
-            rec_sell = round(lowest_ask - 0.01, 2)
+        desk = hist["desk"] if hist else "UNMANAGED"
+        target_sell = hist["target_sell"] if hist else None
+
+        # Suggested Sell Price & Action Logic
+        if desk == "EVERGREEN":
+            action = "FAST FLIP"
+            action_type = "flip"
+            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
+        elif desk in ["TACTICAL", "HOLD"]:
+            if lowest_ask and target_sell and lowest_ask >= target_sell:
+                action = "TARGET MET"
+                action_type = "met"
+                rec_sell = round(lowest_ask - 0.01, 2)
+            elif target_sell:
+                action = "HOLD CYCLE"
+                action_type = "hold"
+                rec_sell = round(target_sell, 2)
+            else:
+                action = "FAST FLIP"
+                action_type = "flip"
+                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else 1000000.0
         else:
-            rec_sell = 1000000.0
-            lowest_ask = rec_sell
+            action = "MARKET EXIT"
+            action_type = "unmanaged"
+            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (unit_cost * 1.05 if unit_cost > 0 else 1000000.0)
 
+        # Financial Calculations (Proceeds vs Costs)
         line_value = rec_sell * qty
+        effective_cost_unit = unit_cost * (1.0 + BUY_FEE_CITADEL) if unit_cost > 0 else 0.0
+        line_cost = effective_cost_unit * qty
+        net_proceeds_unit = rec_sell * (1.0 - EXIT_FEE_JITA)
+        profit_unit = net_proceeds_unit - effective_cost_unit
+        line_profit = profit_unit * qty
+        margin_pct = (profit_unit / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
+
         total_value += line_value
+        total_cost += line_cost
+        total_profit += line_profit
+
+        if action_type in ["flip", "met", "unmanaged"]:
+            ready_value += line_value
+            ready_cost += line_cost
+            ready_profit += line_profit
+            ready_lines.append(f"{name}\t{rec_sell:.2f}")
+        else:
+            hold_value += line_value
+            hold_cost += line_cost
+            hold_profit += line_profit
 
         multisell_lines.append(f"{name}\t{rec_sell:.2f}")
 
@@ -229,17 +420,35 @@ def get_live_multisell_prices(raw_text: str = None):
             "type_id": tid,
             "name": name,
             "qty": qty,
+            "desk": desk,
+            "target_sell": target_sell,
             "lowest_ask": lowest_ask,
+            "action": action,
+            "action_type": action_type,
             "recommended_sell": rec_sell,
-            "line_value": line_value
+            "line_value": round(line_value, 2),
+            "unit_cost": round(unit_cost, 2),
+            "line_cost": round(line_cost, 2),
+            "profit": round(line_profit, 2),
+            "margin_pct": round(margin_pct, 1),
+            "cost_source": cost_source
         })
 
     items_result.sort(key=lambda x: x["line_value"], reverse=True)
     return {
         "multisell_text": "\n".join(multisell_lines),
+        "ready_multisell_text": "\n".join(ready_lines),
         "items": items_result,
         "total_items": len(items_result),
-        "total_value": total_value
+        "total_value": round(total_value, 2),
+        "total_cost": round(total_cost, 2),
+        "total_profit": round(total_profit, 2),
+        "ready_value": round(ready_value, 2),
+        "ready_cost": round(ready_cost, 2),
+        "ready_profit": round(ready_profit, 2),
+        "hold_value": round(hold_value, 2),
+        "hold_cost": round(hold_cost, 2),
+        "hold_profit": round(hold_profit, 2)
     }
 
 def get_live_missing_buys(desk_filter: str = "all"):
