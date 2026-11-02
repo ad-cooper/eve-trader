@@ -214,9 +214,15 @@ def fetch_character_assets():
 
     return eligible_assets
 
-def load_cached_assets():
+def load_cached_assets(max_age_seconds: int = 300, force: bool = False, *args, **kwargs):
+    if force:
+        return []
     if os.path.exists(ASSETS_CACHE_FILE):
         try:
+            import time
+            mtime = os.path.getmtime(ASSETS_CACHE_FILE)
+            if (time.time() - mtime) > max_age_seconds:
+                return []
             with open(ASSETS_CACHE_FILE, "r") as f:
                 return json.load(f)
         except Exception:

@@ -613,7 +613,7 @@ fetchData();
 let advisorData = null;
 let currentAdvisorFilter = 'all';
 
-async function openInventoryAdvisor(customText = null) {
+async function openInventoryAdvisor(customText = null, forceRefresh = false) {
   const modal = document.getElementById('advisor-modal');
   if (!modal) return;
   modal.classList.remove('hidden');
@@ -630,7 +630,7 @@ async function openInventoryAdvisor(customText = null) {
         body: JSON.stringify({ raw_text: customText })
       });
     } else {
-      res = await fetch('/api/inventory/advisor');
+      const url = forceRefresh ? '/api/inventory/advisor?force=true' : '/api/inventory/advisor'; res = await fetch(url);
     }
     if (!res.ok) throw new Error('API returned status ' + res.status);
     advisorData = await res.json();
@@ -664,7 +664,7 @@ function reloadHangarAssets() {
   if (textarea) textarea.value = '';
   const drawer = document.getElementById('custom-paste-drawer');
   if (drawer) drawer.classList.add('hidden');
-  openInventoryAdvisor(null);
+  openInventoryAdvisor(null, true);
 }
 
 function filterAdvisor(filterType) {

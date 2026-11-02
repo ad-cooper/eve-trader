@@ -37,3 +37,4 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+data/jeveassets_transactions.csv

@@ -193,13 +193,16 @@ from fastapi import Request
 async def api_inventory_advisor(request: Request):
     from services.market import get_live_multisell_prices
     raw_text = None
+    force_refresh = request.query_params.get("force") == "true"
     if request.method == "POST":
         try:
             body = await request.json()
             raw_text = body.get("raw_text")
+            if body.get("force"):
+                force_refresh = True
         except Exception:
             pass
-    return get_live_multisell_prices(raw_text=raw_text)
+    return get_live_multisell_prices(raw_text=raw_text, force_refresh=force_refresh)
 
 @app.post("/api/market/multisell")
 async def api_market_multisell_legacy(request: Request):

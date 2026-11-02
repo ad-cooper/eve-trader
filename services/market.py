@@ -227,14 +227,52 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
     except Exception:
         pass
 
-    # 2. From historical ledger snapshots (target_buy)
+    # 2. From jEveAssets lifetime wallet buys in DuckDB (exact historical executed fill)
+    unmatched_for_jeve = [tid for tid in type_ids if tid not in cost_map]
+    if unmatched_for_jeve:
+        try:
+            name_map = resolve_type_ids(unmatched_for_jeve)
+            name_to_tid = {v: k for k, v in name_map.items() if v}
+            if name_to_tid:
+                con = duckdb.connect(DUCKDB_PATH, read_only=True)
+                quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in name_to_tid.keys())
+                jeve_query = f"""
+                WITH ranked AS (
+                    SELECT 
+                        item_name,
+                        price,
+                        quantity,
+                        date,
+                        ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY date DESC) as rn
+                    FROM historical_wallet_buys
+                    WHERE item_name IN ({quoted_names})
+                )
+                SELECT 
+                    item_name, 
+                    ROUND(SUM(price * quantity) / SUM(quantity), 2) as avg_price,
+                    MAX(date) as last_date
+                FROM ranked
+                WHERE rn <= 10
+                GROUP BY item_name;
+                """
+                jeve_rows = con.execute(jeve_query).fetchall()
+                con.close()
+                for r in jeve_rows:
+                    iname, avg_p, last_dt = r[0], r[1], r[2]
+                    tid = name_to_tid.get(iname)
+                    if tid and avg_p and avg_p > 0:
+                        cost_map[tid] = {"unit_cost": float(avg_p), "source": "JEVEASSETS"}
+        except Exception:
+            pass
+
+    # 3. From historical ledger snapshots (target_buy)
     for tid in type_ids:
         if tid not in cost_map and tid in history_map:
             tb = history_map[tid].get("target_buy")
             if tb and tb > 0:
                 cost_map[tid] = {"unit_cost": float(tb), "source": "LEDGER"}
 
-    # 3. Fallback: 30d VWAP from DuckDB forge_market_history for unmatched items
+    # 4. Fallback: 30d VWAP from DuckDB forge_market_history for unmatched items
     unmatched_tids = [tid for tid in type_ids if tid not in cost_map]
     if unmatched_tids:
         try:
@@ -256,14 +294,14 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
         except Exception:
             pass
 
-    # 4. Unknown fallback
+    # 5. Unknown fallback
     for tid in type_ids:
         if tid not in cost_map:
             cost_map[tid] = {"unit_cost": 0.0, "source": "UNKNOWN"}
 
     return cost_map
 
-def get_live_multisell_prices(raw_text: str = None):
+def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False):
     targets = []
     if raw_text and raw_text.strip():
         parsed = parse_multisell_export_text(raw_text)
@@ -273,7 +311,7 @@ def get_live_multisell_prices(raw_text: str = None):
             if tid:
                 targets.append({"type_id": tid, "name": p["name"], "qty": p["qty"]})
     else:
-        assets = load_cached_assets()
+        assets = load_cached_assets(max_age_seconds=300, force=force_refresh)
         if not assets:
             assets = fetch_character_assets()
 
@@ -296,7 +334,7 @@ def get_live_multisell_prices(raw_text: str = None):
                 if not is_hub:
                     continue
 
-                if loc_flag != "Hangar" or loc_type not in ["station", "other"]:
+                if loc_flag not in ["Hangar", "Deliveries"] or loc_type not in ["station", "other"]:
                     continue
 
                 if loc_type == "item" or loc in container_ids or a.get("is_singleton"):
