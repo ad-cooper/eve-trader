@@ -301,6 +301,186 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
 
     return cost_map
 
+def get_active_sell_orders_map() -> dict:
+    """
+    Loads cached character orders and groups active sell orders by integer type_id.
+    Handles dict keyed by string type_id: { "53710": {"order_id": ..., "price": ..., "volume_remain": ...} }
+    Returns: { type_id_int: [ {order_id, price, volume_remain}, ... ] }
+    """
+    try:
+        from services.ledgers import load_cached_orders
+        raw = load_cached_orders()
+        sells_raw = raw.get("sells", {}) if isinstance(raw, dict) else {}
+        
+        sells_by_tid = {}
+        for k, v in sells_raw.items():
+            try:
+                tid = int(k)
+            except (ValueError, TypeError):
+                continue
+
+            order_list = v if isinstance(v, list) else [v]
+            if tid not in sells_by_tid:
+                sells_by_tid[tid] = []
+
+            for o in order_list:
+                sells_by_tid[tid].append({
+                    "order_id": o.get("order_id"),
+                    "price": float(o.get("price", 0.0)),
+                    "volume_remain": int(o.get("volume_remain", 0)),
+                    "volume_total": int(o.get("volume_total", o.get("volume_remain", 0)))
+                })
+
+        return sells_by_tid
+    except Exception as e:
+        print(f"[!] Error building active sells map: {e}")
+        return {}
+
+
+
+def get_hold_desk_params(type_ids: list, name_map: dict) -> dict:
+    """
+    Builds a lookup of holding parameters for Hold and Tactical desk items.
+    Resolution order for date_acquired:
+      1. Explicit CSV override (hold_ledger.csv or tactical_ledger.csv)
+      2. Live ESI wallet transactions (most recent buy date)
+      3. DuckDB historical_wallet_buys (MAX date)
+      4. DuckDB clean_transactions (MAX buy tx_date)
+      5. DuckDB ledger_history (MAX snapshot_time)
+    """
+    if not type_ids:
+        return {}
+
+    from datetime import datetime, timezone
+    import duckdb
+    from services.ledgers import load_desk_csv
+
+    now_utc = datetime.now(timezone.utc)
+    hold_params = {}
+
+    # 1. Read CSV overrides from both hold_ledger and tactical_ledger
+    csv_meta = {}
+    for fname in ["hold_ledger.csv", "tactical_ledger.csv"]:
+        rows = load_desk_csv(fname)
+        for r in rows:
+            try:
+                tid = int(r.get("type_id"))
+                raw_d = str(r.get("date_acquired", "")).strip()
+                date_val = raw_d if raw_d and raw_d.lower() not in ("none", "nan") else None
+                raw_days = str(r.get("max_days", "")).strip()
+                days_val = int(raw_days) if raw_days.isdigit() else 60
+                csv_meta[tid] = {"date_acquired": date_val, "max_days": days_val}
+            except (ValueError, TypeError):
+                continue
+
+    # 2. Query live ESI wallet transactions for most recent buy date
+    esi_latest_buys = {}
+    try:
+        from services.esi import fetch_wallet_transactions
+        txs = fetch_wallet_transactions() or []
+        for tx in txs:
+            if tx.get("is_buy"):
+                tid = tx.get("type_id")
+                raw_d = tx.get("date")
+                if tid in type_ids and raw_d:
+                    try:
+                        clean_iso = str(raw_d).replace("Z", "+00:00")
+                        d_obj = datetime.fromisoformat(clean_iso)
+                        if tid not in esi_latest_buys or d_obj > esi_latest_buys[tid]:
+                            esi_latest_buys[tid] = d_obj
+                    except Exception:
+                        pass
+    except Exception as e:
+        print("[!] Warning reading ESI wallet buy dates:", e)
+
+    # 3. Query DuckDB for MAX(date) if not in live ESI buffer
+    db_latest = {}
+    try:
+        con = duckdb.connect(DUCKDB_PATH, read_only=True)
+        names_to_lookup = [name_map.get(tid) for tid in type_ids if name_map.get(tid)]
+        if names_to_lookup:
+            clean_names = [n.replace("'", "''") for n in names_to_lookup]
+            quoted_names = ",".join("'" + cn + "'" for cn in clean_names)
+            q1 = f"SELECT item_name, MAX(date) FROM historical_wallet_buys WHERE item_name IN ({quoted_names}) GROUP BY item_name"
+            for row in con.execute(q1).fetchall():
+                if row[1]:
+                    db_latest[row[0]] = row[1]
+
+            q_clean = f"SELECT item_name, MAX(tx_date) FROM clean_transactions WHERE tx_type = 'buy' AND item_name IN ({quoted_names}) GROUP BY item_name"
+            for row in con.execute(q_clean).fetchall():
+                if row[1]:
+                    item_n = row[0]
+                    if item_n not in db_latest or row[1] > db_latest[item_n]:
+                        db_latest[item_n] = row[1]
+
+        id_str = ",".join(str(int(t)) for t in type_ids)
+        q2 = f"SELECT type_id, MAX(snapshot_time) FROM ledger_history WHERE type_id IN ({id_str}) GROUP BY type_id"
+        for row in con.execute(q2).fetchall():
+            if row[1]:
+                db_latest[row[0]] = row[1]
+        con.close()
+    except Exception as e:
+        print("[!] Warning reading DuckDB hold history:", e)
+
+    for tid in type_ids:
+        meta = csv_meta.get(tid, {})
+        max_days = meta.get("max_days", 60)
+        date_acq = meta.get("date_acquired")
+        item_name = name_map.get(tid, "")
+
+        dt_parsed = None
+        # Priority 1: Explicit CSV override
+        if date_acq:
+            try:
+                dt_parsed = datetime.strptime(date_acq[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
+
+        # Priority 2: Live ESI wallet transaction
+        if not dt_parsed and tid in esi_latest_buys:
+            dt_parsed = esi_latest_buys[tid]
+
+        # Priority 3: DuckDB latest buy by name
+        if not dt_parsed and item_name in db_latest:
+            raw_dt = db_latest[item_name]
+            if isinstance(raw_dt, datetime):
+                dt_parsed = raw_dt
+            else:
+                try:
+                    dt_parsed = datetime.fromisoformat(str(raw_dt)[:19])
+                except Exception:
+                    pass
+            if dt_parsed and dt_parsed.tzinfo is None:
+                dt_parsed = dt_parsed.replace(tzinfo=timezone.utc)
+
+        # Priority 4: DuckDB latest snapshot by type_id
+        if not dt_parsed and tid in db_latest:
+            raw_dt = db_latest[tid]
+            if isinstance(raw_dt, datetime):
+                dt_parsed = raw_dt
+            else:
+                try:
+                    dt_parsed = datetime.fromisoformat(str(raw_dt)[:19])
+                except Exception:
+                    pass
+            if dt_parsed and dt_parsed.tzinfo is None:
+                dt_parsed = dt_parsed.replace(tzinfo=timezone.utc)
+
+        if dt_parsed:
+            days_held = max(0, (now_utc - dt_parsed).days)
+            date_str = dt_parsed.strftime("%Y-%m-%d")
+        else:
+            days_held = 0
+            date_str = "Recent"
+
+        hold_params[tid] = {
+            "date_acquired": date_str,
+            "days_held": days_held,
+            "max_days": max_days,
+            "is_expired": bool(days_held >= max_days and days_held > 0)
+        }
+
+    return hold_params
 def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False):
     targets = []
     if raw_text and raw_text.strip():
@@ -376,6 +556,8 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
 
     history_map = get_historical_ledger_targets(type_ids)
     cost_basis_map = get_cost_basis_map(type_ids, history_map)
+    active_sells_map = get_active_sell_orders_map()
+    hold_desk_map = get_hold_desk_params(type_ids, {t['type_id']: t['name'] for t in targets})
 
     items_result = []
     multisell_lines = []
@@ -406,28 +588,104 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
         desk = hist["desk"] if hist else "UNMANAGED"
         target_sell = hist["target_sell"] if hist else None
 
+        # --- Active Sell Order Collision & Stack Merge Logic ---
+        active_orders = active_sells_map.get(tid, [])
+        has_collision = len(active_orders) > 0
+        active_qty = sum(o["volume_remain"] for o in active_orders)
+        min_active_price = min((o["price"] for o in active_orders), default=0.0)
+        total_stack_qty = active_qty + qty
+        active_ratio = (active_qty / total_stack_qty) if total_stack_qty > 0 else 0.0
+        is_undercut = bool(has_collision and lowest_ask and lowest_ask < min_active_price)
+        collision_action = None
+        collision_badge = None
+        collision_reason = ""
+
         # Suggested Sell Price & Action Logic
-        if desk == "EVERGREEN":
-            action = "FAST FLIP"
-            action_type = "flip"
-            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
-        elif desk in ["TACTICAL", "HOLD"]:
-            if lowest_ask and target_sell and lowest_ask >= target_sell:
-                action = "TARGET MET"
-                action_type = "met"
-                rec_sell = round(lowest_ask - 0.01, 2)
-            elif target_sell:
-                action = "HOLD CYCLE"
-                action_type = "hold"
-                rec_sell = round(target_sell, 2)
+        if has_collision:
+            desk_upper = desk.upper() if desk else "UNMANAGED"
+            if desk_upper == "EVERGREEN":
+                if is_undercut:
+                    action = "HOLD (ACTIVE UNDERCUT)"
+                    action_type = "hold"
+                    collision_action = "HOLD_HANGAR"
+                    collision_badge = "🛡️ HOLD (COLLISION)"
+                    collision_reason = f"Active {active_qty}x @ {min_active_price:,.2f} undercut by {lowest_ask:,.2f}. Hold to protect thin margins."
+                    rec_sell = min_active_price
+                else:
+                    action = "MATCH ACTIVE ASK"
+                    action_type = "flip"
+                    collision_action = "MATCH_ACTIVE"
+                    collision_badge = "🟢 TOP OF BOOK"
+                    collision_reason = f"Active order ({active_qty}x) is top of book."
+                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+
+            elif desk_upper == "TACTICAL":
+                if is_undercut:
+                    if active_ratio < 0.20:
+                        action = "CANCEL & MERGE"
+                        action_type = "flip"
+                        collision_action = "CANCEL_MERGE"
+                        collision_badge = "⚡ CANCEL & MERGE"
+                        collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (<20%). Cancel order & merge full {total_stack_qty}x."
+                        rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+                    else:
+                        action = "MODIFY & HOLD"
+                        action_type = "hold"
+                        collision_action = "MODIFY_HOLD"
+                        collision_badge = "✏️ MODIFY & HOLD"
+                        collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (>=20%). Modify active order to {lowest_ask-0.01:,.2f}; hold {qty}x reserve."
+                        rec_sell = min_active_price
+                else:
+                    action = "FLIP (TACTICAL)"
+                    action_type = "flip"
+                    collision_action = "TOP_OF_BOOK"
+                    collision_badge = "🟢 TOP OF BOOK"
+                    collision_reason = f"Active order ({active_qty}x) is top of book."
+                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+
             else:
+                if is_undercut:
+                    action = "SELF-UNDERCUT RISK"
+                    action_type = "hold"
+                    collision_action = "HOLD_HANGAR"
+                    collision_badge = "⚠️ SELF-UNDERCUT"
+                    collision_reason = f"Active order exists @ {min_active_price:,.2f}. Avoid self-undercutting."
+                    rec_sell = min_active_price
+                else:
+                    action = "MARKET EXIT"
+                    action_type = "flip"
+                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+        else:
+            if desk == "EVERGREEN":
                 action = "FAST FLIP"
                 action_type = "flip"
-                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else 1000000.0
-        else:
-            action = "MARKET EXIT"
-            action_type = "unmanaged"
-            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (unit_cost * 1.05 if unit_cost > 0 else 1000000.0)
+                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
+            elif desk in ["TACTICAL", "HOLD"]:
+                hold_meta = hold_desk_map.get(tid, {})
+                days_held = hold_meta.get("days_held", 0)
+                max_days = hold_meta.get("max_days", 60)
+                is_expired = hold_meta.get("is_expired", False)
+
+                if lowest_ask and target_sell and lowest_ask >= target_sell:
+                    action = "TARGET MET"
+                    action_type = "met"
+                    rec_sell = round(lowest_ask - 0.01, 2)
+                elif desk in ["HOLD", "TACTICAL"] and is_expired:
+                    action = f"TIME STOP ({days_held}d)"
+                    action_type = "time_stop"
+                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
+                elif target_sell:
+                    action = f"HOLD CYCLE ({days_held}d)" if desk == "HOLD" else "HOLD CYCLE"
+                    action_type = "hold"
+                    rec_sell = round(target_sell, 2)
+                else:
+                    action = "FAST FLIP"
+                    action_type = "flip"
+                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else 1000000.0
+            else:
+                action = "MARKET EXIT"
+                action_type = "unmanaged"
+                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (unit_cost * 1.05 if unit_cost > 0 else 1000000.0)
 
         # Financial Calculations (Proceeds vs Costs)
         line_value = rec_sell * qty
@@ -442,7 +700,7 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
         total_cost += line_cost
         total_profit += line_profit
 
-        if action_type in ["flip", "met", "unmanaged"]:
+        if action_type in ["flip", "met", "unmanaged", "time_stop"]:
             ready_value += line_value
             ready_cost += line_cost
             ready_profit += line_profit
@@ -469,7 +727,18 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
             "line_cost": round(line_cost, 2),
             "profit": round(line_profit, 2),
             "margin_pct": round(margin_pct, 1),
-            "cost_source": cost_source
+            "hold_data": hold_desk_map.get(tid, {}),
+            "cost_source": cost_source,
+            "collision": {
+                "has_collision": has_collision,
+                "active_qty": active_qty,
+                "active_price": min_active_price,
+                "active_ratio": round(active_ratio * 100, 1),
+                "is_undercut": is_undercut,
+                "action": collision_action,
+                "badge": collision_badge,
+                "reason": collision_reason
+            }
         })
 
     items_result.sort(key=lambda x: x["line_value"], reverse=True)

@@ -758,12 +758,25 @@ function renderAdvisorTable() {
     }
 
     let actionBadge = '';
-    if (item.action_type === 'flip') {
+    if (item.collision && item.collision.has_collision) {
+      const c = item.collision;
+      const cStyle = c.action === 'CANCEL_MERGE' ? 'bg-amber-950/80 text-amber-300 border border-amber-500/80' :
+                     c.action === 'HOLD_HANGAR' ? 'bg-rose-950/80 text-rose-300 border border-rose-500/80' :
+                     c.action === 'MODIFY_HOLD' ? 'bg-cyan-950/80 text-cyan-300 border border-cyan-500/80' :
+                     'bg-emerald-950/80 text-emerald-300 border border-emerald-500/80';
+      actionBadge = `<span class="px-2 py-0.5 rounded font-bold text-[10px] ${cStyle}" title="${c.reason}">${c.badge}</span>`;
+    } else if (item.action_type === 'flip') {
       actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-950/80 border border-emerald-700 text-emerald-300">FAST FLIP</span>';
     } else if (item.action_type === 'met') {
       actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-blue-950/80 border border-blue-700 text-blue-300">TARGET MET</span>';
+    } else if (item.action_type === 'time_stop') {
+      const hd = item.hold_data || {};
+      const reason = `Holding period exceeded: held ${hd.days_held || 0}d (max ${hd.max_days || 60}d). Liquidating at market ask to recycle stagnant capital.`;
+      actionBadge = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-rose-950/80 border border-rose-600 text-rose-300 animate-pulse" title="${reason}">⏰ TIME STOP (${hd.days_held || 0}d)</span>`;
     } else if (item.action_type === 'hold') {
-      actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-amber-950/80 border border-amber-700 text-amber-300">HOLD CYCLE</span>';
+      const hd = item.hold_data || {};
+      const holdSuffix = hd.days_held ? ` (${hd.days_held}d/${hd.max_days || 60}d)` : '';
+      actionBadge = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-amber-950/80 border border-amber-700 text-amber-300" title="Target sell not yet met${holdSuffix}">HOLD CYCLE${hd.days_held ? ` (${hd.days_held}d)` : ''}</span>`;
     } else {
       actionBadge = '<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-indigo-950/80 border border-indigo-700 text-indigo-300">MARKET EXIT</span>';
     }
@@ -787,7 +800,16 @@ function renderAdvisorTable() {
 
     html += `
       <tr class="hover:bg-slate-800/40 transition">
-        <td class="py-2.5 px-3 text-slate-200 font-medium font-sans">${item.name}</td>
+        <td class="py-2.5 px-3 text-slate-200 font-medium font-sans">
+          ${item.collision && item.collision.has_collision ? `
+            <span class="inline-block mr-1.5 px-1 rounded text-[9px] font-bold ${
+              item.collision.action === 'CANCEL_MERGE' ? 'bg-amber-950 text-amber-300 border border-amber-500/60' :
+              item.collision.action === 'HOLD_HANGAR' ? 'bg-rose-950 text-rose-300 border border-rose-500/60' :
+              item.collision.action === 'MODIFY_HOLD' ? 'bg-cyan-950 text-cyan-300 border border-cyan-500/60' :
+              'bg-emerald-950 text-emerald-300 border border-emerald-500/60'
+            }" title="${item.collision.reason}">COLLISION</span>
+          ` : ''}${item.name}
+        </td>
         <td class="py-2.5 px-2">${deskBadge}</td>
         <td class="py-2.5 px-2 text-right text-slate-300">${item.qty}</td>
         <td class="py-2.5 px-2 text-right font-sans">${costDisplay}</td>
