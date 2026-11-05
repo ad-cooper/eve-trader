@@ -71,6 +71,18 @@ function renderMetrics() {
   document.getElementById('m-coverage').innerText = c.ledger_coverage;
   document.getElementById('m-orders-count').innerText = c.orders_count + ' orders';
   document.getElementById('m-escrow').innerText = 'Escrow: ' + fmtISK(c.total_escrow);
+  if (document.getElementById('m-budget')) {
+    document.getElementById('m-budget').innerText = 'Budget: ' + fmtISK(m.portfolio_budget || m.total_capital);
+  }
+  if (document.getElementById('tag-eg-budget') && globalData.desk_metrics?.evergreen) {
+    document.getElementById('tag-eg-budget').innerText = fmtISK(globalData.desk_metrics.evergreen.cap) + ' Allocated';
+  }
+  if (document.getElementById('tag-tac-budget') && globalData.desk_metrics?.tactical) {
+    document.getElementById('tag-tac-budget').innerText = fmtISK(globalData.desk_metrics.tactical.cap) + ' Allocated';
+  }
+  if (document.getElementById('tag-hld-budget') && globalData.desk_metrics?.hold) {
+    document.getElementById('tag-hld-budget').innerText = fmtISK(globalData.desk_metrics.hold.cap) + ' Allocated';
+  }
 
   document.getElementById('sniper-time').innerText = 'Last scan: ' + (globalData.sniper.timestamp || 'Never');
   document.getElementById('last-ledger-time').innerText = 'Last Ledger: ' + (globalData.status.last_ledger_run || 'Never');
@@ -78,7 +90,7 @@ function renderMetrics() {
   document.getElementById('spinner-snipe').classList.toggle('hidden', !globalData.status.sniper_running);
   document.getElementById('text-snipe').innerText = globalData.status.sniper_running ? 'Scanning...' : 'Run Deal Sniper';
   document.getElementById('spinner-ledger').classList.toggle('hidden', !globalData.status.ledger_running);
-  document.getElementById('text-ledger').innerText = globalData.status.ledger_running ? 'Generating...' : 'Rebuild 50B';
+  document.getElementById('text-ledger').innerText = globalData.status.ledger_running ? 'Generating...' : 'Rebuild Auto';
 
   const sso = document.getElementById('sso-auth-container');
   if (c.is_linked) {
@@ -154,15 +166,26 @@ function renderActiveTab() {
     const deskProf = allDeskRows.reduce((sum, r) => sum + (parseFloat(r.profit) || 0), 0);
     const deskRoi = deskCap > 0 ? (deskProf / deskCap * 100) : 0;
 
+    const unplacedRows = allDeskRows.filter(r => r.char_status === 'UNPLACED');
+    const buyActiveRows = allDeskRows.filter(r => r.char_status === 'BUY_ACTIVE');
+    const deskNeeded = unplacedRows.reduce((sum, r) => sum + (parseFloat(r.capital) || 0), 0);
+    const deskEscrow = buyActiveRows.reduce((sum, r) => sum + (parseFloat(r.escrow) || parseFloat(r.capital) || 0), 0);
+
     const elCap = document.getElementById('ds-cap');
     const elProf = document.getElementById('ds-prof');
     const elRoi = document.getElementById('ds-roi');
     const elLbl = document.getElementById('ds-label');
+    const elEscrow = document.getElementById('ds-escrow');
+    const elNeeded = document.getElementById('ds-needed');
+    const elUnplacedBadge = document.getElementById('ds-unplaced-badge');
 
     if (elCap) elCap.innerText = fmtISK(deskCap);
     if (elProf) elProf.innerText = '+' + fmtISK(deskProf);
     if (elRoi) elRoi.innerText = deskRoi.toFixed(1) + '%';
     if (elLbl) elLbl.innerText = `${currentTab.toUpperCase()} DESK`;
+    if (elEscrow) elEscrow.innerText = fmtISK(deskEscrow);
+    if (elNeeded) elNeeded.innerText = fmtISK(deskNeeded);
+    if (elUnplacedBadge) elUnplacedBadge.innerText = `${unplacedRows.length} unplaced`;
 
     let rows = allDeskRows;
     if (document.getElementById('filter-unplaced').checked) {
@@ -189,9 +212,9 @@ function renderPerformanceTable() {
   const threshold = parseFloat(document.getElementById('perf-min-threshold').value) || 5000000;
   let items = globalData.performance.items.filter(it => Math.abs(it.profit) >= threshold);
 
-  if (perfFilterMode === 'winners') items = items.filter(it => it.profit > 0).sort((a,b) => b.profit - a.profit);
+  if (perfFilterMode === 'winners') items = items.filter(it => it.profit > 0).sort((a, b) => (a.name || a.type_name || "").localeCompare(b.name || b.type_name || ""));
   else if (perfFilterMode === 'losers') items = items.filter(it => it.profit < 0).sort((a,b) => a.profit - b.profit);
-  else items.sort((a,b) => b.profit - a.profit);
+  else items.sort((a, b) => (a.name || a.type_name || "").localeCompare(b.name || b.type_name || ""));
 
   document.getElementById('perf-item-count').innerText = `${items.length} items (≥ ${fmtISK(threshold)})`;
   const tbody = document.getElementById('perf-table-body');
@@ -318,7 +341,7 @@ function renderSniperTable(deals) {
 function renderTableRows(rows) {
   const tbody = document.getElementById('table-body');
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="p-4 text-center text-slate-500">No matching items.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" class="p-4 text-center text-slate-500">No matching items.</td></tr>';
     return;
   }
 
@@ -328,6 +351,33 @@ function renderTableRows(rows) {
       : r.char_status === 'SELL_ACTIVE' 
       ? `<span class="bg-emerald-900/60 text-emerald-300 border border-emerald-700/80 px-1.5 py-0.5 rounded text-[10px] font-bold">SELL LISTED</span>`
       : `<span class="bg-slate-800 text-slate-400 border border-slate-700 px-1.5 py-0.5 rounded text-[10px]">UNPLACED</span>`;
+    let deskActionBadge = '<span class="text-slate-600 font-mono text-[10px]">--</span>';
+    if (r.action_code === 'TOP_BOOK') {
+      deskActionBadge = `<span class="bg-emerald-950/80 text-emerald-300 border border-emerald-600/80 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+        <span>TOP BID</span>
+      </span>`;
+    } else if (r.action_code === 'PRIME_DIP') {
+
+      deskActionBadge = `<span class="bg-amber-950/90 text-amber-300 border border-amber-500/90 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+        <span>★ PRIME DIP</span>
+      </span>`;
+    } else if (r.action_code === 'BUMP_VIABLE') {
+      deskActionBadge = `<span class="bg-cyan-950/90 text-cyan-300 border border-cyan-500/90 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono animate-pulse">
+        <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+        <span>${r.action_text || 'BUMP VIABLE'}</span>
+      </span>`;
+    } else if (r.action_code === 'PATIENT') {
+      deskActionBadge = `<span class="bg-slate-800/80 text-slate-300 border border-slate-700 px-2 py-0.5 rounded text-[10px] font-mono">
+        ${r.action_text || 'HOLD FIRM'}
+      </span>`;
+    } else if (r.action_code === 'SELL_ACTIVE') {
+      deskActionBadge = `<span class="text-emerald-400 font-mono text-[10px]">SELLING</span>`;
+    } else if (r.action_code === 'UNPLACED') {
+      deskActionBadge = `<span class="text-amber-500 font-mono text-[10px]">NEW ORDER</span>`;
+    }
+
 
     let proxBadge = '<span class="text-slate-600 font-mono">--</span>';
     let liveAskStr = r.live_ask ? fmtISK(r.live_ask) : "<span class=\"text-amber-400 font-bold text-[10px] bg-amber-950/70 border border-amber-800 px-1 py-0.5 rounded\">OUT OF STOCK</span>";
@@ -363,6 +413,7 @@ function renderTableRows(rows) {
       <tr class="hover:bg-slate-800/40 transition">
         <td class="p-3 text-slate-500">${i + 1}</td>
         <td class="p-3">${badge}</td>
+        <td class="p-3 text-center">${deskActionBadge}</td>
         <td class="p-3 font-semibold text-white"><a href="https://evetycoon.com/market/${r.type_id}" target="_blank" class="hover:text-eveCyan hover:underline">${r.name}</a></td>
         <td class="p-3 text-right text-slate-300">${r.qty}</td>
         <td class="p-3 text-right text-slate-400">${r.dump_freq.toFixed(1)}%</td>
@@ -371,7 +422,14 @@ function renderTableRows(rows) {
         <td class="p-3 text-right text-slate-300 font-mono">${liveAskStr}</td>
         <td class="p-3 text-center">${proxBadge}</td>
         <td class="p-3 text-right ${isProf ? 'text-eveCyan font-semibold' : 'text-red-400 font-bold'}">${r.net_margin.toFixed(1)}%</td>
-        <td class="p-3 text-right text-slate-300 font-semibold">${fmtISK(r.capital)}</td>
+        <td class="p-3 text-right">
+          ${r.char_status === 'UNPLACED'
+            ? `<div class="font-mono font-bold text-amber-300">${fmtISK(r.capital)}</div><div class="text-[9px] text-amber-500 font-bold uppercase tracking-wider">Needed</div>`
+            : r.char_status === 'BUY_ACTIVE'
+            ? `<div class="font-mono font-bold text-blue-300">${fmtISK(r.escrow || r.capital)}</div><div class="text-[9px] text-blue-500 font-bold uppercase tracking-wider">In Escrow</div>`
+            : `<div class="font-mono font-semibold text-slate-300">${fmtISK(r.capital)}</div><div class="text-[9px] text-emerald-500 font-semibold uppercase tracking-wider">Sell Listed</div>`
+          }
+        </td>
         <td class="p-3 text-right ${isProf ? 'text-eveGreen font-bold' : 'text-red-400 font-bold'}">${isProf ? '+' : ''}${fmtISK(r.profit)}</td>
       </tr>`;
   }).join('');
@@ -737,9 +795,12 @@ function renderAdvisorTable() {
     rows = rows.filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
   } else if (currentAdvisorFilter === 'hold') {
     rows = rows.filter(i => i.action_type === 'hold');
-  } else if (currentAdvisorFilter === 'unmanaged') {
+  } else   if (currentAdvisorFilter === 'unmanaged') {
     rows = rows.filter(i => i.desk === 'UNMANAGED');
   }
+
+  // Sort alphabetically by item type name (A to Z)
+  rows.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
   if (rows.length === 0) {
     tbody.innerHTML = '<tr><td colspan="8" class="text-center py-8 text-slate-500 font-sans">No loose items matching this filter. (Items inside containers or other regions are ignored)</td></tr>';

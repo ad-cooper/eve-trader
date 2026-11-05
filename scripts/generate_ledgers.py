@@ -1,19 +1,23 @@
-from services.blacklist import load_active_blacklist
 #!/usr/bin/env python3
 """
-EVE Online 50B Multi-Desk Waterfall Allocator (Strict Waterfall Partitioning)
+EVE Online Multi-Desk Waterfall Allocator (Dynamic Equity & Cascading Slack)
 =============================================================================
 Order of Priority:
-1. Hold Desk (12.0B): Deep cyclical saturation dips (1-3 weeks).
-2. Tactical Desk (8.0B): High-dump exploration/loot capture (3-5 days). Excludes Hold items.
-3. Evergreen Desk (28.0B): High-turnover structural workhorses (24-48h). Excludes Hold & Tactical.
+1. Hold Desk (24% base): Deep cyclical saturation dips (1-3 weeks).
+2. Tactical Desk (16% base + Hold slack): High-dump exploration/loot capture (3-5 days).
+3. Evergreen Desk (60% base + all remaining slack): Structural workhorses (24-48h).
 """
 
 import os
+import sys
 import json
 import argparse
 import duckdb
 import pandas as pd
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from services.blacklist import load_active_blacklist
 
 DUCKDB_PATH = "data/eve_analytics.duckdb"
 SQLITE_PATH = "data/latest-sqlite.db"
@@ -25,11 +29,41 @@ SELL_FEE_JITA = 0.0123     # 1.23% Broker Relations V
 SALES_TAX_JITA = 0.03375   # 3.375% Accounting V
 TOTAL_EXIT_FEES = SELL_FEE_JITA + SALES_TAX_JITA  # 4.605%
 
-CAPITAL_FLOORS = {
-    "hold": 12.0e9,
-    "tactical": 8.0e9,
-    "evergreen": 28.0e9
+DESK_RATIOS = {
+    "hold": 0.24,       # 24% of portfolio
+    "tactical": 0.16,   # 16% of portfolio
+    "evergreen": 0.60   # 60% of portfolio (+ 100% of unused slack)
 }
+DEFAULT_FALLBACK_BUDGET = 50.0e9
+
+
+def resolve_dynamic_budget(capital_arg: str) -> float:
+    """
+    Resolves total trading budget.
+    - If explicit number (e.g. '75.0', '120'): converts billions to ISK.
+    - If 'auto': queries live character wallet balance + active buy escrow.
+    """
+    if capital_arg and capital_arg.lower() != "auto":
+        try:
+            val = float(capital_arg)
+            return val * 1e9 if val < 1000.0 else val
+        except ValueError:
+            print(f"[!] Invalid capital argument '{capital_arg}', falling back to auto resolution.")
+
+    try:
+        from services.esi import fetch_wallet_balance, fetch_character_orders
+        wallet = fetch_wallet_balance()
+        orders = fetch_character_orders() or {}
+        escrow = orders.get("total_escrow", 0.0)
+        total_equity = wallet + escrow
+        if total_equity > 1.0e9:
+            print(f"[*] Dynamic equity resolved: {wallet/1e9:.2f}B Liquid + {escrow/1e9:.2f}B Escrow = {total_equity/1e9:.2f}B ISK")
+            return total_equity
+    except Exception as e:
+        print(f"[!] Failed to auto-resolve live equity: {e}")
+
+    print(f"[*] Using fallback budget: {DEFAULT_FALLBACK_BUDGET/1e9:.1f}B ISK")
+    return DEFAULT_FALLBACK_BUDGET
 
 
 def load_cached_market_telemetry() -> dict:
@@ -41,6 +75,7 @@ def load_cached_market_telemetry() -> dict:
             pass
     return {}
 
+
 def load_claimed_ids_from_csv(filename: str) -> set:
     path = os.path.join(OUTPUT_DIR, filename)
     if os.path.exists(path):
@@ -50,6 +85,7 @@ def load_claimed_ids_from_csv(filename: str) -> set:
         except Exception:
             pass
     return set()
+
 
 def load_market_universe():
     con = duckdb.connect(DUCKDB_PATH, read_only=True)
@@ -110,8 +146,10 @@ def load_market_universe():
     con.close()
     return df
 
-def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market_telemetry: dict, claimed_ids: set) -> list:
-    # Base Sanity Filter
+
+def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market_telemetry: dict, claimed_ids: set, total_portfolio: float = 50.0e9) -> tuple:
+    scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
+
     mask = ~df["type_id"].isin(claimed_ids)
     bl_items, bl_groups, _ = load_active_blacklist()
     mask &= ~df["group_name"].isin(bl_groups)
@@ -135,7 +173,7 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         candidates["upside_pct"] = ((candidates["price_m_180d"] * 1.10) - candidates["price_m_30d"]) / candidates["price_m_30d"] * 100.0
         candidates = candidates.sort_values(by="upside_pct", ascending=False)
         vol_pct = 0.08
-        max_line_cap = 1.5e9
+        max_line_cap = 1.5e9 * scale_factor
         min_line_cap = 150.0e6
         min_margin_req = 4.0
 
@@ -146,19 +184,18 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         mask &= df["avg_spread_30d"] >= 10.0
         candidates = df[mask].copy().sort_values(by="dump_freq_pct", ascending=False)
         vol_pct = 0.15
-        max_line_cap = 1.2e9
+        max_line_cap = 1.2e9 * scale_factor
         min_line_cap = 120.0e6
         min_margin_req = 8.5
 
     else:  # evergreen
-        # Foundation deep liquidity: High daily turnover, healthy natural spread (>= 9.8%)
         mask &= df["price_m_30d"].between(1.0, 2500.0)
         mask &= df["daily_turnover_m"] >= 35.0
         mask &= df["daily_vol_30d"] >= 2.0
         mask &= df["avg_spread_30d"] >= 9.8
         candidates = df[mask].copy().sort_values(by="daily_turnover_m", ascending=False)
         vol_pct = 0.25
-        max_line_cap = 1.2e9
+        max_line_cap = 1.2e9 * scale_factor
         min_line_cap = 100.0e6
         min_margin_req = 5.0
 
@@ -263,9 +300,8 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     df_ledger = pd.DataFrame(ledger_rows)
     df_ledger.to_csv(out_file, index=False)
-    print(f"[+] Saved {len(ledger_rows)} lines to {out_file} (Allocated: {allocated_cap/1e9:.2f}B ISK / {budget/1e9:.1f}B target)")
+    print(f"[+] Saved {len(ledger_rows)} lines to {out_file} (Allocated: {allocated_cap/1e9:.2f}B ISK / {budget/1e9:.2f}B target)")
 
-    # --- HISTORICAL SNAPSHOT INGESTION ---
     try:
         import datetime
         con = duckdb.connect(DUCKDB_PATH)
@@ -284,52 +320,71 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
                 profit DOUBLE
             );
         """)
-        
-        # Prepare dataframe for insertion
         df_history = df_ledger.copy()
         df_history.insert(0, "desk_type", desk_type)
         df_history.insert(0, "snapshot_time", datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0))
-        
         con.execute("INSERT INTO ledger_history SELECT * FROM df_history")
         con.close()
     except Exception as e:
         print(f"[!] Failed to log history to DuckDB: {e}")
-    return new_claimed_ids
+
+    return new_claimed_ids, allocated_cap
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--desk", default="all", choices=["evergreen", "tactical", "hold", "all"])
+    parser.add_argument("--capital", default="auto", help="Total portfolio capital in billions or 'auto' (e.g. 50.0, 89.5, 120.0, auto)")
     args = parser.parse_args()
 
+    total_budget = resolve_dynamic_budget(args.capital)
     market_telemetry = load_cached_market_telemetry()
     df = load_market_universe()
 
     if args.desk == "all":
-        # Strict Waterfall: Hold -> Tactical -> Evergreen
-        print("=== Running 50B Multi-Desk Waterfall Pipeline ===")
+        target_hold = total_budget * DESK_RATIOS["hold"]
+        target_tac = total_budget * DESK_RATIOS["tactical"]
+        target_eg = total_budget * DESK_RATIOS["evergreen"]
+
+        print(f"\n=== Running Dynamic Multi-Desk Waterfall ({total_budget/1e9:.2f}B ISK Portfolio) ===")
+        print(f"[*] Base Allocation Targets: Hold {target_hold/1e9:.2f}B | Tactical {target_tac/1e9:.2f}B | Evergreen {target_eg/1e9:.2f}B")
+
         claimed_ids = set()
-        hold_ids = generate_desk_ledger(df, "hold", CAPITAL_FLOORS["hold"], market_telemetry, claimed_ids)
+
+        hold_ids, hold_cap = generate_desk_ledger(df, "hold", target_hold, market_telemetry, claimed_ids, total_budget)
         claimed_ids.update(hold_ids)
-        
-        tac_ids = generate_desk_ledger(df, "tactical", CAPITAL_FLOORS["tactical"], market_telemetry, claimed_ids)
+        hold_slack = max(0.0, target_hold - hold_cap)
+
+        tac_target = target_tac + hold_slack
+        if hold_slack > 0:
+            print(f"[*] Hold Desk left {hold_slack/1e9:.2f}B ISK slack -> Cascading into Tactical Desk (New Target: {tac_target/1e9:.2f}B)")
+        tac_ids, tac_cap = generate_desk_ledger(df, "tactical", tac_target, market_telemetry, claimed_ids, total_budget)
         claimed_ids.update(tac_ids)
-        
-        eg_ids = generate_desk_ledger(df, "evergreen", CAPITAL_FLOORS["evergreen"], market_telemetry, claimed_ids)
-        print(f"=== Waterfall Complete: {len(hold_ids)} Hold, {len(tac_ids)} Tactical, {len(eg_ids)} Evergreen (Zero Duplication) ===")
+
+        evergreen_target = max(0.0, total_budget - hold_cap - tac_cap)
+        print(f"[*] Cascading remaining slack to Evergreen -> Final Target: {evergreen_target/1e9:.2f}B ISK")
+        eg_ids, eg_cap = generate_desk_ledger(df, "evergreen", evergreen_target, market_telemetry, claimed_ids, total_budget)
+
+        total_deployed = hold_cap + tac_cap + eg_cap
+        print(f"\n=== Waterfall Complete: {len(hold_ids)} Hold, {len(tac_ids)} Tactical, {len(eg_ids)} Evergreen ===")
+        print(f"[+] Total Portfolio Deployed: {total_deployed/1e9:.2f}B / {total_budget/1e9:.2f}B ISK ({(total_deployed/total_budget)*100:.1f}%)")
 
     elif args.desk == "hold":
-        generate_desk_ledger(df, "hold", CAPITAL_FLOORS["hold"], market_telemetry, set())
+        target = total_budget * DESK_RATIOS["hold"]
+        generate_desk_ledger(df, "hold", target, market_telemetry, set(), total_budget)
 
     elif args.desk == "tactical":
+        target = total_budget * DESK_RATIOS["tactical"]
         hold_claimed = load_claimed_ids_from_csv("hold_ledger.csv")
-        generate_desk_ledger(df, "tactical", CAPITAL_FLOORS["tactical"], market_telemetry, hold_claimed)
+        generate_desk_ledger(df, "tactical", target, market_telemetry, hold_claimed, total_budget)
 
     elif args.desk == "evergreen":
+        target = total_budget * DESK_RATIOS["evergreen"]
         hold_claimed = load_claimed_ids_from_csv("hold_ledger.csv")
         tac_claimed = load_claimed_ids_from_csv("tactical_ledger.csv")
-        combined_claimed = hold_claimed.union(tac_claimed)
-        print(f"Excluding {len(combined_claimed)} items already claimed by Hold & Tactical...")
-        generate_desk_ledger(df, "evergreen", CAPITAL_FLOORS["evergreen"], market_telemetry, combined_claimed)
+        combined = hold_claimed.union(tac_claimed)
+        generate_desk_ledger(df, "evergreen", target, market_telemetry, combined, total_budget)
+
 
 if __name__ == "__main__":
     main()

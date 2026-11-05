@@ -95,6 +95,17 @@ def get_valid_access_token():
     tokens = load_sso_tokens()
     if not tokens or "refresh_token" not in tokens:
         return None
+
+    # Check if existing access token is still valid (with 90s safety margin)
+    existing_acc = tokens.get("access_token")
+    if existing_acc:
+        try:
+            claims = decode_jwt_payload(existing_acc)
+            exp = claims.get("exp", 0)
+            if exp > (time.time() + 90):
+                return existing_acc
+        except Exception:
+            pass
     headers = {
         **get_basic_auth_header(),
         "Content-Type": "application/x-www-form-urlencoded",
@@ -132,7 +143,7 @@ def fetch_character_orders():
             escrow = 0.0
             for o in raw:
                 tid = o["type_id"]
-                info = {"order_id": o["order_id"], "price": o["price"], "volume_remain": o["volume_remain"]}
+                info = {"order_id": o["order_id"], "price": o["price"], "volume_remain": o["volume_remain"], "escrow": float(o.get("escrow") or (o["price"] * o["volume_remain"]))}
                 if o.get("is_buy_order"):
                     buys[tid] = info
                     escrow += o.get("escrow", o["price"] * o["volume_remain"])
@@ -145,6 +156,59 @@ def fetch_character_orders():
     except Exception as e:
         print(f"[!] Order fetch failed: {str(e)}")
     return None
+
+WALLET_CACHE_FILE = "data/wallet_cache.json"
+
+def fetch_wallet_balance(force_refresh: bool = False) -> float:
+    """
+    Fetches the live liquid ISK balance of the authenticated character.
+    Caches balance locally for 60 seconds to avoid ESI 429 rate limits.
+    Falls back to last known balance on rate limit or network failure.
+    """
+    import time
+    tokens = load_sso_tokens()
+    if not tokens or not tokens.get("character_id"):
+        return 0.0
+
+    cid = tokens["character_id"]
+    now = time.time()
+    cached_val = 0.0
+
+    if os.path.exists(WALLET_CACHE_FILE):
+        try:
+            with open(WALLET_CACHE_FILE, "r") as f:
+                cdata = json.load(f)
+                if cdata.get("character_id") == cid:
+                    cached_val = float(cdata.get("balance", 0.0))
+                    if not force_refresh and (now - cdata.get("timestamp", 0) < 300):
+                        return cached_val
+        except Exception:
+            pass
+
+    token = get_valid_access_token()
+    if not token:
+        return cached_val
+
+    url = f"{ESI_BASE_URL}/characters/{cid}/wallet/?datasource=tranquility"
+    try:
+        res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if res.status_code == 200:
+            bal = float(res.text)
+            try:
+                os.makedirs(os.path.dirname(WALLET_CACHE_FILE), exist_ok=True)
+                with open(WALLET_CACHE_FILE, "w") as f:
+                    json.dump({"character_id": cid, "balance": bal, "timestamp": now}, f)
+            except Exception:
+                pass
+            return bal
+        elif res.status_code == 429:
+            return cached_val
+        else:
+            return cached_val
+    except Exception as e:
+        print(f"[!] Wallet balance fetch failed: {str(e)}")
+        return cached_val
+
 
 def fetch_wallet_transactions():
     tokens = load_sso_tokens()
@@ -228,3 +292,57 @@ def load_cached_assets(max_age_seconds: int = 300, force: bool = False, *args, *
         except Exception:
             pass
     return []
+
+
+# ==========================================
+
+# ==========================================
+# MARKET HISTORY & VOLUME GUARD
+# ==========================================
+HISTORY_CACHE_FILE = "data/history_cache.json"
+ESI_HEADERS = {"User-Agent": "eve-trading-desk-app/1.0 (local trading bot)"}
+
+def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
+    """Fetches Jita daily market history from ESI, cached locally for 12 hours."""
+    import time, requests
+    now = time.time()
+    os.makedirs("data", exist_ok=True)
+    cache = {}
+
+    if os.path.exists(HISTORY_CACHE_FILE):
+        try:
+            with open(HISTORY_CACHE_FILE, "r") as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+
+    entry = cache.get(str(type_id))
+    if entry and (now - entry.get("timestamp", 0) < 43200):
+        return entry.get("history", [])
+
+    url = f"https://esi.evetech.net/latest/markets/{region_id}/history/?datasource=tranquility&type_id={type_id}"
+    try:
+        res = requests.get(url, headers=ESI_HEADERS, timeout=(3.05, 8.0))
+        if res.status_code == 200:
+            history = res.json()
+            cache[str(type_id)] = {"timestamp": now, "history": history}
+            with open(HISTORY_CACHE_FILE, "w") as f:
+                json.dump(cache, f)
+            return history
+        else:
+            print(f"[!] ESI history HTTP {res.status_code} for type {type_id}")
+    except Exception as e:
+        print(f"[!] History fetch timeout/error for type {type_id}: {e}")
+
+    return entry.get("history", []) if entry else []
+
+def get_14d_average_volume(type_id: int, region_id: int = 10000002) -> float:
+    """Calculates average daily volume over the past 14 days."""
+    history = fetch_market_history(type_id, region_id)
+    if not history:
+        return -1.0  # -1.0 indicates volume data unavailable / network error
+    recent = history[-14:]
+    if not recent:
+        return 0.0
+    total_vol = sum(day.get("volume", 0) for day in recent)
+    return round(total_vol / len(recent), 2)

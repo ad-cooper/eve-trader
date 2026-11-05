@@ -38,3 +38,5 @@ Thumbs.db
 .idea/
 *.log
 data/jeveassets_transactions.csv
+
+data/*cache.json

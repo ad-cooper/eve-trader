@@ -14,8 +14,8 @@ for i in {1..12}; do
     sleep 5
 done
 
-echo "[*] Running 50B Multi-Desk Waterfall Allocation..."
-docker compose exec -T eve-trading-desk python3 scripts/generate_ledgers.py --desk all
+echo "[*] Running Dynamic Multi-Desk Waterfall Allocation (Auto-Equity)..."
+docker compose exec -T eve-trading-desk python3 scripts/generate_ledgers.py --desk all --capital auto
 
 echo "[*] Refreshing live order book telemetry..."
 docker compose exec -T eve-trading-desk curl -s -X POST http://localhost:8000/api/market/refresh-prices > /dev/null 2>&1 || true

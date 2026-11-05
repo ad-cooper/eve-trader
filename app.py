@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from services.esi import get_auth_url, exchange_auth_code, load_sso_tokens, fetch_character_orders
+from services.esi import fetch_wallet_balance, get_auth_url, exchange_auth_code, load_sso_tokens, fetch_character_orders
 from services.accounting import calculate_performance, load_performance
 from services.ledgers import get_annotated_desks, load_sniper_deals, load_cached_orders
 from services.market import update_ledger_market_prices
@@ -136,6 +136,10 @@ async def api_state():
         except Exception:
             pass
 
+    wallet_balance = fetch_wallet_balance() if "fetch_wallet_balance" in globals() else 0.0
+    active_escrow = orders.get("total_escrow", 0.0)
+    effective_equity = wallet_balance + active_escrow if (wallet_balance + active_escrow) > 0 else total_cap
+
     return JSONResponse({
         "status": STATE,
         "character": {
@@ -143,14 +147,16 @@ async def api_state():
             "character_id": sso.get("character_id"),
             "is_linked": bool(sso.get("character_id")),
             "orders_count": orders.get("count", 0),
-            "total_escrow": orders.get("total_escrow", 0.0),
+            "total_escrow": active_escrow,
             "ledger_coverage": f"{covered} / {len(all_rows)}"
         },
         "metrics": {
             "total_capital": total_cap,
             "total_profit": total_prof,
             "blended_roi": (total_prof / total_cap * 100) if total_cap > 0 else 0,
-            "liquid_reserve": max(0.0, 50.0e9 - total_cap),
+
+            "liquid_reserve": fetch_wallet_balance() if "fetch_wallet_balance" in globals() else 0.0,
+            "portfolio_budget": (fetch_wallet_balance() + orders.get("total_escrow", 0.0)) if "fetch_wallet_balance" in globals() else total_cap,
             "order_slots": len(all_rows)
         },
         "desks": {"evergreen": eg, "tactical": tac, "hold": hld},
