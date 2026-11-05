@@ -74,6 +74,22 @@ function renderMetrics() {
   if (document.getElementById('m-budget')) {
     document.getElementById('m-budget').innerText = 'Budget: ' + fmtISK(m.portfolio_budget || m.total_capital);
   }
+  // Update tab labels dynamically with actual desk capital
+  if (globalData.desk_metrics) {
+    const egCap = globalData.desk_metrics.evergreen?.cap;
+    const tacCap = globalData.desk_metrics.tactical?.cap;
+    const hldCap = globalData.desk_metrics.hold?.cap;
+    if (egCap !== undefined && document.getElementById('tab-evergreen')) {
+      document.getElementById('tab-evergreen').innerText = `Evergreen (${fmtISK(egCap)})`;
+    }
+    if (tacCap !== undefined && document.getElementById('tab-tactical')) {
+      document.getElementById('tab-tactical').innerText = `Tactical (${fmtISK(tacCap)})`;
+    }
+    if (hldCap !== undefined && document.getElementById('tab-hold')) {
+      document.getElementById('tab-hold').innerText = `Hold (${fmtISK(hldCap)})`;
+    }
+  }
+
   if (document.getElementById('tag-eg-budget') && globalData.desk_metrics?.evergreen) {
     document.getElementById('tag-eg-budget').innerText = fmtISK(globalData.desk_metrics.evergreen.cap) + ' Allocated';
   }

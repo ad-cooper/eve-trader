@@ -50,17 +50,51 @@ def resolve_dynamic_budget(capital_arg: str) -> float:
         except ValueError:
             print(f"[!] Invalid capital argument '{capital_arg}', falling back to auto resolution.")
 
+    wallet = 0.0
+    escrow = 0.0
+
     try:
         from services.esi import fetch_wallet_balance, fetch_character_orders
-        wallet = fetch_wallet_balance()
+        wallet = float(fetch_wallet_balance() or 0.0)
         orders = fetch_character_orders() or {}
-        escrow = orders.get("total_escrow", 0.0)
-        total_equity = wallet + escrow
-        if total_equity > 1.0e9:
-            print(f"[*] Dynamic equity resolved: {wallet/1e9:.2f}B Liquid + {escrow/1e9:.2f}B Escrow = {total_equity/1e9:.2f}B ISK")
-            return total_equity
+        escrow = float(orders.get("total_escrow", 0.0))
     except Exception as e:
-        print(f"[!] Failed to auto-resolve live equity: {e}")
+        print(f"[!] Live ESI equity lookup failed: {e}")
+
+    # Fallback to local order cache if escrow came back 0.0
+    if escrow <= 0.0:
+        for orders_path in ["ledgers/character_orders.json", "data/character_orders.json"]:
+            if os.path.exists(orders_path):
+                try:
+                    with open(orders_path, "r", encoding="utf-8") as f:
+                        c_orders = json.load(f)
+                        cached_escrow = float(c_orders.get("total_escrow", 0.0))
+                        if cached_escrow > 0:
+                            print(f"[*] Recovered {cached_escrow/1e9:.2f}B ISK escrow from local cache ({orders_path})")
+                            escrow = cached_escrow
+                            break
+                except Exception:
+                    pass
+
+    # Fallback to local wallet cache if wallet came back 0.0
+    if wallet <= 0.0:
+        for wallet_path in ["data/wallet_cache.json", "ledgers/wallet_cache.json"]:
+            if os.path.exists(wallet_path):
+                try:
+                    with open(wallet_path, "r", encoding="utf-8") as f:
+                        w_data = json.load(f)
+                        cached_wallet = float(w_data.get("balance", 0.0))
+                        if cached_wallet > 0:
+                            print(f"[*] Recovered {cached_wallet/1e9:.2f}B ISK wallet from local cache ({wallet_path})")
+                            wallet = cached_wallet
+                            break
+                except Exception:
+                    pass
+
+    total_equity = wallet + escrow
+    if total_equity > 1.0e9:
+        print(f"[*] Dynamic equity resolved: {wallet/1e9:.2f}B Liquid + {escrow/1e9:.2f}B Escrow = {total_equity/1e9:.2f}B ISK")
+        return total_equity
 
     print(f"[*] Using fallback budget: {DEFAULT_FALLBACK_BUDGET/1e9:.1f}B ISK")
     return DEFAULT_FALLBACK_BUDGET
