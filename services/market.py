@@ -665,11 +665,23 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
                 days_held = hold_meta.get("days_held", 0)
                 max_days = hold_meta.get("max_days", 60)
                 is_expired = hold_meta.get("is_expired", False)
+                # Calculate unit financials before deciding target met
+                effective_cost_unit = unit_cost * (1.0 + BUY_FEE_CITADEL) if unit_cost > 0 else 0.0
+                net_proceeds_unit = (lowest_ask - 0.01) * (1.0 - EXIT_FEE_JITA) if lowest_ask else 0.0
+                is_profitable = (net_proceeds_unit > effective_cost_unit) if effective_cost_unit > 0 else True
 
                 if lowest_ask and target_sell and lowest_ask >= target_sell:
-                    action = "TARGET MET"
-                    action_type = "met"
-                    rec_sell = round(lowest_ask - 0.01, 2)
+                    if is_profitable:
+                        action = "TARGET MET"
+                        action_type = "met"
+                        rec_sell = round(lowest_ask - 0.01, 2)
+                    else:
+                        # Prevent selling at a loss just because raw target price matched
+                        action = "HOLD (MARGIN COMPRESSED)"
+                        action_type = "hold"
+                        # Recommend breakeven exit plus 5% minimum margin
+                        breakeven_sell = round((effective_cost_unit * 1.05) / (1.0 - EXIT_FEE_JITA), 2)
+                        rec_sell = max(round(target_sell, 2), breakeven_sell)
                 elif desk in ["HOLD", "TACTICAL"] and is_expired:
                     action = f"TIME STOP ({days_held}d)"
                     action_type = "time_stop"

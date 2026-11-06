@@ -154,9 +154,6 @@ def get_annotated_desks():
                 if top_b > 0 and my_p >= (top_b - 0.01):
                     item["action_code"] = "TOP_BOOK"
                     item["action_text"] = "TOP BID (WINNING)"
-                elif desk_type in ["hold", "tactical"]:
-                    item["action_code"] = "PATIENT"
-                    item["action_text"] = "HOLD FIRM (WAIT DUMP)"
                 elif desk_type == "evergreen":
                     potential_cost = (top_b + 0.01) * (1.0 + BUY_FEE_CITADEL)
                     net_rev = t_sell * (1.0 - TOTAL_EXIT_FEES)
@@ -165,8 +162,25 @@ def get_annotated_desks():
                         item["action_code"] = "BUMP_VIABLE"
                         item["action_text"] = f"BUMP VIABLE (+{proj_margin:.1f}%)"
                     else:
+                        item["action_code"] = "CANCEL_CEILING"
+                        item["action_text"] = "CEILING REACHED (CANCEL)"
+                elif desk_type == "tactical":
+                    potential_cost = (top_b + 0.01) * (1.0 + BUY_FEE_CITADEL)
+                    net_rev = t_sell * (1.0 - TOTAL_EXIT_FEES)
+                    proj_margin = ((net_rev - potential_cost) / potential_cost) * 100.0 if potential_cost > 0 else 0.0
+                    dump_freq = float(item.get("dump_freq", 0.0))
+                    if top_b <= max_profitable_buy and proj_margin >= 8.5:
+                        item["action_code"] = "BUMP_VIABLE"
+                        item["action_text"] = f"BUMP VIABLE (+{proj_margin:.1f}%)"
+                    elif dump_freq >= 60.0:
                         item["action_code"] = "PATIENT"
-                        item["action_text"] = "CEILING REACHED (HOLD)"
+                        item["action_text"] = "HOLD FIRM (WAIT DUMP)"
+                    else:
+                        item["action_code"] = "CANCEL_CEILING"
+                        item["action_text"] = "CEILING REACHED (CANCEL)"
+                elif desk_type == "hold":
+                    item["action_code"] = "PATIENT"
+                    item["action_text"] = "HOLD FIRM (WAIT DUMP)"
                 else:
                     item["action_code"] = "PATIENT"
                     item["action_text"] = "HOLD FIRM"

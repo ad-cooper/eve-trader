@@ -384,6 +384,11 @@ function renderTableRows(rows) {
         <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
         <span>${r.action_text || 'BUMP VIABLE'}</span>
       </span>`;
+    } else if (r.action_code === 'CANCEL_CEILING') {
+      deskActionBadge = `<span class="bg-rose-950/90 text-rose-300 border border-rose-600/90 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono" title="Top bid exceeds profitable threshold. Cancel order to free escrow for active rotation.">
+        <span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
+        <span>${r.action_text || 'CANCEL (CEILING)'}</span>
+      </span>`;
     } else if (r.action_code === 'PATIENT') {
       deskActionBadge = `<span class="bg-slate-800/80 text-slate-300 border border-slate-700 px-2 py-0.5 rounded text-[10px] font-mono">
         ${r.action_text || 'HOLD FIRM'}
@@ -901,10 +906,17 @@ function renderAdvisorTable() {
   tbody.innerHTML = html;
 }
 
-function copyAdvisorMultisell(type) {
+async function copyAdvisorMultisell(type) {
   if (!advisorData) return;
-  const text = (type === 'ready') ? advisorData.ready_multisell_text : advisorData.multisell_text;
-  navigator.clipboard.writeText(text).then(() => {
+  const text = (type === 'ready') ? (advisorData.ready_multisell_text || '') : (advisorData.multisell_text || '');
+  if (!text.trim()) {
+    alert('No sell export data available to copy.');
+    return;
+  }
+  const success = await copyToClipboard(text);
+  if (success) {
     alert(`Copied ${type === 'ready' ? 'Ready-to-Sell' : 'All Strategy'} items in EVE MultiSell format!`);
-  });
+  } else {
+    prompt("Clipboard blocked by browser. Press Ctrl+C to copy:", text);
+  }
 }

@@ -190,6 +190,9 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
     mask &= ~df["item_name"].isin(bl_items)
     mask &= ~df["category_name"].isin(["Personalization", "SKINs", "Special Edition Assets", "Apparel"])
     mask &= ~df["item_name"].str.contains("Modified|Voucher|Token|Certificate", regex=True)
+    # Exclude event assets, ciphers, boosters, and seasonal campaign tokens
+    event_filter = "Radiance|Cerebral|Booster|Keypass|Cipher|Harvest|Tetrimon|Shortcut|Gauntlet"
+    mask &= ~df["item_name"].str.contains(event_filter, case=False, na=False)
     if desk_type == "evergreen":
         mask &= ~df["group_name"].str.contains("Mutaplasmid", case=False, na=False)
         mask &= ~df["item_name"].str.contains("Mutaplasmid", case=False, na=False)
