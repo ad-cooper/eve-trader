@@ -7,10 +7,54 @@ from services.esi import fetch_wallet_transactions
 PERF_CACHE_FILE = "ledgers/performance_cache.json"
 DUCKDB_PATH = "data/eve_analytics.duckdb"
 SQLITE_PATH = "data/latest-sqlite.db"
-SALES_TAX_RATE = 0.03375
-SELL_BROKER_FEE = 0.0123
+
+# --- Centralized Fee Constants ---
+SALES_TAX_RATE = 0.03375          # 3.375% Accounting V
+SELL_BROKER_FEE = 0.0123          # 1.23% Broker Relations V in Citadel
 TOTAL_EXIT_FEE = SALES_TAX_RATE + SELL_BROKER_FEE  # 4.605%
-BUY_SCC_SURCHARGE = 0.0050  # Citadel 1-jump surcharge
+BUY_SCC_SURCHARGE = 0.0050        # 0.50% SCC Citadel 1-jump surcharge
+
+def calc_unit_cost(buy_price: float) -> float:
+    """Gross ISK cost to acquire 1 unit including Citadel broker surcharge."""
+    return buy_price * (1.0 + BUY_SCC_SURCHARGE)
+
+def calc_net_proceeds(sell_price: float) -> float:
+    """Net ISK realized after Jita broker fee and sales tax exit costs."""
+    return sell_price * (1.0 - TOTAL_EXIT_FEE)
+
+def calc_max_profitable_buy(sell_price: float, min_margin_pct: float) -> float:
+    """
+    Computes highest bid price that still delivers target margin:
+    Target_Buy = Net_Proceeds / (1 + Margin) / (1 + Buy_Fee)
+    """
+    net_rev = calc_net_proceeds(sell_price)
+    return net_rev / (1.0 + (min_margin_pct / 100.0)) / (1.0 + BUY_SCC_SURCHARGE)
+
+def calc_projected_margin(buy_price: float, sell_price: float) -> float:
+    """Calculates net profit margin percentage between buy bid and sell exit."""
+    cost = calc_unit_cost(buy_price)
+    if cost <= 0:
+        return 0.0
+    net_rev = calc_net_proceeds(sell_price)
+    return ((net_rev - cost) / cost) * 100.0
+
+def calc_line_financials(buy_price: float, sell_price: float, qty: int = 1) -> dict:
+    """
+    Consolidated financial metrics for a ledger row.
+    Returns unit cost, profit, total capital, total profit, and net margin %.
+    """
+    cost_unit = calc_unit_cost(buy_price)
+    net_rev_unit = calc_net_proceeds(sell_price)
+    profit_unit = net_rev_unit - cost_unit
+
+    return {
+        "cost_unit": round(cost_unit, 2),
+        "net_proceeds_unit": round(net_rev_unit, 2),
+        "profit_unit": round(profit_unit, 2),
+        "capital": round(cost_unit * qty, 2),
+        "profit": round(profit_unit * qty, 2),
+        "net_margin": round((profit_unit / cost_unit) * 100.0, 1) if cost_unit > 0 else 0.0
+    }
 
 def get_item_names(type_ids: list) -> dict:
     if not type_ids:

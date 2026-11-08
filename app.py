@@ -33,13 +33,24 @@ STATE = {
     "last_ledger_run": None,
 }
 
+def get_last_ledger_run_time():
+    for fpath in ["ledgers/evergreen_ledger.csv", "ledgers/hold_ledger.csv"]:
+        if os.path.exists(fpath):
+            try:
+                mtime = os.path.getmtime(fpath)
+                return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                pass
+    return STATE.get("last_ledger_run")
+
+
 class MultiSellRequest(BaseModel):
     raw_text: Optional[str] = None
 
 def run_ledger_subprocess():
     STATE["ledger_running"] = True
     try:
-        subprocess.run(["python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "50.0"], check=True)
+        subprocess.run(["python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto"], check=True)
         STATE["last_ledger_run"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         update_ledger_market_prices()
     finally:
@@ -141,7 +152,7 @@ async def api_state():
     effective_equity = wallet_balance + active_escrow if (wallet_balance + active_escrow) > 0 else total_cap
 
     return JSONResponse({
-        "status": STATE,
+        "status": {**STATE, "last_ledger_run": get_last_ledger_run_time()},
         "character": {
             "name": sso.get("character_name", "Hippie Father"),
             "character_id": sso.get("character_id"),

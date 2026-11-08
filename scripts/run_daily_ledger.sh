@@ -22,9 +22,15 @@ for i in {1..15}; do
     sleep 3
 done
 
+# 3. Synchronize daily Forge market history archive into DuckDB
+echo "[*] Syncing latest daily market history archives into DuckDB..."
+docker compose exec -T eve-trading-desk python3 scripts/sync_market_data.py || echo "[!] Market archive sync encountered an issue, proceeding with cached DuckDB history..."
+
+# 4. Generate dynamic multi-desk ledgers
 echo "[*] Running Dynamic Multi-Desk Waterfall Allocation (Auto-Equity)..."
 docker compose exec -T eve-trading-desk python3 scripts/generate_ledgers.py --desk all --capital auto
 
+# 5. Refresh live order book telemetry
 echo "[*] Refreshing live order book telemetry..."
 docker compose exec -T eve-trading-desk curl -s -X POST http://localhost:8000/api/market/refresh-prices > /dev/null 2>&1 || true
 
