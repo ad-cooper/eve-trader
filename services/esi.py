@@ -302,19 +302,27 @@ def load_cached_assets(max_age_seconds: int = 300, force: bool = False, *args, *
 HISTORY_CACHE_FILE = "data/history_cache.json"
 ESI_HEADERS = {"User-Agent": "eve-trading-desk-app/1.0 (local trading bot)"}
 
-def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
-    """Fetches Jita daily market history from ESI, cached locally for 12 hours."""
-    import time, requests
-    now = time.time()
-    os.makedirs("data", exist_ok=True)
-    cache = {}
+_MEM_HISTORY_CACHE = None
 
+def _load_history_cache():
+    global _MEM_HISTORY_CACHE
+    if _MEM_HISTORY_CACHE is not None:
+        return _MEM_HISTORY_CACHE
     if os.path.exists(HISTORY_CACHE_FILE):
         try:
             with open(HISTORY_CACHE_FILE, "r") as f:
-                cache = json.load(f)
+                _MEM_HISTORY_CACHE = json.load(f)
+                return _MEM_HISTORY_CACHE
         except Exception:
-            cache = {}
+            pass
+    _MEM_HISTORY_CACHE = {}
+    return _MEM_HISTORY_CACHE
+
+def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
+    """Fetches Jita daily market history from ESI, cached in-memory and on disk."""
+    import time, requests
+    now = time.time()
+    cache = _load_history_cache()
 
     entry = cache.get(str(type_id))
     if entry and (now - entry.get("timestamp", 0) < 43200):

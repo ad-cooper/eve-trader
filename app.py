@@ -33,6 +33,18 @@ STATE = {
     "last_ledger_run": None,
 }
 
+def get_last_sniper_run_time():
+    if STATE.get("last_sniper_run"):
+        return STATE["last_sniper_run"]
+    target = "ledgers/sniper_deals.json"
+    if os.path.exists(target):
+        try:
+            mtime = os.path.getmtime(target)
+            return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+    return None
+
 def get_last_ledger_run_time():
     for fpath in ["ledgers/evergreen_ledger.csv", "ledgers/hold_ledger.csv"]:
         if os.path.exists(fpath):
@@ -65,7 +77,7 @@ def run_sniper_subprocess():
             raw_log += f"\n\n=== STDERR / ERRORS ===\n{res.stderr}"
         STATE["last_sniper_run"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         with open("ledgers/live_sniper_cache.json", "w") as f:
-            json.dump({"timestamp": STATE["last_sniper_run"], "raw_output": raw_log}, f)
+            json.dump({"timestamp": get_last_sniper_run_time(), "raw_output": raw_log}, f)
         print(f"[+] Deal sniper completed (Exit Code: {res.returncode})")
         if res.stderr:
             print(f"[!] Deal sniper stderr:\n{res.stderr}")
@@ -120,7 +132,7 @@ async def sso_callback(code: str = None, error: str = None):
     return RedirectResponse("/")
 
 @app.get("/api/state")
-async def api_state():
+def api_state():
     eg, tac, hld = get_annotated_desks()
     orders = load_cached_orders()
     sso = load_sso_tokens() or {}
@@ -173,7 +185,7 @@ async def api_state():
         "desks": {"evergreen": eg, "tactical": tac, "hold": hld},
         "desk_metrics": {"evergreen": metrics_eg, "tactical": metrics_tac, "hold": metrics_hld},
         "sniper": {
-            "timestamp": STATE["last_sniper_run"],
+            "timestamp": get_last_sniper_run_time(),
             "deals": load_sniper_deals(),
             "raw_output": sniper_cache.get("raw_output", "")
         },

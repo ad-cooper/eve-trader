@@ -683,7 +683,7 @@ async function copyMultiSellImportText(btn) {
   }
 }
 
-setInterval(fetchData, 3000);
+setInterval(fetchData, 10000);
 fetchData();
 
 // ==========================================

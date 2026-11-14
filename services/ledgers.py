@@ -39,14 +39,14 @@ def load_cached_orders():
     return {"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0}
 
 def load_sniper_deals():
-    for fpath in ["ledgers/live_deals.json", "ledgers/sniper_deals.json", "data/live_deals.json"]:
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, "r") as f:
-                    data = json.load(f)
-                    return data.get("deals", [])
-            except Exception:
-                pass
+    target = "ledgers/sniper_deals.json"
+    if os.path.exists(target):
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else data.get("deals", [])
+        except Exception:
+            pass
     return []
 
 def load_market_prices_cache():
@@ -216,7 +216,15 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
 
     return items
 
+_DESK_ANNOTATION_CACHE = None
+_DESK_CACHE_TIME = 0.0
+
 def get_annotated_desks():
+    global _DESK_ANNOTATION_CACHE, _DESK_CACHE_TIME
+    import time
+    now = time.time()
+    if _DESK_ANNOTATION_CACHE is not None and (now - _DESK_CACHE_TIME) < 5.0:
+        return _DESK_ANNOTATION_CACHE
     evergreen = load_desk_csv("evergreen_ledger.csv")
     tactical = load_desk_csv("tactical_ledger.csv")
     hold = load_desk_csv("hold_ledger.csv")
@@ -230,4 +238,6 @@ def get_annotated_desks():
     tac = annotate_desk_items(tactical, "tactical", market_prices, buys, sells)
     hld = annotate_desk_items(hold, "hold", market_prices, buys, sells)
 
-    return eg, tac, hld
+    _DESK_ANNOTATION_CACHE = (eg, tac, hld)
+    _DESK_CACHE_TIME = now
+    return _DESK_ANNOTATION_CACHE

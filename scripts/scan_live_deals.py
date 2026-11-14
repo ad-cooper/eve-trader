@@ -59,33 +59,15 @@ def is_banned_item(name: str) -> bool:
             return True
     return False
 
-def get_candidate_universe():
+def get_candidate_universe(scan_limit: int = 1200):
     candidates = {}
 
-    # 1. Active Desk Items (Evergreen, Tactical, Hold)
-    for desk in ["evergreen", "tactical", "hold"]:
-        for it in load_desk_csv(f"{desk}_ledger.csv"):
-            tid = int(it["type_id"])
-            name = it.get("item_name") or it.get("name")
-            if is_banned_item(name):
-                continue
-            candidates[tid] = {
-                "type_id": tid,
-                "name": name,
-                "target_buy": float(it.get("target_buy", 0.0)),
-                "target_sell": float(it.get("target_sell", 0.0)),
-                "desk": desk.upper(),
-                "median_30d": float(it.get("target_sell", 0.0)),
-                "daily_vol": 10.0
-            }
-
-    # 2. Query DuckDB for Liquid Forge Commodities with Real Historical Volume
+    # Query DuckDB for Liquid Forge Commodities with Real Historical Volume
     try:
         con = duckdb.connect(DUCKDB_PATH, read_only=True)
         con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
         
-        # Must have traded at least 7 distinct days in the last 14 days, avg >= 5 units/day
-        query = """
+        query = f"""
         WITH stats AS (
             SELECT 
                 type_id,
@@ -96,9 +78,10 @@ def get_candidate_universe():
             WHERE TRY_CAST(date AS DATE) >= (SELECT MAX(TRY_CAST(date AS DATE)) - INTERVAL 30 DAY FROM forge_market_history)
               AND average > 0 AND volume > 0
             GROUP BY type_id
-            HAVING COUNT(DISTINCT TRY_CAST(date AS DATE)) >= 10 
-               AND AVG(volume) >= 5.0
-               AND QUANTILE_CONT(average, 0.50) >= 5000000
+            HAVING COUNT(DISTINCT TRY_CAST(date AS DATE)) >= 12
+               AND AVG(volume) >= 3.0
+               AND QUANTILE_CONT(average, 0.50) >= 10000000
+               AND (AVG(volume) * QUANTILE_CONT(average, 0.50)) >= 40000000 -- Min 40M ISK daily turnover
         )
         SELECT 
             s.type_id,
@@ -108,20 +91,19 @@ def get_candidate_universe():
         FROM stats s
         JOIN sde.invTypes t ON s.type_id = t.typeID
         JOIN sde.invGroups g ON t.groupID = g.groupID
-        WHERE g.categoryID NOT IN (26, 30, 32, 63) -- Exclude blueprints, apparel, special edition
+        WHERE g.categoryID NOT IN (26, 30, 32, 63)
         ORDER BY (s.daily_vol * s.median_30d) DESC
-        LIMIT 500;
+        LIMIT {scan_limit};
         """
         rows = con.execute(query).fetchall()
         con.close()
-
-        for r in rows:
-            tid = r[0]
-            name = r[1]
-            if is_banned_item(name):
-                continue
-            if tid not in candidates:
-                candidates[tid] = {
+    except Exception as e:
+        print(f"[!] DuckDB Query Warning: {e}")
+    for r in rows:
+        tid = r[0]
+        name = r[1]
+        if tid not in candidates:
+            candidates[tid] = {
                     "type_id": tid,
                     "name": name,
                     "target_buy": 0.0,
@@ -130,14 +112,7 @@ def get_candidate_universe():
                     "median_30d": float(r[3]),
                     "daily_vol": float(r[2])
                 }
-    except Exception as e:
-        print(f"[!] DuckDB Query Warning: {e}")
-
-    # Apply Temporary Blacklist
-    bl_items, bl_groups, _ = load_active_blacklist()
-    filtered = {tid: c for tid, c in candidates.items() if c["name"] not in bl_items and not is_banned_item(c["name"])}
-    print(f"[*] Hardened Universe: {len(filtered)} liquid candidates queued for scanning.")
-    return filtered
+    return candidates
 
 def scan_orders_for_type(session, tid):
     url = f"https://esi.evetech.net/latest/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=all&type_id={tid}"
@@ -165,8 +140,14 @@ def scan_orders_for_type(session, tid):
     return tid, [], None
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Live Deal Sniper")
+    parser.add_argument("--limit", type=int, default=1200, help="Number of liquid items to scan (default: 1200)")
+    parser.add_argument("--mode", type=str, default="all", help="Scan mode compatibility flag")
+    args = parser.parse_args()
+
     start_time = datetime.now(timezone.utc)
-    candidates = get_candidate_universe()
+    candidates = get_candidate_universe(scan_limit=args.limit)
     if not candidates:
         print("[!] No candidates found to scan.")
         return
@@ -176,7 +157,7 @@ def main():
     order_data = {}
 
     print(f"[*] Scanning live books across {len(type_ids)} targets...")
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=28) as executor:
         futures = {executor.submit(scan_orders_for_type, session, tid): tid for tid in type_ids}
         for fut in as_completed(futures):
             tid, sells, top_buy = fut.result()
@@ -272,11 +253,11 @@ def main():
 
     deals.sort(key=lambda x: x["est_profit"], reverse=True)
 
-    # Save to both file paths
-    for p in ["ledgers/live_deals.json", "ledgers/sniper_deals.json"]:
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w") as f:
-            json.dump(deals, f, indent=2)
+    # Save to canonical sniper ledger file
+    target = "ledgers/sniper_deals.json"
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(deals, f, indent=2)
 
     elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
     print(f"[+] Scan completed in {elapsed:.1f}s. Found {len(deals)} legitimate deals.")
