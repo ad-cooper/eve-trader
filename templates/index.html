@@ -114,6 +114,10 @@
             <input type="checkbox" id="filter-unplaced" onchange="renderActiveTab()" class="rounded bg-slate-800 border-slate-600 text-eveCyan focus:ring-0">
             <span>Unplaced Only</span>
           </label>
+        <label class="inline-flex items-center gap-1.5 text-xs text-rose-300 font-semibold cursor-pointer ml-3">
+          <input type="checkbox" id="filter-cancel" onchange="renderActiveTab()" class="rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-rose-500">
+          Cancel / Drop Only
+        </label>
           <button id="btn-refresh-asks" onclick="triggerAskRefresh()" title="Poll live Jita 4-4 sell orders" class="text-xs bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 px-2.5 py-1 rounded transition flex items-center gap-1.5 font-mono">
             <svg class="w-3.5 h-3.5 animate-spin hidden" id="spinner-asks" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
             <span id="text-asks">Poll Asks</span>
@@ -574,6 +578,6 @@
     </div>
   </div>
 
-  <script src="/static/js/dashboard.js?v=1793836443"></script>
+  <script src="/static/js/dashboard.js?v=cancel_v2"></script>
 </body>
 </html>

@@ -204,8 +204,11 @@ function renderActiveTab() {
     if (elUnplacedBadge) elUnplacedBadge.innerText = `${unplacedRows.length} unplaced`;
 
     let rows = allDeskRows;
-    if (document.getElementById('filter-unplaced').checked) {
+    if (document.getElementById('filter-unplaced') && document.getElementById('filter-unplaced').checked) {
       rows = rows.filter(r => r.char_status === 'UNPLACED');
+    }
+    if (document.getElementById('filter-cancel') && document.getElementById('filter-cancel').checked) {
+      rows = rows.filter(r => (r.action_code || '').startsWith('CANCEL_'));
     }
     renderTableRows(rows);
   }
@@ -384,7 +387,7 @@ function renderTableRows(rows) {
         <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
         <span>${r.action_text || 'BUMP VIABLE'}</span>
       </span>`;
-    } else if (r.action_code === 'CANCEL_CEILING') {
+    } else if ((r.action_code || '').startsWith('CANCEL_')) {
       deskActionBadge = `<span class="bg-rose-950/90 text-rose-300 border border-rose-600/90 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono" title="Top bid exceeds profitable threshold. Cancel order to free escrow for active rotation.">
         <span class="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
         <span>${r.action_text || 'CANCEL (CEILING)'}</span>
@@ -765,7 +768,7 @@ function renderAdvisorView() {
   if (!advisorData) return;
 
   const totalCount = advisorData.items ? advisorData.items.length : 0;
-  const readyItems = (advisorData.items || []).filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
+  const readyItems = (advisorData.items || []).filter(i => ['flip', 'met', 'unmanaged', 'time_stop'].includes(i.action_type));
 
   const totalValEl = document.getElementById('adv-total-val');
   if (totalValEl) totalValEl.textContent = fmtISK(advisorData.total_value);
@@ -813,7 +816,7 @@ function renderAdvisorTable() {
 
   let rows = advisorData.items || [];
   if (currentAdvisorFilter === 'ready') {
-    rows = rows.filter(i => ['flip', 'met', 'unmanaged'].includes(i.action_type));
+    rows = rows.filter(i => ['flip', 'met', 'unmanaged', 'time_stop'].includes(i.action_type));
   } else if (currentAdvisorFilter === 'hold') {
     rows = rows.filter(i => i.action_type === 'hold');
   } else   if (currentAdvisorFilter === 'unmanaged') {

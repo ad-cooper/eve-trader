@@ -94,15 +94,26 @@ def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_
 
     return round(t_buy, 2), round(t_sell, 2), qty
 
-def evaluate_order_action(desk_type: str, my_price: float, top_buy: float, t_sell: float, dump_freq: float) -> tuple:
+def evaluate_order_action(desk_type: str, my_price: float, top_buy: float, t_sell: float, dump_freq: float, proximity_pct: float = None) -> tuple:
     """Evaluates whether an active order is winning, viable to bump, or needs cancellation."""
+    min_margin = 4.5 if desk_type == "evergreen" else (18.0 if desk_type == "hold" else 8.5)
+    cancel_floor = 2.5 if desk_type == "evergreen" else (10.0 if desk_type == "hold" else 5.0)
+    max_buy = calc_max_profitable_buy(t_sell, min_margin)
+    max_hold_buy = calc_max_profitable_buy(t_sell, cancel_floor)
+
+    # Guard: Flag for cancellation only if margin compresses below the desk's sunk-fee cancel floor
+    if max_hold_buy > 0 and my_price > (max_hold_buy * 1.005):
+        cur_margin = calc_projected_margin(my_price, t_sell)
+        return "CANCEL_OVERPRICED", f"OVERBID ({cur_margin:.1f}% MARGIN - CANCEL)"
+
+    if desk_type == "hold" and proximity_pct is not None and proximity_pct > 92.0:
+        return "CANCEL_RECOVERED", "DIP RECOVERED (CANCEL)"
+
     if top_buy > 0 and my_price >= (top_buy - 0.01):
         return "TOP_BOOK", "TOP BID (WINNING)"
 
-    min_margin = 4.5 if desk_type == "evergreen" else 8.5
     next_bid = top_buy + 0.01
     proj_margin = calc_projected_margin(next_bid, t_sell)
-    max_buy = calc_max_profitable_buy(t_sell, min_margin)
 
     if top_buy <= max_buy and proj_margin >= min_margin:
         return "BUMP_VIABLE", f"BUMP VIABLE (+{proj_margin:.1f}%)"
@@ -145,7 +156,7 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             item["escrow"] = float(b.get("escrow", item.get("capital", 0.0)))
             item["price_synced"] = abs(b["price"] - t_buy) / t_buy < 0.01 if t_buy > 0 else True
             dump_f = float(item.get("dump_freq", 0.0))
-            code, label = evaluate_order_action(desk_type, b["price"], live_top_buy or 0.0, t_sell, dump_f)
+            code, label = evaluate_order_action(desk_type, b["price"], live_top_buy or 0.0, t_sell, dump_f, item.get("proximity_pct"))
             item["action_code"] = code
             item["action_text"] = label
         elif tid in sells:
@@ -219,6 +230,105 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
 _DESK_ANNOTATION_CACHE = None
 _DESK_CACHE_TIME = 0.0
 
+
+def _inject_orphaned_buys(eg: list, tac: list, hld: list, buys: dict, market_prices: dict):
+    """Surfaces active buy orders whose items rotated out of all CSV ledgers so they can be cancelled."""
+    known_tids = {str(r.get("type_id", "")) for r in (eg + tac + hld)}
+    orphan_tids = [int(tid) for tid in buys.keys() if str(tid) not in known_tids and str(tid).isdigit()]
+    if not orphan_tids:
+        return
+
+    global _ORPHAN_NAME_CACHE
+    if "_ORPHAN_NAME_CACHE" not in globals():
+        _ORPHAN_NAME_CACHE = {}
+
+    desk_lookup = {}
+    try:
+        import duckdb
+        con = duckdb.connect("data/eve_analytics.duckdb", read_only=True)
+        id_str = ",".join(str(t) for t in orphan_tids)
+        rows = con.execute(f"""
+            SELECT type_id, desk_type, target_sell, name
+            FROM (
+                SELECT type_id, desk_type, target_sell, name,
+                       ROW_NUMBER() OVER (PARTITION BY type_id ORDER BY snapshot_time DESC) as rn
+                FROM ledger_history WHERE type_id IN ({id_str})
+            ) WHERE rn = 1
+        """).fetchall()
+        con.close()
+        for r in rows:
+            desk_lookup[r[0]] = (str(r[1]).lower(), float(r[2] or 0.0))
+            if r[3] and not str(r[3]).startswith("Type "):
+                _ORPHAN_NAME_CACHE[int(r[0])] = str(r[3])
+    except Exception:
+        pass
+
+    missing = [t for t in orphan_tids if t not in _ORPHAN_NAME_CACHE]
+    if missing:
+        try:
+            from services.market import resolve_type_ids
+            for k, v in (resolve_type_ids(missing) or {}).items():
+                if v and not str(v).startswith("Type "):
+                    _ORPHAN_NAME_CACHE[int(k)] = str(v)
+        except Exception:
+            pass
+
+    missing = [t for t in orphan_tids if t not in _ORPHAN_NAME_CACHE]
+    if missing:
+        try:
+            import requests
+            res = requests.post(
+                "https://esi.evetech.net/latest/universe/names/?datasource=tranquility",
+                json=missing,
+                timeout=5
+            )
+            if res.status_code == 200:
+                for entry in res.json():
+                    _ORPHAN_NAME_CACHE[int(entry["id"])] = str(entry["name"])
+        except Exception:
+            pass
+
+    name_map = _ORPHAN_NAME_CACHE
+
+    buckets = {"evergreen": eg, "tactical": tac, "hold": hld}
+    for tid_int in orphan_tids:
+        tid_str = str(tid_int)
+        b = buys[tid_str]
+        desk_key, last_sell = desk_lookup.get(tid_int, ("evergreen", 0.0))
+        target_list = buckets.get(desk_key, eg)
+        p_info = market_prices.get(tid_str) or {}
+        my_p = float(b.get("price", 0.0))
+        qty = int(b.get("volume_remain", 1))
+        escrow = float(b.get("escrow", my_p * qty))
+        fin = calc_line_financials(my_p, last_sell, qty) if last_sell > 0 else {
+            "cost_unit": round(calc_unit_cost(my_p), 2),
+            "net_proceeds_unit": 0.0,
+            "profit_unit": 0.0,
+            "capital": round(escrow, 2),
+            "profit": 0.0,
+            "net_margin": 0.0
+        }
+        row = {
+            "type_id": tid_int,
+            "name": name_map.get(tid_int, f"Type {tid_int}"),
+            "qty": qty,
+            "dump_freq": 0.0,
+            "target_buy": 0.0,
+            "target_sell": round(last_sell, 2),
+            "live_ask": p_info.get("lowest_ask"),
+            "proximity_pct": None,
+            "diff_pct": 0.0,
+            "char_status": "BUY_ACTIVE",
+            "my_price": my_p,
+            "my_qty": qty,
+            "escrow": round(escrow, 2),
+            "price_synced": False,
+            "action_code": "CANCEL_DROPPED",
+            "action_text": "DROPPED FROM LEDGER (CANCEL)"
+        }
+        row.update(fin)
+        target_list.insert(0, row)
+
 def get_annotated_desks():
     global _DESK_ANNOTATION_CACHE, _DESK_CACHE_TIME
     import time
@@ -237,6 +347,7 @@ def get_annotated_desks():
     eg = annotate_desk_items(evergreen, "evergreen", market_prices, buys, sells)
     tac = annotate_desk_items(tactical, "tactical", market_prices, buys, sells)
     hld = annotate_desk_items(hold, "hold", market_prices, buys, sells)
+    _inject_orphaned_buys(eg, tac, hld, buys, market_prices)
 
     _DESK_ANNOTATION_CACHE = (eg, tac, hld)
     _DESK_CACHE_TIME = now

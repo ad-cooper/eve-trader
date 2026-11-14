@@ -150,9 +150,19 @@ def load_market_universe():
     metrics_7d AS (
         SELECT 
             type_id,
-            SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_7d
+            SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_7d,
+            MIN(lowest) AS min_low_7d
         FROM forge_market_history
         WHERE date >= (SELECT MAX(date) - INTERVAL 7 DAY FROM forge_market_history) AND volume > 0
+        GROUP BY type_id
+    ),
+    metrics_floors AS (
+        SELECT
+            type_id,
+            QUANTILE_CONT(CASE WHEN date >= (SELECT MAX(date) - INTERVAL 14 DAY FROM forge_market_history) THEN lowest END, 0.25) AS min_low_14d,
+            QUANTILE_CONT(lowest, 0.20) AS p20_low_30d
+        FROM forge_market_history
+        WHERE date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history) AND volume > 0
         GROUP BY type_id
     )
     SELECT 
@@ -164,12 +174,15 @@ def load_market_universe():
         l.vwap_180d / 1e6 AS price_m_180d,
         m.vwap_30d / 1e6 AS price_m_30d,
         w.vwap_7d / 1e6 AS price_m_7d,
+        f.min_low_14d / 1e6 AS min_low_m_14d,
+        f.p20_low_30d / 1e6 AS p20_low_m_30d,
         m.daily_vol_30d,
         m.dump_freq_pct,
         m.avg_spread_30d,
         (m.daily_vol_30d * (m.vwap_30d / 1e6)) AS daily_turnover_m
     FROM metrics_30d m
     JOIN metrics_7d w ON m.type_id = w.type_id
+    JOIN metrics_floors f ON m.type_id = f.type_id
     JOIN metrics_180d l ON m.type_id = l.type_id
     JOIN sde.invTypes t ON m.type_id = t.typeID
     JOIN sde.invGroups g ON t.groupID = g.groupID
@@ -191,12 +204,21 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
     mask &= ~df["category_name"].isin(["Personalization", "SKINs", "Special Edition Assets", "Apparel"])
     mask &= ~df["item_name"].str.contains("Modified|Voucher|Token|Certificate", regex=True)
     # Exclude event assets, ciphers, boosters, and seasonal campaign tokens
-    event_filter = "Radiance|Cerebral|Booster|Keypass|Cipher|Harvest|Tetrimon|Shortcut|Gauntlet"
+    event_filter = "Radiance|Cerebral|Booster|Keypass|Cipher|Harvest|Tetrimon|Shortcut|Gauntlet|Filament"
     mask &= ~df["item_name"].str.contains(event_filter, case=False, na=False)
     if desk_type == "evergreen":
         mask &= ~df["group_name"].str.contains("Mutaplasmid", case=False, na=False)
         mask &= ~df["item_name"].str.contains("Mutaplasmid", case=False, na=False)
-    mask &= df["price_m_7d"] >= (df["price_m_30d"] * 0.75)
+    # Auto-cooldown items with negative trailing 30d realized profit
+    if os.path.exists("ledgers/performance_cache.json"):
+        try:
+            with open("ledgers/performance_cache.json", "r") as pf:
+                perf_items = json.load(pf).get("items", [])
+                losing_tids = {int(it["type_id"]) for it in perf_items if float(it.get("profit", 0.0)) < -1_000_000}
+                mask &= ~df["type_id"].isin(losing_tids)
+        except Exception:
+            pass
+    mask &= df["price_m_7d"] >= (df["price_m_30d"] * 0.78)
 
     if desk_type == "hold":
         mask &= ~df["category_name"].isin(["Skill"])
@@ -207,12 +229,12 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         mask &= df["price_m_30d"] <= (df["price_m_180d"] * 0.98)
         
         candidates = df[mask].copy()
-        candidates["upside_pct"] = ((candidates["price_m_180d"] * 1.10) - candidates["price_m_30d"]) / candidates["price_m_30d"] * 100.0
+        candidates["upside_pct"] = ((candidates["price_m_180d"] * 0.96) - candidates["price_m_30d"]) / candidates["price_m_30d"] * 100.0
         candidates = candidates.sort_values(by="upside_pct", ascending=False)
         vol_pct = 0.08
         max_line_cap = 1.5e9 * scale_factor
         min_line_cap = 150.0e6
-        min_margin_req = 4.0
+        min_margin_req = 18.0
 
     elif desk_type == "tactical":
         mask &= df["price_m_30d"].between(5.0, 2000.0)
@@ -230,7 +252,9 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         mask &= df["daily_turnover_m"] >= 35.0
         mask &= df["daily_vol_30d"] >= 2.0
         mask &= df["avg_spread_30d"] >= 9.8
-        candidates = df[mask].copy().sort_values(by="daily_turnover_m", ascending=False)
+        candidates = df[mask].copy()
+        candidates["profit_velocity"] = candidates["daily_turnover_m"] * (candidates["avg_spread_30d"] - 5.1)
+        candidates = candidates.sort_values(by="profit_velocity", ascending=False)
         vol_pct = 0.25
         max_line_cap = 1.2e9 * scale_factor
         min_line_cap = 100.0e6
@@ -245,6 +269,8 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         vwap_30d = row["price_m_30d"] * 1e6
         vwap_180d = row["price_m_180d"] * 1e6
         vwap_7d = row["price_m_7d"] * 1e6
+        min_low_14d = (row.get("min_low_m_14d") or row["price_m_30d"] * 0.92) * 1e6
+        p20_low_30d = (row.get("p20_low_m_30d") or row["price_m_30d"] * 0.94) * 1e6
         dump_freq = float(row["dump_freq_pct"])
 
         p_info = market_telemetry.get(str(tid)) or {}
@@ -255,34 +281,33 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         drift = abs(p_current - vwap_30d) / vwap_30d if vwap_30d > 0 else 0
         stability_score = max(0.70, min(1.0, 1.0 - (1.2 * drift) - (0.2 * (dump_freq / 100.0))))
 
+        # Realistic market bid anchor: competitive top_buy + 0.01, or 20th-percentile 30d low (never below 98% of 14d min)
+        realistic_floor = min_low_14d * 0.98
+        competitive_bid = (live_buy + 0.01) if (live_buy and live_buy > 0) else min(p20_low_30d, p_current * 0.92)
+
         if desk_type == "hold":
-            if live_ask and live_ask >= (vwap_180d * 0.92):
+            if live_ask and live_ask >= (vwap_180d * 0.90):
                 continue
-            t_sell = min(vwap_180d * 1.100, vwap_30d * 1.350)
+            t_sell = min(vwap_180d * 0.960, vwap_30d * 1.220)
+            # Anchor Hold bid to live_buy or recent 30d lower-quintile dump instead of an unfillable -20% haircut
+            t_buy = competitive_bid
             if live_ask and live_ask > 0:
-                t_buy = min(live_ask * 0.88, vwap_180d * 0.860)
-            else:
-                t_buy = min(vwap_30d * 0.88, vwap_180d * 0.860)
-            if live_buy and live_buy > 0 and live_buy < t_buy:
-                t_buy = live_buy + 0.01
+                t_buy = min(t_buy, live_ask * 0.94)
 
         elif desk_type == "tactical":
             stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
             baseline_sell = vwap_30d * 1.045
             t_sell = (0.50 * stabilized_ask) + (0.50 * baseline_sell)
-            t_buy = t_sell * (0.895 / 1.045)
+            # Bid at competitive top_buy or 20th-percentile dump floor; let min_margin_req filter out tight spreads
+            t_buy = competitive_bid
+            if live_ask and live_ask > 0:
+                t_buy = min(t_buy, live_ask * 0.95)
 
         else:  # evergreen
             stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
-            t_sell = min(stabilized_ask, vwap_30d * 1.035)
-            net_proceeds = t_sell * (1.0 - TOTAL_EXIT_FEES)
-            max_profitable_buy = net_proceeds / (1.0 + (min_margin_req / 100.0)) / (1.0 + BUY_FEE_CITADEL)
-
-            if live_buy and live_buy > 0:
-                t_buy = min(live_buy + 0.01, max_profitable_buy)
-            else:
-                t_buy = min(t_sell * 0.910, max_profitable_buy)
-
+            t_sell = min(stabilized_ask, vwap_30d * 1.055)
+            # Bid at live top_buy + 0.01 (or 20th-percentile low); skip if spread at that real bid is < min_margin_req
+            t_buy = competitive_bid
             ceil_guard = (live_ask * 0.985) if live_ask else (t_sell * 0.985)
             t_buy = min(t_buy, ceil_guard)
 
