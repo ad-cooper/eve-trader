@@ -484,6 +484,7 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
         }
 
     return hold_params
+
 def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False):
     targets = []
     if raw_text and raw_text.strip():

@@ -4,8 +4,6 @@ let chartInstance = null;
 let perfFilterMode = 'all';
 let showSniperRaw = false;
 let missingBuysData = null;
-let multiSellData = null;
-let multiSellMode = 'stock';
 
 function fmtISK(val) {
   if (!val && val !== 0) return '0 ISK';
@@ -478,19 +476,24 @@ async function triggerSniper() {
   }
 }
 
+let askPollingActive = false;
+
 async function triggerAskRefresh() {
   const spinner = document.getElementById('spinner-asks');
   const text = document.getElementById('text-asks');
+  askPollingActive = true;
   spinner.classList.remove('hidden');
   text.innerText = 'Polling Books...';
   try {
     await fetch('/api/market/refresh-prices', { method: 'POST' });
-    setTimeout(fetchData, 2000);
+    setTimeout(fetchData, 4500);
+    setTimeout(fetchData, 9000);
   } finally {
     setTimeout(() => {
+      askPollingActive = false;
       spinner.classList.add('hidden');
       text.innerText = 'Poll Asks';
-    }, 2500);
+    }, 9500);
   }
 }
 
@@ -583,110 +586,21 @@ async function copySinglePrice(price, btn) {
   }, 1200);
 }
 
-function openMultiSellModal() {
-  document.getElementById('modal-multisell').classList.remove('hidden');
-  calculateMultiSell();
-}
+// Fast 3s poll only while a background job runs; 60s when idle; paused in hidden tabs
+setInterval(() => {
+  if (document.hidden) return;
+  const busy = askPollingActive || globalData?.status?.sniper_running || globalData?.status?.ledger_running;
+  if (busy) fetchData();
+}, 3000);
 
-function closeMultiSellModal() {
-  document.getElementById('modal-multisell').classList.add('hidden');
-}
+setInterval(() => {
+  if (!document.hidden) fetchData();
+}, 60000);
 
-function setMultiSellTab(mode) {
-  multiSellMode = mode;
-  document.getElementById('tab-ms-stock').className = mode === 'stock'
-    ? 'px-3 py-1.5 border-b-2 border-emerald-400 text-emerald-400 font-bold transition'
-    : 'px-3 py-1.5 border-b-2 border-transparent text-slate-400 hover:text-white transition';
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) fetchData();
+});
 
-  document.getElementById('tab-ms-paste').className = mode === 'paste'
-    ? 'px-3 py-1.5 border-b-2 border-emerald-400 text-emerald-400 font-bold transition'
-    : 'px-3 py-1.5 border-b-2 border-transparent text-slate-400 hover:text-white transition';
-
-  document.getElementById('ms-stock-view').classList.toggle('hidden', mode !== 'stock');
-  document.getElementById('ms-paste-view').classList.toggle('hidden', mode !== 'paste');
-}
-
-async function calculateMultiSell() {
-  const spinner = document.getElementById('spinner-multisell');
-  const btnText = document.getElementById('text-multisell');
-  spinner.classList.remove('hidden');
-  btnText.innerText = 'Pricing Books...';
-
-  try {
-    let payload = {};
-    if (multiSellMode === 'paste') {
-      const text = document.getElementById('ms-paste-input').value;
-      if (!text.trim()) {
-        alert('Please paste exported items from EVE MultiSell first.');
-        spinner.classList.add('hidden');
-        btnText.innerText = 'Calculate MultiSell Prices';
-        return;
-      }
-      payload.raw_text = text;
-    }
-
-    const res = await fetch('/api/orders/multisell-price', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    multiSellData = await res.json();
-
-    if (!multiSellData.items || !multiSellData.items.length) {
-      document.getElementById('modal-ms-body').innerHTML = `
-        <tr><td colspan="7" class="p-6 text-center text-slate-500">
-          No stock items found in Jita 4-4 hangar. If using Export, switch to the "Paste MultiSell Export" tab above!
-        </td></tr>`;
-      document.getElementById('modal-ms-count').innerText = '0 items';
-      document.getElementById('modal-ms-value').innerText = '0 ISK';
-      return;
-    }
-
-    if (multiSellData.multisell_text) {
-      await copyToClipboard(multiSellData.multisell_text);
-    }
-
-    document.getElementById('modal-ms-count').innerText = `${multiSellData.total_items} items`;
-    document.getElementById('modal-ms-value').innerText = fmtISK(multiSellData.total_value);
-
-    const tbody = document.getElementById('modal-ms-body');
-    tbody.innerHTML = multiSellData.items.map((it, i) => `
-      <tr class="hover:bg-slate-800/40 transition">
-        <td class="p-2.5 text-slate-500">${i + 1}</td>
-        <td class="p-2.5 font-semibold text-white">
-          <a href="https://evetycoon.com/market/${it.type_id}" target="_blank" class="hover:text-eveCyan hover:underline">${it.name}</a>
-        </td>
-        <td class="p-2.5 text-right text-slate-300 font-semibold">${it.qty.toLocaleString()}</td>
-        <td class="p-2.5 text-right text-slate-400 font-mono">${fmtISK(it.lowest_ask)}</td>
-        <td class="p-2.5 text-right text-emerald-400 font-bold font-mono">${fmtISK(it.recommended_sell)}</td>
-        <td class="p-2.5 text-right text-slate-300 font-mono">${fmtISK(it.line_value)}</td>
-        <td class="p-2.5 text-center">
-          <button onclick="copySinglePrice(${it.recommended_sell}, this)" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 px-2 py-0.5 rounded text-[10px] font-mono transition">
-            Copy
-          </button>
-        </td>
-      </tr>
-    `).join('');
-
-  } catch (err) {
-    console.error('MultiSell error:', err);
-    alert('Failed to compute MultiSell prices.');
-  } finally {
-    spinner.classList.add('hidden');
-    btnText.innerText = 'Recalculate Prices';
-  }
-}
-
-async function copyMultiSellImportText(btn) {
-  if (multiSellData && multiSellData.multisell_text) {
-    const success = await copyToClipboard(multiSellData.multisell_text);
-    const orig = btn.innerText;
-    btn.innerText = success ? 'Copied to Clipboard!' : 'Copy Failed';
-    setTimeout(() => { btn.innerText = orig; }, 2000);
-  }
-}
-
-setInterval(fetchData, 10000);
 fetchData();
 
 // ==========================================
@@ -910,15 +824,21 @@ function renderAdvisorTable() {
 }
 
 async function copyAdvisorMultisell(type) {
-  if (!advisorData) return;
-  const text = (type === 'ready') ? (advisorData.ready_multisell_text || '') : (advisorData.multisell_text || '');
+  if (!advisorData || !advisorData.items) return;
+  let items = [...advisorData.items];
+  if (type === 'ready') {
+    items = items.filter(i => ['flip', 'met', 'unmanaged', 'time_stop'].includes(i.action_type));
+  }
+  items.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const text = items.map(i => `${i.name}\t${Number(i.recommended_sell).toFixed(2)}`).join('\n');
+
   if (!text.trim()) {
     alert('No sell export data available to copy.');
     return;
   }
   const success = await copyToClipboard(text);
   if (success) {
-    alert(`Copied ${type === 'ready' ? 'Ready-to-Sell' : 'All Strategy'} items in EVE MultiSell format!`);
+    alert(`Copied ${type === 'ready' ? 'Ready-to-Sell' : 'All Strategy'} items (${items.length}) in EVE MultiSell format!`);
   } else {
     prompt("Clipboard blocked by browser. Press Ctrl+C to copy:", text);
   }

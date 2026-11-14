@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import base64
 import urllib.parse
 import requests
@@ -15,6 +16,7 @@ CALLBACK_URL = os.getenv("EVE_CALLBACK_URL", "http://localhost:8000/sso/callback
 SCOPES = "esi-markets.read_character_orders.v1 esi-wallet.read_character_wallet.v1 esi-assets.read_assets.v1"
 
 SSO_TOKEN_FILE = "ledgers/sso_token.json"
+SKIE_TOKEN_FILE = "token_skie_ankora.json"
 ORDERS_CACHE_FILE = "ledgers/character_orders.json"
 ASSETS_CACHE_FILE = "ledgers/character_assets.json"
 
@@ -41,18 +43,20 @@ def decode_jwt_payload(token: str) -> dict:
     payload = parts[1] + "=" * (-len(parts[1]) % 4)
     return json.loads(base64.urlsafe_b64decode(payload))
 
-def load_sso_tokens():
-    if os.path.exists(SSO_TOKEN_FILE):
+def load_sso_tokens(token_file: str = SSO_TOKEN_FILE):
+    if os.path.exists(token_file):
         try:
-            with open(SSO_TOKEN_FILE, "r") as f:
+            with open(token_file, "r") as f:
                 return json.load(f)
         except Exception:
             pass
     return None
 
-def save_sso_tokens(tokens: dict):
-    os.makedirs("ledgers", exist_ok=True)
-    with open(SSO_TOKEN_FILE, "w") as f:
+def save_sso_tokens(tokens: dict, token_file: str = SSO_TOKEN_FILE):
+    parent = os.path.dirname(token_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(token_file, "w") as f:
         json.dump(tokens, f, indent=2)
 
 def exchange_auth_code(code: str) -> dict:
@@ -91,8 +95,8 @@ def exchange_auth_code(code: str) -> dict:
         print(f"[!] Exception during token exchange: {str(e)}")
     return {}
 
-def get_valid_access_token():
-    tokens = load_sso_tokens()
+def get_valid_access_token(token_file: str = SSO_TOKEN_FILE):
+    tokens = load_sso_tokens(token_file)
     if not tokens or "refresh_token" not in tokens:
         return None
 
@@ -118,13 +122,29 @@ def get_valid_access_token():
             new_data = res.json()
             tokens["access_token"] = new_data["access_token"]
             tokens["refresh_token"] = new_data.get("refresh_token", tokens["refresh_token"])
-            save_sso_tokens(tokens)
+            save_sso_tokens(tokens, token_file)
             return tokens["access_token"]
         else:
-            print(f"[!] Token Refresh Rejected: HTTP {res.status_code} - {res.text}")
+            print(f"[!] Token Refresh Rejected ({token_file}): HTTP {res.status_code} - {res.text}")
     except Exception as e:
-        print(f"[!] Token refresh failed: {str(e)}")
+        print(f"[!] Token refresh failed ({token_file}): {str(e)}")
     return None
+
+def get_character_auth(token_file: str = SSO_TOKEN_FILE) -> tuple[str | None, int | None]:
+    """Returns (valid_access_token, character_id) for any SSO token file."""
+    tokens = load_sso_tokens(token_file)
+    if not tokens:
+        return None, None
+    access_token = get_valid_access_token(token_file)
+    char_id = tokens.get("character_id") or tokens.get("CharacterID")
+    if not char_id and access_token:
+        claims = decode_jwt_payload(access_token)
+        sub = claims.get("sub", "")
+        if ":" in sub:
+            char_id = int(sub.split(":")[-1])
+            tokens["character_id"] = char_id
+            save_sso_tokens(tokens, token_file)
+    return access_token, int(char_id) if char_id else None
 
 def fetch_character_orders():
     tokens = load_sso_tokens()

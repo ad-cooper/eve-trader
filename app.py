@@ -7,6 +7,7 @@ EVE Trading Desk - Modular FastAPI Hub
 import os
 import json
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pydantic import BaseModel
 from typing import Optional
@@ -56,8 +57,6 @@ def get_last_ledger_run_time():
     return STATE.get("last_ledger_run")
 
 
-class MultiSellRequest(BaseModel):
-    raw_text: Optional[str] = None
 
 def run_ledger_subprocess():
     STATE["ledger_running"] = True
@@ -209,15 +208,6 @@ async def api_missing_buys(desk: str = "all"):
     data = get_live_missing_buys(desk)
     return JSONResponse(data)
 
-@app.post("/api/orders/multisell-price")
-async def api_multisell_price(req: MultiSellRequest):
-    from services.market import get_live_multisell_prices
-    data = get_live_multisell_prices(req.raw_text)
-    return JSONResponse(data)
-
-
-from fastapi import Request
-
 @app.api_route("/api/inventory/advisor", methods=["GET", "POST"])
 async def api_inventory_advisor(request: Request):
     from services.market import get_live_multisell_prices
@@ -233,14 +223,11 @@ async def api_inventory_advisor(request: Request):
             pass
     return get_live_multisell_prices(raw_text=raw_text, force_refresh=force_refresh)
 
-@app.post("/api/market/multisell")
-async def api_market_multisell_legacy(request: Request):
-    return await api_inventory_advisor(request)
 
-import threading
-
-
-import threading
+@app.get("/api/import/opportunities")
+async def api_import_opportunities(amarr_rate: float = 250.0, cj6mt_rate: float = 950.0, limit: int = 40):
+    from services.importer import get_import_suggestions
+    return get_import_suggestions(amarr_rate=amarr_rate, cj6mt_rate=cj6mt_rate, limit=limit)
 
 @app.post("/api/sniper/run")
 def api_sniper_run():
