@@ -1,0 +1,264 @@
+import { html, useState, useEffect, useMemo } from '../lib.js';
+import { fmtISK, copyToClipboard } from '../utils.js';
+
+export function AdvisorModal({ isOpen, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState('');
+
+  async function loadAdvisor(customText = null, forceRefresh = false) {
+    setLoading(true);
+    setErrorMsg('');
+    try {
+      let res;
+      if (customText && customText.trim()) {
+        res = await fetch('/api/inventory/advisor', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw_text: customText }),
+        });
+      } else {
+        const url = forceRefresh ? '/api/inventory/advisor?force=true' : '/api/inventory/advisor';
+        res = await fetch(url);
+      }
+      if (!res.ok) throw new Error(`API returned status ${res.status}`);
+      setData(await res.json());
+    } catch (err) {
+      setErrorMsg(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (isOpen) {
+      loadAdvisor(null, false);
+    }
+  }, [isOpen]);
+
+  const rows = useMemo(() => {
+    let list = [...(data?.items || [])];
+    if (filter === 'ready') {
+      list = list.filter(i => ['flip', 'met', 'unmanaged', 'time_stop'].includes(i.action_type));
+    } else if (filter === 'hold') {
+      list = list.filter(i => i.action_type === 'hold');
+    } else if (filter === 'unmanaged') {
+      list = list.filter(i => i.desk === 'UNMANAGED');
+    }
+    list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    return list;
+  }, [data, filter]);
+
+  if (!isOpen) return null;
+
+  const totalCount = data?.items?.length || 0;
+  const readyCount = (data?.items || []).filter(i => ['flip', 'met', 'unmanaged', 'time_stop'].includes(i.action_type)).length;
+  const isProfit = (data?.total_profit || 0) >= 0;
+  const blendedMargin = data?.total_cost > 0 ? ((data.total_profit / data.total_cost) * 100).toFixed(1) : '0.0';
+
+  async function handleCopyMultisell(type) {
+    if (!data?.items) return;
+    let items = [...data.items];
+    if (type === 'ready') {
+      items = items.filter(i => ['flip', 'met', 'unmanaged', 'time_stop'].includes(i.action_type));
+    }
+    items.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const text = items.map(i => `${i.name}\t${Number(i.recommended_sell).toFixed(2)}`).join('\n');
+    if (!text.trim()) {
+      alert('No sell export data available to copy.');
+      return;
+    }
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      alert(`Copied ${type === 'ready' ? 'Ready-to-Sell' : 'All Strategy'} items (${items.length}) in EVE MultiSell format!`);
+    } else {
+      prompt('Clipboard blocked by browser. Press Ctrl+C to copy:', text);
+    }
+  }
+
+  return html`
+    <div class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
+        <div class="px-6 py-3.5 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
+          <div class="flex items-center gap-3">
+            <div class="w-2.5 h-2.5 rounded-full bg-indigo-500"></div>
+            <div>
+              <h3 class="text-base font-bold text-slate-100">Hangar MultiSell & Inventory Advisor</h3>
+              <p class="text-xs text-slate-400">Live suggested sell pricing, cost basis, estimated profit/loss & MultiSell export</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onClick=${() => setPasteOpen(v => !v)} class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+              📋 Custom MultiSell Paste
+            </button>
+            <button onClick=${() => { setPasteText(''); setPasteOpen(false); loadAdvisor(null, true); }} class="px-2.5 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+              ⟳ Refresh Hangar
+            </button>
+            <button onClick=${onClose} class="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
+        </div>
+
+        ${pasteOpen && html`
+          <div class="px-6 py-3 bg-slate-950 border-b border-slate-800">
+            <div class="text-xs text-slate-400 mb-1.5 font-medium">Paste in-game inventory list or item quantities:</div>
+            <textarea
+              rows="3"
+              value=${pasteText}
+              onInput=${e => setPasteText(e.target.value)}
+              placeholder=${'Gila 2\nPithum C-Type Medium Shield Booster 5'}
+              class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
+            ></textarea>
+            <div class="flex justify-end gap-2 mt-2">
+              <button onClick=${() => setPasteOpen(false)} class="px-3 py-1 bg-slate-800 text-xs text-slate-400 hover:text-slate-200 rounded">Cancel</button>
+              <button onClick=${() => pasteText.trim() && loadAdvisor(pasteText.trim(), false)} class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-semibold rounded">Analyze & Price MultiSell</button>
+            </div>
+          </div>
+        `}
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 px-6 py-3 bg-slate-950/40 border-b border-slate-800">
+          <div class="bg-slate-800/40 border border-slate-700/50 rounded-lg p-3">
+            <div class="text-[10px] font-bold tracking-wider text-slate-400 uppercase">Gross Exit Value</div>
+            <div class="text-base font-bold text-slate-100 mt-0.5">${data ? fmtISK(data.total_value) : '--'}</div>
+            <div class="text-[11px] text-slate-400">${totalCount} items evaluated</div>
+          </div>
+          <div class="bg-slate-800/40 border border-slate-700/50 rounded-lg p-3">
+            <div class="text-[10px] font-bold tracking-wider text-slate-400 uppercase">Invested Cost Basis</div>
+            <div class="text-base font-bold text-slate-300 mt-0.5">${data ? fmtISK(data.total_cost) : '--'}</div>
+            <div class="text-[11px] text-slate-400">Recorded purchases</div>
+          </div>
+          <div class=${isProfit ? 'bg-emerald-950/20 border border-emerald-800/40 rounded-lg p-3' : 'bg-rose-950/20 border border-rose-800/40 rounded-lg p-3'}>
+            <div class="text-[10px] font-bold tracking-wider text-emerald-400 uppercase">Net Est. Profit / Loss</div>
+            <div class=${`text-base font-bold mt-0.5 ${isProfit ? 'text-emerald-300' : 'text-rose-300'}`}>${data ? `${isProfit ? '+' : ''}${fmtISK(data.total_profit)}` : '--'}</div>
+            <div class=${`text-[11px] ${isProfit ? 'text-emerald-400/80' : 'text-rose-400/80'}`}>${isProfit ? '+' : ''}${blendedMargin}% net return</div>
+          </div>
+          <div class="bg-indigo-950/20 border border-indigo-800/40 rounded-lg p-3">
+            <div class="text-[10px] font-bold tracking-wider text-indigo-400 uppercase">Ready to Liquidate</div>
+            <div class="text-base font-bold text-indigo-300 mt-0.5">${data ? fmtISK(data.ready_value) : '--'}</div>
+            <div class="text-[11px] text-indigo-400/80">${readyCount} items ready to list</div>
+          </div>
+        </div>
+
+        <div class="px-6 py-2.5 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+            ${[
+              ['all', 'All Items'],
+              ['ready', 'Ready to Sell'],
+              ['hold', 'Hold Cycle'],
+              ['unmanaged', 'Unmanaged / Custom'],
+            ].map(([key, label]) => html`
+              <button
+                onClick=${() => setFilter(key)}
+                class=${filter === key
+                  ? 'px-2.5 py-1 rounded font-semibold bg-slate-800 text-slate-200 transition'
+                  : 'px-2.5 py-1 rounded font-semibold text-slate-400 hover:text-slate-200 transition'}
+              >
+                ${label}
+              </button>
+            `)}
+          </div>
+          <div class="flex items-center gap-2">
+            <button onClick=${() => handleCopyMultisell('ready')} class="px-3 py-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/50 text-emerald-200 rounded text-xs font-semibold flex items-center gap-1.5 transition">
+              <span>Copy Ready-to-Sell (MultiSell)</span>
+            </button>
+            <button onClick=${() => handleCopyMultisell('all')} class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 rounded text-xs font-semibold transition">
+              Copy All Strategy Prices
+            </button>
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto px-6 py-3">
+          <table class="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr class="border-b border-slate-800 text-slate-400 text-[11px] uppercase tracking-wider">
+                <th class="py-2.5 px-3">Item Name</th>
+                <th class="py-2.5 px-2">Desk</th>
+                <th class="py-2.5 px-2 text-right">Qty</th>
+                <th class="py-2.5 px-2 text-right">Cost Basis</th>
+                <th class="py-2.5 px-2 text-right">Live Ask</th>
+                <th class="py-2.5 px-2 text-right font-bold text-slate-300">Suggested Sell</th>
+                <th class="py-2.5 px-3 text-right">Est. Net P&L</th>
+                <th class="py-2.5 px-3 text-center">Action</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60 font-mono">
+              ${loading
+                ? html`<tr><td colspan="8" class="text-center py-8 text-slate-400 font-sans">Scanning inventory, live Jita books & cost basis...</td></tr>`
+                : errorMsg
+                  ? html`<tr><td colspan="8" class="text-center py-8 text-rose-400 font-sans">Error loading inventory: ${errorMsg}</td></tr>`
+                  : !rows.length
+                    ? html`<tr><td colspan="8" class="text-center py-8 text-slate-500 font-sans">No loose items matching this filter. (Items inside containers or other regions are ignored)</td></tr>`
+                    : rows.map((item, idx) => {
+                        let deskBadge = html`<span class="text-slate-400 font-semibold text-[10px] bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">UNMANAGED</span>`;
+                        if (item.desk === 'EVERGREEN') deskBadge = html`<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-950/70 text-cyan-300 border border-cyan-800">EVERGREEN</span>`;
+                        else if (item.desk === 'TACTICAL') deskBadge = html`<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-950/70 text-purple-300 border border-purple-800">TACTICAL</span>`;
+                        else if (item.desk === 'HOLD') deskBadge = html`<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950/70 text-amber-300 border border-amber-800">HOLD</span>`;
+
+                        let actionBadge;
+                        if (item.collision?.has_collision) {
+                          const c = item.collision;
+                          const cStyle = c.action === 'CANCEL_MERGE'
+                            ? 'bg-amber-950/80 text-amber-300 border border-amber-500/80'
+                            : c.action === 'HOLD_HANGAR'
+                              ? 'bg-rose-950/80 text-rose-300 border border-rose-500/80'
+                              : c.action === 'MODIFY_HOLD'
+                                ? 'bg-cyan-950/80 text-cyan-300 border border-cyan-500/80'
+                                : 'bg-emerald-950/80 text-emerald-300 border border-emerald-500/80';
+                          actionBadge = html`<span class=${`px-2 py-0.5 rounded font-bold text-[10px] ${cStyle}`} title=${c.reason}>${c.badge}</span>`;
+                        } else if (item.action_type === 'flip') {
+                          actionBadge = html`<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-950/80 border border-emerald-700 text-emerald-300">FAST FLIP</span>`;
+                        } else if (item.action_type === 'met') {
+                          actionBadge = html`<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-blue-950/80 border border-blue-700 text-blue-300">TARGET MET</span>`;
+                        } else if (item.action_type === 'time_stop') {
+                          const hd = item.hold_data || {};
+                          actionBadge = html`<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-rose-950/80 border border-rose-600 text-rose-300" title=${`Held ${hd.days_held || 0}d (max ${hd.max_days || 60}d)`}>⏰ TIME STOP (${hd.days_held || 0}d)</span>`;
+                        } else if (item.action_type === 'hold') {
+                          const hd = item.hold_data || {};
+                          actionBadge = html`<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-amber-950/80 border border-amber-700 text-amber-300">HOLD CYCLE${hd.days_held ? ` (${hd.days_held}d)` : ''}</span>`;
+                        } else {
+                          actionBadge = html`<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-indigo-950/80 border border-indigo-700 text-indigo-300">MARKET EXIT</span>`;
+                        }
+
+                        const tagColor = item.cost_source === 'WALLET' ? 'text-cyan-400' : item.cost_source === 'LEDGER' ? 'text-amber-400' : 'text-slate-400';
+
+                        return html`
+                          <tr key=${item.type_id || idx} class="hover:bg-slate-800/40 transition">
+                            <td class="py-2.5 px-3 text-slate-200 font-medium font-sans">
+                              ${item.collision?.has_collision && html`
+                                <span class="inline-block mr-1.5 px-1 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-500/60" title=${item.collision.reason}>COLLISION</span>
+                              `}
+                              ${item.name}
+                            </td>
+                            <td class="py-2.5 px-2">${deskBadge}</td>
+                            <td class="py-2.5 px-2 text-right text-slate-300">${item.qty}</td>
+                            <td class="py-2.5 px-2 text-right font-sans">
+                              ${item.unit_cost > 0
+                                ? html`<div>${fmtISK(item.unit_cost)}</div><div class=${`text-[9px] ${tagColor}`}>${item.cost_source}</div>`
+                                : html`<span class="text-slate-500">--</span>`}
+                            </td>
+                            <td class="py-2.5 px-2 text-right text-slate-300">
+                              ${item.lowest_ask ? fmtISK(item.lowest_ask) : html`<span class="text-amber-500 font-sans font-bold text-[10px]">STOCKOUT</span>`}
+                            </td>
+                            <td class="py-2.5 px-2 text-right font-bold text-slate-100">${fmtISK(item.recommended_sell)}</td>
+                            <td class="py-2.5 px-3 text-right font-sans">
+                              ${item.cost_source === 'UNKNOWN'
+                                ? html`<span class="text-slate-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-slate-500">Gross Proceeds</div>`
+                                : item.profit >= 0
+                                  ? html`<span class="text-emerald-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-emerald-500/80 font-bold">+${item.margin_pct}%</div>`
+                                  : html`<span class="text-rose-400 font-bold">${fmtISK(item.profit)}</span><div class="text-[9px] text-rose-500/80 font-bold">${item.margin_pct}%</div>`}
+                            </td>
+                            <td class="py-2.5 px-3 text-center">${actionBadge}</td>
+                          </tr>
+                        `;
+                      })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}

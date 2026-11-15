@@ -18,6 +18,15 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from services.blacklist import load_active_blacklist
+from services.ledgers import (
+    DESK_PROFILES,
+    IncumbentState,
+    resolve_desk_incumbents,
+    build_universe_exclusion_mask,
+    select_desk_candidates,
+    compute_candidate_pricing,
+    compute_line_sizing,
+)
 
 DUCKDB_PATH = "data/eve_analytics.duckdb"
 SQLITE_PATH = "data/latest-sqlite.db"
@@ -29,11 +38,7 @@ SELL_FEE_JITA = 0.0123     # 1.23% Broker Relations V
 SALES_TAX_JITA = 0.03375   # 3.375% Accounting V
 TOTAL_EXIT_FEES = SELL_FEE_JITA + SALES_TAX_JITA  # 4.605%
 
-DESK_RATIOS = {
-    "hold": 0.24,       # 24% of portfolio
-    "tactical": 0.16,   # 16% of portfolio
-    "evergreen": 0.60   # 60% of portfolio (+ 100% of unused slack)
-}
+DESK_RATIOS = {k: cfg.ratio for k, cfg in DESK_PROFILES.items()}
 DEFAULT_FALLBACK_BUDGET = 50.0e9
 
 
@@ -232,222 +237,61 @@ def load_market_universe():
     return df
 
 
-def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market_telemetry: dict, claimed_ids: set, total_portfolio: float = 50.0e9) -> tuple:
-    scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
-    active_buys, active_sells, asset_qtys, prior_desks = load_incumbent_positions()
+def load_recent_losing_tids(min_loss_isk: float = 1_000_000.0) -> set[int]:
+    if not os.path.exists("ledgers/performance_cache.json"):
+        return set()
+    try:
+        with open("ledgers/performance_cache.json", "r", encoding="utf-8") as pf:
+            perf_items = json.load(pf).get("items", [])
+        return {
+            int(it["type_id"]) for it in perf_items
+            if float(it.get("profit", 0.0)) < -abs(min_loss_isk)
+        }
+    except Exception:
+        return set()
 
-    # Only treat active market orders (buys/sells) or substantial hangar stacks (>= 50M ISK) as sticky incumbents
-    price_lookup = dict(zip(df["type_id"].astype(int), df["price_m_30d"] * 1e6))
-    significant_assets = {
-        tid for tid, qty in asset_qtys.items()
-        if (qty * price_lookup.get(tid, 0.0)) >= 50_000_000.0
-    }
-    incumbent_ids = set(active_buys.keys()) | set(active_sells.keys()) | significant_assets
 
-    other_prior_desks = {tid for tid, d in prior_desks.items() if d != desk_type}
-    if desk_type == "evergreen":
-        desk_sticky_ids = (incumbent_ids - claimed_ids) - other_prior_desks
-    else:
-        desk_sticky_ids = {tid for tid in (incumbent_ids - claimed_ids) if prior_desks.get(tid) == desk_type}
-
-    mask = ~df["type_id"].isin(claimed_ids)
-    bl_items, bl_groups, _ = load_active_blacklist()
-    mask &= ~df["group_name"].isin(bl_groups)
-    mask &= ~df["item_name"].isin(bl_items)
-    mask &= ~df["category_name"].isin(["Personalization", "SKINs", "Special Edition Assets", "Apparel"])
-    mask &= ~df["item_name"].str.contains("Modified|Voucher|Token|Certificate", regex=True)
-    mask &= ~df["item_name"].str.contains(
-        "Keypass|Cipher|Shortcut|Gauntlet|Tetrimon|Chemal Tech|Harvest .*Booster|Radiance.*Accelerator",
-        case=False,
-        regex=True,
-        na=False,
-    )
-    if os.path.exists("ledgers/performance_cache.json"):
-        try:
-            with open("ledgers/performance_cache.json", "r") as pf:
-                perf_items = json.load(pf).get("items", [])
-                losing_tids = {
-                    int(it["type_id"]) for it in perf_items
-                    if float(it.get("profit", 0.0)) < -1_000_000
-                    and int(it["type_id"]) not in active_sells
-                    and int(it["type_id"]) not in significant_assets
-                }
-                mask &= ~df["type_id"].isin(losing_tids)
-        except Exception:
-            pass
-
-    is_sticky_series = df["type_id"].isin(desk_sticky_ids)
-    mask &= (df["price_m_7d"] >= (df["price_m_30d"] * 0.78)) | (is_sticky_series & (df["price_m_7d"] >= (df["price_m_30d"] * 0.68)))
-
-    if desk_type == "hold":
-        desk_mask = (
-            ~df["category_name"].isin(["Skill"])
-            & df["price_m_180d"].between(15.0, 2500.0)
-            & (df["total_history_days"] >= 60)
-            & (df["daily_turnover_m"] >= 10.0)
-            & (df["avg_spread_30d"] >= 8.0)
-            & (df["price_m_30d"] <= (df["price_m_180d"] * 0.98))
-        )
-        candidates = df[mask & (desk_mask | is_sticky_series)].copy()
-        candidates["passes_desk"] = desk_mask.loc[candidates.index]
-        candidates["is_sticky"] = candidates["type_id"].isin(desk_sticky_ids)
-        candidates["upside_pct"] = ((candidates["price_m_180d"] * 0.96) - candidates["price_m_30d"]) / candidates["price_m_30d"] * 100.0
-        candidates = candidates.sort_values(by=["is_sticky", "upside_pct"], ascending=[False, False])
-        vol_pct = 0.08
-        max_line_cap = 1.5e9 * scale_factor
-        min_line_cap = 150.0e6
-        min_margin_req = 18.0
-        sticky_margin_floor = 10.0
-
-    elif desk_type == "tactical":
-        desk_mask = (
-            df["price_m_30d"].between(5.0, 2000.0)
-            & (df["daily_turnover_m"] >= 35.0)
-            & (df["dump_freq_pct"] >= 45.0)
-            & (df["avg_spread_30d"] >= 10.0)
-        )
-        candidates = df[mask & (desk_mask | is_sticky_series)].copy()
-        candidates["passes_desk"] = desk_mask.loc[candidates.index]
-        candidates["is_sticky"] = candidates["type_id"].isin(desk_sticky_ids)
-        candidates = candidates.sort_values(by=["is_sticky", "dump_freq_pct"], ascending=[False, False])
-        vol_pct = 0.15
-        max_line_cap = 1.2e9 * scale_factor
-        min_line_cap = 120.0e6
-        min_margin_req = 8.5
-        sticky_margin_floor = 5.0
-
-    else:  # evergreen
-        desk_mask = (
-            df["price_m_30d"].between(1.0, 2500.0)
-            & (df["daily_turnover_m"] >= 35.0)
-            & (df["daily_vol_30d"] >= 2.0)
-            & (df["avg_spread_30d"] >= 9.8)
-        )
-        candidates = df[mask & (desk_mask | is_sticky_series)].copy()
-        candidates["passes_desk"] = desk_mask.loc[candidates.index]
-        candidates["is_sticky"] = candidates["type_id"].isin(desk_sticky_ids)
-        candidates["profit_velocity"] = candidates["daily_turnover_m"] * (candidates["avg_spread_30d"] - 5.1)
-        candidates = candidates.sort_values(by=["is_sticky", "profit_velocity"], ascending=[False, False])
-        vol_pct = 0.25
-        max_line_cap = 1.2e9 * scale_factor
-        min_line_cap = 100.0e6
-        min_margin_req = 5.0
-        sticky_margin_floor = 2.5
-
-    ledger_rows = []
+def allocate_desk_rows(
+    candidates: pd.DataFrame,
+    desk_type: str,
+    budget: float,
+    market_telemetry: dict,
+    desk_params: dict,
+    incumbents: IncumbentState,
+) -> tuple[list[dict], float, list[int], int]:
+    """Assembles ledger row dicts for ranked candidates up to the desk ISK budget."""
+    ledger_rows: list[dict] = []
     allocated_cap = 0.0
-    new_claimed_ids = []
+    new_claimed_ids: list[int] = []
     sticky_kept = 0
 
     for _, row in candidates.iterrows():
-        tid = int(row["type_id"])
-        is_sticky = bool(row.get("is_sticky", False))
-        passes_desk = bool(row.get("passes_desk", False))
-        has_buy = tid in active_buys
-        has_sell = tid in active_sells
-        held_qty = int(asset_qtys.get(tid, 0))
-
-        vwap_30d = row["price_m_30d"] * 1e6
-        vwap_180d = row["price_m_180d"] * 1e6
-        vwap_7d = row["price_m_7d"] * 1e6
-        p20_low_30d = (row.get("p20_low_m_30d") or row["price_m_30d"] * 0.94) * 1e6
-        dump_freq = float(row["dump_freq_pct"])
-
-        p_info = market_telemetry.get(str(tid)) or {}
-        live_ask = p_info.get("lowest_ask")
-        live_top_buy = p_info.get("top_buy")
-
-        # Skip unplaced items whose live telemetry has been polled and shows zero active sell orders
-        if not has_buy and not has_sell and held_qty == 0 and str(tid) in market_telemetry and (not live_ask or live_ask <= 0):
-            continue
-
-        p_current = live_ask if (live_ask and live_ask > 0) else (vwap_7d if vwap_7d > 0 else vwap_30d)
-        drift = abs(p_current - vwap_30d) / vwap_30d if vwap_30d > 0 else 0
-        stability_score = max(0.70, min(1.0, 1.0 - (1.2 * drift) - (0.2 * (dump_freq / 100.0))))
-
-        # Evaluate existing buy orders at their actual bid price instead of outbidding ourselves
-        if has_buy:
-            competitive_bid = float(active_buys[tid]["price"])
-        elif live_top_buy and live_top_buy > 0:
-            competitive_bid = live_top_buy + 0.01
-        else:
-            competitive_bid = min(p20_low_30d, p_current * 0.92)
-
-        if desk_type == "hold":
-            if not is_sticky and live_ask and live_ask >= (vwap_180d * 0.90):
-                continue
-            t_sell = min(vwap_180d * 0.960, vwap_30d * 1.220)
-            t_buy = competitive_bid
-            if not has_buy and live_ask and live_ask > 0:
-                t_buy = min(t_buy, live_ask * 0.94)
-
-        elif desk_type == "tactical":
-            stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
-            baseline_sell = vwap_30d * 1.045
-            t_sell = (0.50 * stabilized_ask) + (0.50 * baseline_sell)
-            t_buy = competitive_bid
-            if not has_buy and live_ask and live_ask > 0:
-                t_buy = min(t_buy, live_ask * 0.95)
-
-        else:  # evergreen
-            stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
-            t_sell = min(stabilized_ask, vwap_30d * 1.055)
-            t_buy = competitive_bid
-            if not has_buy:
-                ceil_guard = (live_ask * 0.985) if live_ask else (t_sell * 0.985)
-                t_buy = min(t_buy, ceil_guard)
-
-        if has_sell and float(active_sells[tid].get("price", 0.0)) > 0:
-            t_sell = max(t_sell, float(active_sells[tid]["price"]))
-
-        cost_unit = t_buy * (1.0 + BUY_FEE_CITADEL)
-        proceeds_unit = t_sell * (1.0 - TOTAL_EXIT_FEES)
-        net_profit_unit = proceeds_unit - cost_unit
-        net_margin = (net_profit_unit / cost_unit) * 100.0 if cost_unit > 0 else 0.0
-
-        req_margin = sticky_margin_floor if is_sticky else min_margin_req
-        if not has_sell and held_qty == 0 and net_margin < req_margin:
-            continue
-
-        if not is_sticky and cost_unit > max_line_cap:
-            continue
-
-        raw_qty = max(1, int(row["daily_vol_30d"] * vol_pct))
-        cap_qty = max(1, int(max_line_cap / cost_unit)) if cost_unit > 0 else 1
-        qty = min(raw_qty, cap_qty)
-
-        buy_rem = int(active_buys[tid].get("volume_remain", 0)) if has_buy else 0
-        sell_rem = int(active_sells[tid].get("volume_remain", 0)) if has_sell else 0
-        existing_qty = max(buy_rem, sell_rem + held_qty)
-
-        if is_sticky:
-            if not passes_desk:
-                # Item only stayed because of existing order/stock: preserve exact existing qty without new buy bloat
-                qty = max(1, existing_qty)
-            else:
-                qty = max(qty, existing_qty)
-
-        capital_line = cost_unit * qty
-
-        effective_min_cap = (min_line_cap * 0.35) if is_sticky else min_line_cap
-        if not has_buy and not has_sell and held_qty == 0 and capital_line < effective_min_cap and (cost_unit * raw_qty) < effective_min_cap:
-            continue
-
         remaining_budget = budget - allocated_cap
         if remaining_budget <= 0:
             break
 
-        if capital_line > remaining_budget:
-            if is_sticky and existing_qty > 0:
-                qty = existing_qty
-            else:
-                qty = int(remaining_budget / cost_unit)
-            if qty < 1:
-                continue
-            capital_line = cost_unit * qty
+        tid = int(row["type_id"])
+        is_sticky = bool(row.get("is_sticky", False))
+        passes_desk = bool(row.get("passes_desk", False))
+        p_info = market_telemetry.get(str(tid)) or {}
 
-        profit_line = net_profit_unit * qty
-        allocated_cap += capital_line
+        pricing = compute_candidate_pricing(row, desk_type, p_info, incumbents, is_sticky)
+        if pricing is None:
+            continue
+
+        sizing = compute_line_sizing(
+            row=row,
+            pricing=pricing,
+            desk_params=desk_params,
+            incumbents=incumbents,
+            is_sticky=is_sticky,
+            passes_desk=passes_desk,
+            remaining_budget=remaining_budget,
+        )
+        if sizing is None:
+            continue
+
+        allocated_cap += sizing["capital"]
         new_claimed_ids.append(tid)
         if is_sticky:
             sticky_kept += 1
@@ -455,18 +299,29 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
         ledger_rows.append({
             "type_id": tid,
             "name": row["item_name"],
-            "qty": qty,
-            "dump_freq": round(dump_freq, 1),
-            "target_buy": round(t_buy, 2),
-            "target_sell": round(t_sell, 2),
-            "net_margin": round(net_margin, 2),
-            "capital": round(capital_line, 2),
-            "profit": round(profit_line, 2)
+            "qty": sizing["qty"],
+            "dump_freq": round(pricing["dump_freq"], 1),
+            "target_buy": round(pricing["target_buy"], 2),
+            "target_sell": round(pricing["target_sell"], 2),
+            "net_margin": round(pricing["net_margin"], 2),
+            "capital": round(sizing["capital"], 2),
+            "profit": round(sizing["profit"], 2),
         })
 
         if allocated_cap >= (budget * 0.995):
             break
 
+    return ledger_rows, allocated_cap, new_claimed_ids, sticky_kept
+
+
+def persist_desk_ledger(
+    desk_type: str,
+    ledger_rows: list[dict],
+    allocated_cap: float,
+    budget: float,
+    sticky_kept: int,
+) -> None:
+    """Writes the desk CSV ledger and appends a timestamped snapshot to DuckDB."""
     out_file = os.path.join(OUTPUT_DIR, f"{desk_type}_ledger.csv")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     df_ledger = pd.DataFrame(ledger_rows)
@@ -499,7 +354,118 @@ def generate_desk_ledger(df: pd.DataFrame, desk_type: str, budget: float, market
     except Exception as e:
         print(f"[!] Failed to log history to DuckDB: {e}")
 
+
+def generate_desk_ledger(
+    df: pd.DataFrame,
+    desk_type: str,
+    budget: float,
+    market_telemetry: dict,
+    claimed_ids: set,
+    total_portfolio: float = 50.0e9,
+) -> tuple:
+    scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
+    active_buys, active_sells, asset_qtys, prior_desks = load_incumbent_positions()
+    bl_items, bl_groups, bl_meta = load_active_blacklist()
+
+    incumbents = resolve_desk_incumbents(
+        df=df,
+        desk_type=desk_type,
+        claimed_ids=claimed_ids,
+        active_buys=active_buys,
+        active_sells=active_sells,
+        asset_qtys=asset_qtys,
+        prior_desks=prior_desks,
+    )
+    base_mask = build_universe_exclusion_mask(
+        df=df,
+        claimed_ids=claimed_ids,
+        incumbents=incumbents,
+        bl_items=bl_items,
+        bl_groups=bl_groups,
+        bl_meta=bl_meta,
+        losing_tids=load_recent_losing_tids(),
+    )
+    candidates, desk_params = select_desk_candidates(
+        df=df,
+        desk_type=desk_type,
+        base_mask=base_mask,
+        desk_sticky_ids=incumbents.desk_sticky_ids,
+        scale_factor=scale_factor,
+    )
+    ledger_rows, allocated_cap, new_claimed_ids, sticky_kept = allocate_desk_rows(
+        candidates=candidates,
+        desk_type=desk_type,
+        budget=budget,
+        market_telemetry=market_telemetry,
+        desk_params=desk_params,
+        incumbents=incumbents,
+    )
+    persist_desk_ledger(desk_type, ledger_rows, allocated_cap, budget, sticky_kept)
     return new_claimed_ids, allocated_cap
+
+DESK_ORDER = ("hold", "tactical", "evergreen")
+
+
+def load_existing_desk_state(desk_type: str) -> tuple[list[int], float]:
+    """Reads claimed type_ids and deployed capital from an existing desk CSV."""
+    path = os.path.join(OUTPUT_DIR, f"{desk_type}_ledger.csv")
+    if not os.path.exists(path):
+        return [], 0.0
+    try:
+        df_existing = pd.read_csv(path)
+        if df_existing.empty:
+            return [], 0.0
+        ids = df_existing["type_id"].dropna().astype(int).tolist()
+        cap = float(df_existing["capital"].fillna(0.0).sum()) if "capital" in df_existing.columns else 0.0
+        return ids, cap
+    except Exception:
+        return [], 0.0
+
+
+def run_waterfall(
+    df: pd.DataFrame,
+    total_budget: float,
+    market_telemetry: dict,
+    target_desks: set[str],
+) -> dict[str, tuple[list[int], float]]:
+    """
+    Executes the multi-desk waterfall in priority order (hold -> tactical -> evergreen).
+    Target desks are regenerated; upstream non-target desks supply their existing claimed IDs and slack.
+    """
+    claimed_ids: set[int] = set()
+    carried_slack = 0.0
+    outcomes: dict[str, tuple[list[int], float]] = {}
+
+    base_summary = " | ".join(
+        f"{d.capitalize()} {(total_budget * DESK_RATIOS[d])/1e9:.2f}B" for d in DESK_ORDER
+    )
+    print(f"\n=== Running Dynamic Multi-Desk Waterfall ({total_budget/1e9:.2f}B ISK Portfolio) ===")
+    print(f"[*] Base Allocation Targets: {base_summary}")
+
+    for desk in DESK_ORDER:
+        if not (target_desks - set(outcomes.keys())):
+            break
+
+        target_budget = (total_budget * DESK_RATIOS[desk]) + carried_slack
+        if carried_slack > 0 and desk in target_desks:
+            print(f"[*] Cascading {carried_slack/1e9:.2f}B ISK slack -> {desk.capitalize()} Target: {target_budget/1e9:.2f}B ISK")
+
+        if desk in target_desks:
+            ids, deployed_cap = generate_desk_ledger(
+                df, desk, target_budget, market_telemetry, claimed_ids, total_budget
+            )
+        else:
+            ids, deployed_cap = load_existing_desk_state(desk)
+
+        claimed_ids.update(ids)
+        carried_slack = max(0.0, target_budget - deployed_cap)
+        outcomes[desk] = (ids, deployed_cap)
+
+    total_deployed = sum(cap for _, cap in outcomes.values())
+    counts_summary = ", ".join(f"{len(outcomes[d][0])} {d.capitalize()}" for d in DESK_ORDER if d in outcomes)
+    print(f"\n=== Waterfall Complete: {counts_summary} ===")
+    print(f"[+] Total Portfolio Deployed: {total_deployed/1e9:.2f}B / {total_budget/1e9:.2f}B ISK ({(total_deployed/total_budget)*100:.1f}%)")
+    return outcomes
 
 
 def main():
@@ -512,49 +478,8 @@ def main():
     market_telemetry = load_cached_market_telemetry()
     df = load_market_universe()
 
-    if args.desk == "all":
-        target_hold = total_budget * DESK_RATIOS["hold"]
-        target_tac = total_budget * DESK_RATIOS["tactical"]
-        target_eg = total_budget * DESK_RATIOS["evergreen"]
-
-        print(f"\n=== Running Dynamic Multi-Desk Waterfall ({total_budget/1e9:.2f}B ISK Portfolio) ===")
-        print(f"[*] Base Allocation Targets: Hold {target_hold/1e9:.2f}B | Tactical {target_tac/1e9:.2f}B | Evergreen {target_eg/1e9:.2f}B")
-
-        claimed_ids = set()
-
-        hold_ids, hold_cap = generate_desk_ledger(df, "hold", target_hold, market_telemetry, claimed_ids, total_budget)
-        claimed_ids.update(hold_ids)
-        hold_slack = max(0.0, target_hold - hold_cap)
-
-        tac_target = target_tac + hold_slack
-        if hold_slack > 0:
-            print(f"[*] Hold Desk left {hold_slack/1e9:.2f}B ISK slack -> Cascading into Tactical Desk (New Target: {tac_target/1e9:.2f}B)")
-        tac_ids, tac_cap = generate_desk_ledger(df, "tactical", tac_target, market_telemetry, claimed_ids, total_budget)
-        claimed_ids.update(tac_ids)
-
-        evergreen_target = max(0.0, total_budget - hold_cap - tac_cap)
-        print(f"[*] Cascading remaining slack to Evergreen -> Final Target: {evergreen_target/1e9:.2f}B ISK")
-        eg_ids, eg_cap = generate_desk_ledger(df, "evergreen", evergreen_target, market_telemetry, claimed_ids, total_budget)
-
-        total_deployed = hold_cap + tac_cap + eg_cap
-        print(f"\n=== Waterfall Complete: {len(hold_ids)} Hold, {len(tac_ids)} Tactical, {len(eg_ids)} Evergreen ===")
-        print(f"[+] Total Portfolio Deployed: {total_deployed/1e9:.2f}B / {total_budget/1e9:.2f}B ISK ({(total_deployed/total_budget)*100:.1f}%)")
-
-    elif args.desk == "hold":
-        target = total_budget * DESK_RATIOS["hold"]
-        generate_desk_ledger(df, "hold", target, market_telemetry, set(), total_budget)
-
-    elif args.desk == "tactical":
-        target = total_budget * DESK_RATIOS["tactical"]
-        hold_claimed = load_claimed_ids_from_csv("hold_ledger.csv")
-        generate_desk_ledger(df, "tactical", target, market_telemetry, hold_claimed, total_budget)
-
-    elif args.desk == "evergreen":
-        target = total_budget * DESK_RATIOS["evergreen"]
-        hold_claimed = load_claimed_ids_from_csv("hold_ledger.csv")
-        tac_claimed = load_claimed_ids_from_csv("tactical_ledger.csv")
-        combined = hold_claimed.union(tac_claimed)
-        generate_desk_ledger(df, "evergreen", target, market_telemetry, combined, total_budget)
+    target_desks = set(DESK_ORDER) if args.desk == "all" else {args.desk}
+    run_waterfall(df, total_budget, market_telemetry, target_desks)
 
 
 if __name__ == "__main__":

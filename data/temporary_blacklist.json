@@ -22,5 +22,21 @@
     "added_date": "2026-11-01",
     "expires_at": "2026-11-20",
     "active": true
+  },
+  "Keypass|Cipher|Shortcut|Gauntlet|Tetrimon|Chemal Tech|Harvest .*Booster|Radiance.*Accelerator": {
+    "type": "pattern",
+    "reason": "Crimson Harvest & seasonal event keys/boosters/accelerators (post-event price collapse)",
+    "category": "seasonal_event",
+    "added_date": "2026-11-15",
+    "expires_at": "2026-12-15",
+    "active": true
+  },
+  "Yoiul|Cryo|Frostline": {
+    "type": "pattern",
+    "reason": "Winter Nexus event items",
+    "category": "seasonal_event",
+    "added_date": "2026-11-15",
+    "expires_at": "2026-12-15",
+    "active": true
   }
 }

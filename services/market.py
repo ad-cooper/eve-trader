@@ -10,6 +10,8 @@ from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from services.esi import load_cached_assets, fetch_character_assets
 
+from services.ledgers import get_desk_profile
+
 DUCKDB_PATH = "data/eve_analytics.duckdb"
 SQLITE_PATH = "data/latest-sqlite.db"
 MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
@@ -17,8 +19,13 @@ MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
 REGION_THE_FORGE = 10000002
 JITA_STATION_ID = 60003760
 
-BUY_FEE_CITADEL = 0.0050
-EXIT_FEE_JITA = 0.04605
+from services.accounting import (
+    BUY_SCC_SURCHARGE as BUY_FEE_CITADEL,
+    TOTAL_EXIT_FEE as EXIT_FEE_JITA,
+    calc_unit_cost,
+    calc_net_proceeds,
+    calc_line_financials,
+)
 
 def create_session():
     session = requests.Session()
@@ -70,13 +77,174 @@ def fetch_top_buy_order(session: requests.Session, type_id: int):
         pass
     return type_id, None
 
+def fetch_station_asks_bulk(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
+    """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""
+    asks: dict[int, float] = {}
+    if not tids:
+        return asks
+
+    chunks = [tids[i : i + 100] for i in range(0, len(tids), 100)]
+
+    def fetch_batch(chunk: list[int]):
+        types_str = ",".join(str(x) for x in chunk)
+        url = f"https://market.fuzzwork.co.uk/aggregates/?station={station_id}&types={types_str}"
+        try:
+            r = session.get(url, timeout=8)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+        return {}
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for data in ex.map(fetch_batch, chunks):
+            for tid_str, d in data.items():
+                try:
+                    tid = int(tid_str)
+                    sell_min = float(d.get("sell", {}).get("min") or 0.0)
+                    if sell_min > 0:
+                        asks[tid] = sell_min
+                except Exception:
+                    pass
+    return asks
+
+
+def ensure_jita_asks(session: requests.Session, tids: list[int], jita_asks: dict[int, float | None]) -> None:
+    """Populates `jita_asks` in place using bulk Fuzzwork lookups with ESI fallback."""
+    missing = [tid for tid in tids if tid not in jita_asks]
+    if not missing:
+        return
+
+    jita_asks.update(fetch_station_asks_bulk(session, JITA_STATION_ID, missing))
+    still_missing = [tid for tid in missing if tid not in jita_asks]
+    if still_missing:
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            futures = {ex.submit(fetch_lowest_sell_order, session, tid): tid for tid in still_missing}
+            for fut in as_completed(futures):
+                tid, ask = fut.result()
+                jita_asks[tid] = float(ask) if (ask and ask > 0) else None
+
+
+def resolve_primary_character() -> tuple[str | None, str | None, int | None]:
+    """Resolves (character_name, access_token, character_id) for the primary Jita character."""
+    sso_path = "ledgers/sso_token.json"
+    if not os.path.exists(sso_path):
+        return None, None, None
+    try:
+        from services.esi import get_character_auth
+        with open(sso_path, "r", encoding="utf-8") as f:
+            sso = json.load(f)
+        if isinstance(sso, list) and sso and isinstance(sso[0], dict):
+            cname = sso[0].get("character_name")
+        elif isinstance(sso, dict):
+            cname = sso.get("character_name")
+        else:
+            cname = None
+        if cname:
+            tok, cid = get_character_auth(cname)
+            return cname, tok, int(cid) if cid else None
+    except Exception:
+        pass
+    return None, None, None
+
+
+def fetch_character_locations_stock(
+    character_id: int | None,
+    access_token: str | None,
+    location_ids: list[int],
+) -> dict[int, dict[int, dict]]:
+    """
+    Fetches a character's hangar assets (walking nested container chains) and active sell orders
+    across multiple `location_ids` in a single ESI pass.
+    Returns {location_id: {type_id: {'hangar_qty': int, 'sell_qty': int, 'my_lowest_sell': float|None}}}.
+    """
+    target_locs = {int(loc) for loc in location_ids if loc}
+    result: dict[int, dict[int, dict]] = {loc: {} for loc in target_locs}
+    if not character_id or not access_token or not target_locs:
+        return result
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    all_assets = []
+    page = 1
+    while True:
+        try:
+            r = requests.get(
+                f"https://esi.evetech.net/latest/characters/{character_id}/assets/?datasource=tranquility&page={page}",
+                headers=headers,
+                timeout=10,
+            )
+            if r.status_code != 200:
+                break
+            rows = r.json()
+            if not rows:
+                break
+            all_assets.extend(rows)
+            total_pages = int(r.headers.get("X-Pages", 1))
+            if page >= total_pages:
+                break
+            page += 1
+        except Exception:
+            break
+
+    parent_map = {
+        int(a["item_id"]): int(a["location_id"])
+        for a in all_assets
+        if "item_id" in a and "location_id" in a
+    }
+
+    def resolve_target_loc(loc_id: int) -> int | None:
+        seen = set()
+        cur = loc_id
+        while cur and cur not in seen:
+            if cur in target_locs:
+                return cur
+            seen.add(cur)
+            cur = parent_map.get(cur)
+        return None
+
+    for a in all_assets:
+        matched_loc = resolve_target_loc(int(a.get("location_id") or 0))
+        if matched_loc is None:
+            continue
+        flag = str(a.get("location_flag") or "")
+        if flag not in ("Hangar", "Unlocked", "AutoFit", "Cargo", "FleetHangar", "ShipHangar"):
+            continue
+        tid = int(a["type_id"])
+        qty = int(a.get("quantity", 1))
+        entry = result[matched_loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
+        entry["hangar_qty"] += qty
+
+    try:
+        r_ord = requests.get(
+            f"https://esi.evetech.net/latest/characters/{character_id}/orders/?datasource=tranquility",
+            headers=headers,
+            timeout=10,
+        )
+        if r_ord.status_code == 200:
+            for o in r_ord.json():
+                loc = int(o.get("location_id") or 0)
+                if loc not in target_locs or o.get("is_buy_order"):
+                    continue
+                tid = int(o["type_id"])
+                vol = int(o.get("volume_remain", 0))
+                price = float(o.get("price", 0.0))
+                entry = result[loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
+                entry["sell_qty"] += vol
+                if price > 0 and (entry["my_lowest_sell"] is None or price < entry["my_lowest_sell"]):
+                    entry["my_lowest_sell"] = price
+    except Exception:
+        pass
+
+    return result
+
+
 def fetch_telemetry_pair(session: requests.Session, type_id: int):
     _, ask = fetch_lowest_sell_order(session, type_id)
     _, buy = fetch_top_buy_order(session, type_id)
     return type_id, ask, buy
 
 def update_ledger_market_prices():
-    from services.ledgers import load_desk_csv, load_cached_orders
+    from services.ledgers import load_desk_csv, get_desk_profile, load_cached_orders
     eg = load_desk_csv("evergreen_ledger.csv")
     tac = load_desk_csv("tactical_ledger.csv")
     hld = load_desk_csv("hold_ledger.csv")
@@ -125,96 +293,12 @@ def load_market_prices_cache():
             pass
     return {}
 
-def resolve_type_names(names: list) -> dict:
-    if not names:
-        return {}
-    try:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
-        escaped = [n.replace("'", "''") for n in set(names)]
-        quoted = ",".join(f"'{x}'" for x in escaped)
-        res = con.execute(f"SELECT typeID, typeName FROM sde.invTypes WHERE typeName IN ({quoted})").fetchall()
-        con.close()
-        return {r[1]: r[0] for r in res}
-    except Exception:
-        return {}
-
-def resolve_type_ids(type_ids: list) -> dict:
-    if not type_ids:
-        return {}
-    try:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
-        id_str = ",".join(str(int(t)) for t in set(type_ids))
-        res = con.execute(f"SELECT typeID, typeName FROM sde.invTypes WHERE typeID IN ({id_str})").fetchall()
-        con.close()
-        return {r[0]: r[1] for r in res}
-    except Exception:
-        return {}
-
-def parse_multisell_export_text(raw_text: str):
-    items = []
-    lines = [l.strip() for l in raw_text.strip().split("\n") if l.strip()]
-    for line in lines:
-        if line.lower().startswith("item") or line.lower().startswith("name"):
-            continue
-        if "\t" in line:
-            parts = line.split("\t")
-            name = parts[0].strip()
-            qty = 1
-            if len(parts) >= 2:
-                clean_q = re.sub(r"[^\d]", "", parts[1])
-                if clean_q:
-                    qty = int(clean_q)
-            items.append({"name": name, "qty": qty})
-        else:
-            match = re.match(r"^(.*?)(?:,|\s+)+(\d+)\s*$", line)
-            if match:
-                items.append({"name": match.group(1).strip(), "qty": int(match.group(2))})
-            elif line.strip():
-                items.append({"name": line.strip(), "qty": 1})
-    return items
-
-def get_historical_ledger_targets(type_ids: list) -> dict:
-    if not type_ids:
-        return {}
-    try:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        has_table = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'ledger_history'").fetchone()[0]
-        if has_table == 0:
-            con.close()
-            return {}
-        id_str = ",".join(str(int(t)) for t in set(type_ids))
-        query = f"""
-            WITH RankedHistory AS (
-                SELECT 
-                    type_id,
-                    name,
-                    desk_type,
-                    target_buy,
-                    target_sell,
-                    snapshot_time,
-                    ROW_NUMBER() OVER(PARTITION BY type_id ORDER BY snapshot_time DESC) as rn
-                FROM ledger_history
-                WHERE type_id IN ({id_str})
-            )
-            SELECT type_id, name, desk_type, target_buy, target_sell 
-            FROM RankedHistory 
-            WHERE rn = 1;
-        """
-        res = con.execute(query).fetchall()
-        con.close()
-        return {
-            r[0]: {
-                "name": r[1],
-                "desk": str(r[2]).upper(),
-                "target_buy": float(r[3]),
-                "target_sell": float(r[4])
-            }
-            for r in res
-        }
-    except Exception:
-        return {}
+from services.sde import (
+    resolve_type_names,
+    resolve_type_ids,
+    get_latest_ledger_targets as get_historical_ledger_targets,
+    parse_eve_item_lines as parse_multisell_export_text,
+)
 
 def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
     if not type_ids:
@@ -365,7 +449,7 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
 
     from datetime import datetime, timezone
     import duckdb
-    from services.ledgers import load_desk_csv
+    from services.ledgers import load_desk_csv, get_desk_profile
 
     now_utc = datetime.now(timezone.utc)
     hold_params = {}
@@ -380,7 +464,7 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
                 raw_d = str(r.get("date_acquired", "")).strip()
                 date_val = raw_d if raw_d and raw_d.lower() not in ("none", "nan") else None
                 raw_days = str(r.get("max_days", "")).strip()
-                default_max = 10 if "tactical" in fname else 21
+                default_max = get_desk_profile("tactical" if "tactical" in fname else "hold").max_hold_days
                 days_val = int(raw_days) if raw_days.isdigit() else default_max
                 csv_meta[tid] = {"date_acquired": date_val, "max_days": days_val, "desk_hint": "TACTICAL" if "tactical" in fname else "HOLD"}
             except (ValueError, TypeError):
@@ -438,7 +522,7 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
     for tid in type_ids:
         meta = csv_meta.get(tid, {})
         desk_from_hist = (history_map or {}).get(tid, {}).get("desk", "HOLD")
-        default_days = 10 if desk_from_hist == "TACTICAL" else 21
+        default_days = get_desk_profile(desk_from_hist).max_hold_days
         max_days = meta.get("max_days", default_days)
         date_acq = meta.get("date_acquired")
         item_name = name_map.get(tid, "")
@@ -497,8 +581,9 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
 
     return hold_params
 
-def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False):
-    targets = []
+def _collect_advisor_targets(raw_text: str | None = None, force_refresh: bool = False) -> list[dict]:
+    """Resolves inventory targets either from pasted MultiSell/inventory text or loose Jita/Citadel hangar assets."""
+    targets: list[dict] = []
     if raw_text and raw_text.strip():
         parsed = parse_multisell_export_text(raw_text)
         name_map = resolve_type_names([p["name"] for p in parsed])
@@ -506,299 +591,271 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
             tid = name_map.get(p["name"])
             if tid:
                 targets.append({"type_id": tid, "name": p["name"], "qty": p["qty"]})
+        return targets
+
+    assets = load_cached_assets(max_age_seconds=300, force=force_refresh)
+    if not assets:
+        assets = fetch_character_assets()
+    if not assets:
+        return targets
+
+    container_ids = set()
+    for a in assets:
+        if a.get("location_type") == "item":
+            container_ids.add(a.get("location_id"))
+        loc = a.get("location_id")
+        if (loc == JITA_STATION_ID or (loc and loc >= 1_000_000_000_000)) and a.get("is_singleton"):
+            container_ids.add(a.get("item_id"))
+
+    type_counts: dict[int, int] = {}
+    for a in assets:
+        loc = a.get("location_id")
+        loc_type = a.get("location_type")
+        loc_flag = a.get("location_flag")
+        is_hub = (loc == JITA_STATION_ID) or (loc is not None and loc >= 1_000_000_000_000)
+        if not is_hub:
+            continue
+        if loc_flag not in ["Hangar", "Deliveries"] or loc_type not in ["station", "other"]:
+            continue
+        if loc_type == "item" or loc in container_ids or a.get("is_singleton"):
+            continue
+        tid = a["type_id"]
+        type_counts[tid] = type_counts.get(tid, 0) + a.get("quantity", 1)
+
+    name_map = resolve_type_ids(list(type_counts.keys()))
+    for tid, qty in type_counts.items():
+        targets.append({"type_id": tid, "name": name_map.get(tid, f"Type {tid}"), "qty": qty})
+    return targets
+
+
+def _resolve_collision_strategy(
+    desk: str,
+    qty: int,
+    unit_cost: float,
+    lowest_ask: float | None,
+    active_orders: list[dict],
+    hold_meta: dict,
+) -> tuple[str, str, float, dict]:
+    """Pure rule engine for hangar items that already have an active sell order on the market."""
+    from services.ledgers import get_desk_profile
+
+    active_qty = sum(o["volume_remain"] for o in active_orders)
+    min_active_price = min((o["price"] for o in active_orders), default=0.0)
+    total_stack_qty = active_qty + qty
+    active_ratio = (active_qty / total_stack_qty) if total_stack_qty > 0 else 0.0
+    is_undercut = bool(lowest_ask and lowest_ask < min_active_price)
+    desk_upper = str(desk or "UNMANAGED").upper()
+
+    collision_action = None
+    collision_badge = None
+    collision_reason = ""
+
+    if desk_upper == "EVERGREEN":
+        eg_min_roi = get_desk_profile("evergreen").take_profit_roi
+        undercut_net = calc_net_proceeds(lowest_ask - 0.01) if lowest_ask else 0.0
+        eff_cost = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
+        still_profitable = (undercut_net >= eff_cost * (1.0 + eg_min_roi / 100.0)) if eff_cost > 0 else True
+        if is_undercut and not still_profitable:
+            action, action_type = "HOLD (MARGIN FLOOR)", "hold"
+            collision_action, collision_badge = "HOLD_HANGAR", "🛡️ MARGIN FLOOR"
+            collision_reason = f"Undercut {lowest_ask:,.2f} drops net margin below {eg_min_roi:.0f}%. Hold."
+            rec_sell = min_active_price
+        elif is_undercut:
+            action, action_type = "UNDERCUT & FLIP", "flip"
+            collision_action, collision_badge = "MATCH_ACTIVE", "⚡ UNDERCUT VIABLE"
+            collision_reason = f"Undercutting {lowest_ask:,.2f} still clears >={eg_min_roi:.0f}% net margin. Rotate capital."
+            rec_sell = round(lowest_ask - 0.01, 2)
+        else:
+            action, action_type = "MATCH ACTIVE ASK", "flip"
+            collision_action, collision_badge = "MATCH_ACTIVE", "🟢 TOP OF BOOK"
+            collision_reason = f"Active order ({active_qty}x) is top of book."
+            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+
+    elif desk_upper == "TACTICAL":
+        if is_undercut:
+            if active_ratio < 0.20:
+                action, action_type = "CANCEL & MERGE", "flip"
+                collision_action, collision_badge = "CANCEL_MERGE", "⚡ CANCEL & MERGE"
+                collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (<20%). Cancel order & merge full {total_stack_qty}x."
+                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+            else:
+                action, action_type = "MODIFY & HOLD", "hold"
+                collision_action, collision_badge = "MODIFY_HOLD", "✏️ MODIFY & HOLD"
+                collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (>=20%). Modify active order to {lowest_ask-0.01:,.2f}; hold {qty}x reserve."
+                rec_sell = min_active_price
+        else:
+            action, action_type = "FLIP (TACTICAL)", "flip"
+            collision_action, collision_badge = "TOP_OF_BOOK", "🟢 TOP OF BOOK"
+            collision_reason = f"Active order ({active_qty}x) is top of book."
+            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+
     else:
-        assets = load_cached_assets(max_age_seconds=300, force=force_refresh)
-        if not assets:
-            assets = fetch_character_assets()
+        if is_undercut and hold_meta.get("is_expired"):
+            action, action_type = f"TIME STOP ({hold_meta.get('days_held', 0)}d)", "time_stop"
+            collision_action, collision_badge = "CANCEL_MERGE", "⏱️ TIME STOP"
+            collision_reason = f"Position held {hold_meta.get('days_held', 0)}d (expired). Liquidate at {lowest_ask-0.01:,.2f}."
+            rec_sell = round(lowest_ask - 0.01, 2)
+        elif is_undercut:
+            action, action_type = "SELF-UNDERCUT RISK", "hold"
+            collision_action, collision_badge = "HOLD_HANGAR", "⚠️ SELF-UNDERCUT"
+            collision_reason = f"Active order exists @ {min_active_price:,.2f}. Avoid self-undercutting."
+            rec_sell = min_active_price
+        else:
+            action, action_type = "MARKET EXIT", "flip"
+            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
 
-        if assets:
-            container_ids = set()
-            for a in assets:
-                if a.get("location_type") == "item":
-                    container_ids.add(a.get("location_id"))
-                loc = a.get("location_id")
-                if (loc == JITA_STATION_ID or (loc and loc >= 1_000_000_000_000)) and a.get("is_singleton"):
-                    container_ids.add(a.get("item_id"))
+    collision_info = {
+        "has_collision": True,
+        "active_qty": active_qty,
+        "active_price": min_active_price,
+        "active_ratio": round(active_ratio * 100, 1),
+        "is_undercut": is_undercut,
+        "action": collision_action,
+        "badge": collision_badge,
+        "reason": collision_reason,
+    }
+    return action, action_type, rec_sell, collision_info
 
-            type_counts = {}
-            for a in assets:
-                loc = a.get("location_id")
-                loc_type = a.get("location_type")
-                loc_flag = a.get("location_flag")
 
-                is_hub = (loc == JITA_STATION_ID) or (loc is not None and loc >= 1_000_000_000_000)
-                if not is_hub:
-                    continue
+def _resolve_unlisted_strategy(
+    desk: str,
+    unit_cost: float,
+    lowest_ask: float | None,
+    target_sell: float | None,
+    hold_meta: dict,
+) -> tuple[str, str, float]:
+    """Pure rule engine for hangar items with no active sell order."""
+    from services.ledgers import get_desk_profile
 
-                if loc_flag not in ["Hangar", "Deliveries"] or loc_type not in ["station", "other"]:
-                    continue
+    if desk == "EVERGREEN":
+        rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
+        return "FAST FLIP", "flip", rec_sell
 
-                if loc_type == "item" or loc in container_ids or a.get("is_singleton"):
-                    continue
+    if desk in ["TACTICAL", "HOLD"]:
+        desk_cfg = get_desk_profile(desk)
+        days_held = hold_meta.get("days_held", 0)
+        is_expired = hold_meta.get("is_expired", False)
 
-                tid = a["type_id"]
-                type_counts[tid] = type_counts.get(tid, 0) + a.get("quantity", 1)
+        effective_cost_unit = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
+        net_proceeds_unit = calc_net_proceeds(lowest_ask - 0.01) if lowest_ask else 0.0
+        live_roi_pct = ((net_proceeds_unit - effective_cost_unit) / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
+        is_profitable = (net_proceeds_unit > effective_cost_unit) if effective_cost_unit > 0 else True
+        take_profit_ready = bool(
+            lowest_ask
+            and lowest_ask > 0.01
+            and effective_cost_unit > 0
+            and desk_cfg.take_profit_days > 0
+            and days_held >= desk_cfg.take_profit_days
+            and live_roi_pct >= desk_cfg.take_profit_roi
+        )
 
-            name_map = resolve_type_ids(list(type_counts.keys()))
-            for tid, qty in type_counts.items():
-                targets.append({"type_id": tid, "name": name_map.get(tid, f"Type {tid}"), "qty": qty})
+        if lowest_ask and target_sell and lowest_ask >= target_sell:
+            if is_profitable:
+                return "TARGET MET", "met", round(lowest_ask - 0.01, 2)
+            breakeven_sell = round((effective_cost_unit * 1.05) / (1.0 - EXIT_FEE_JITA), 2)
+            return "HOLD (MARGIN COMPRESSED)", "hold", max(round(target_sell, 2), breakeven_sell)
+        if is_expired:
+            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
+            return f"TIME STOP ({days_held}d)", "time_stop", rec_sell
+        if take_profit_ready:
+            return f"TAKE PROFIT ({days_held}d)", "met", round(lowest_ask - 0.01, 2)
+        if target_sell:
+            label = f"HOLD CYCLE ({days_held}d)" if desk == "HOLD" else "HOLD CYCLE"
+            return label, "hold", round(target_sell, 2)
 
-    if not targets:
-        return {
-            "multisell_text": "",
-            "ready_multisell_text": "",
-            "items": [],
-            "total_items": 0,
-            "total_value": 0.0,
-            "total_cost": 0.0,
-            "total_profit": 0.0,
-            "ready_value": 0.0,
-            "ready_cost": 0.0,
-            "ready_profit": 0.0,
-            "hold_value": 0.0,
-            "hold_cost": 0.0,
-            "hold_profit": 0.0
+        rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else 1000000.0
+        return "FAST FLIP", "flip", rec_sell
+
+    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (unit_cost * 1.05 if unit_cost > 0 else 1000000.0)
+    return "MARKET EXIT", "unmanaged", rec_sell
+
+
+def _evaluate_advisor_item(target: dict, ctx: dict) -> dict:
+    """Evaluates a single inventory target against live market asks, cost basis, active sells, and hold timers."""
+    tid = target["type_id"]
+    name = target["name"]
+    qty = target["qty"]
+    lowest_ask = ctx["lowest_asks"].get(tid)
+    hist = ctx["history_map"].get(tid)
+    cost_info = ctx["cost_basis_map"].get(tid, {"unit_cost": 0.0, "source": "UNKNOWN"})
+    unit_cost = cost_info.get("unit_cost", 0.0)
+    cost_source = cost_info.get("source", "UNKNOWN")
+    desk = hist["desk"] if hist else "UNMANAGED"
+    target_sell = hist["target_sell"] if hist else None
+    hold_meta = ctx["hold_desk_map"].get(tid, {})
+    active_orders = ctx["active_sells_map"].get(tid, [])
+
+    if active_orders:
+        action, action_type, rec_sell, collision_info = _resolve_collision_strategy(
+            desk, qty, unit_cost, lowest_ask, active_orders, hold_meta
+        )
+    else:
+        action, action_type, rec_sell = _resolve_unlisted_strategy(
+            desk, unit_cost, lowest_ask, target_sell, hold_meta
+        )
+        collision_info = {
+            "has_collision": False,
+            "active_qty": 0,
+            "active_price": 0.0,
+            "active_ratio": 0.0,
+            "is_undercut": False,
+            "action": None,
+            "badge": None,
+            "reason": "",
         }
 
-    session = create_session()
-    type_ids = [t["type_id"] for t in targets]
-    lowest_asks = {}
+    line_value = rec_sell * qty
+    effective_cost_unit = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
+    line_cost = effective_cost_unit * qty
+    profit_unit = calc_net_proceeds(rec_sell) - effective_cost_unit
+    line_profit = profit_unit * qty
+    margin_pct = (profit_unit / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(fetch_lowest_sell_order, session, tid): tid for tid in type_ids}
-        for fut in as_completed(futures):
-            tid, lowest_ask = fut.result()
-            lowest_asks[tid] = lowest_ask
+    return {
+        "type_id": tid,
+        "name": name,
+        "qty": qty,
+        "desk": desk,
+        "target_sell": target_sell,
+        "lowest_ask": lowest_ask,
+        "action": action,
+        "action_type": action_type,
+        "recommended_sell": rec_sell,
+        "line_value": round(line_value, 2),
+        "unit_cost": round(unit_cost, 2),
+        "line_cost": round(line_cost, 2),
+        "profit": round(line_profit, 2),
+        "margin_pct": round(margin_pct, 1),
+        "hold_data": hold_meta,
+        "cost_source": cost_source,
+        "collision": collision_info,
+    }
 
-    history_map = get_historical_ledger_targets(type_ids)
-    cost_basis_map = get_cost_basis_map(type_ids, history_map)
-    active_sells_map = get_active_sell_orders_map()
-    hold_desk_map = get_hold_desk_params(type_ids, {t['type_id']: t['name'] for t in targets}, history_map)
 
-    items_result = []
-    multisell_lines = []
-    ready_lines = []
-    
-    total_value = 0.0
-    total_cost = 0.0
-    total_profit = 0.0
-    
-    ready_value = 0.0
-    ready_cost = 0.0
-    ready_profit = 0.0
-    
-    hold_value = 0.0
-    hold_cost = 0.0
-    hold_profit = 0.0
-
-    for t in targets:
-        tid = t["type_id"]
-        name = t["name"]
-        qty = t["qty"]
-        lowest_ask = lowest_asks.get(tid)
-        hist = history_map.get(tid)
-        cost_info = cost_basis_map.get(tid, {"unit_cost": 0.0, "source": "UNKNOWN"})
-        unit_cost = cost_info.get("unit_cost", 0.0)
-        cost_source = cost_info.get("source", "UNKNOWN")
-
-        desk = hist["desk"] if hist else "UNMANAGED"
-        target_sell = hist["target_sell"] if hist else None
-
-        # --- Active Sell Order Collision & Stack Merge Logic ---
-        active_orders = active_sells_map.get(tid, [])
-        has_collision = len(active_orders) > 0
-        active_qty = sum(o["volume_remain"] for o in active_orders)
-        min_active_price = min((o["price"] for o in active_orders), default=0.0)
-        total_stack_qty = active_qty + qty
-        active_ratio = (active_qty / total_stack_qty) if total_stack_qty > 0 else 0.0
-        is_undercut = bool(has_collision and lowest_ask and lowest_ask < min_active_price)
-        collision_action = None
-        collision_badge = None
-        collision_reason = ""
-
-        # Suggested Sell Price & Action Logic
-        if has_collision:
-            desk_upper = desk.upper() if desk else "UNMANAGED"
-            if desk_upper == "EVERGREEN":
-                undercut_net = (lowest_ask - 0.01) * (1.0 - EXIT_FEE_JITA) if lowest_ask else 0.0
-                eff_cost = unit_cost * (1.0 + BUY_FEE_CITADEL) if unit_cost > 0 else 0.0
-                still_profitable = (undercut_net >= eff_cost * 1.02) if eff_cost > 0 else True
-                if is_undercut and not still_profitable:
-                    action = "HOLD (MARGIN FLOOR)"
-                    action_type = "hold"
-                    collision_action = "HOLD_HANGAR"
-                    collision_badge = "🛡️ MARGIN FLOOR"
-                    collision_reason = f"Undercut {lowest_ask:,.2f} drops net margin below 2%. Hold."
-                    rec_sell = min_active_price
-                elif is_undercut:
-                    action = "UNDERCUT & FLIP"
-                    action_type = "flip"
-                    collision_action = "MATCH_ACTIVE"
-                    collision_badge = "⚡ UNDERCUT VIABLE"
-                    collision_reason = f"Undercutting {lowest_ask:,.2f} still clears >=2% net margin. Rotate capital."
-                    rec_sell = round(lowest_ask - 0.01, 2)
-                else:
-                    action = "MATCH ACTIVE ASK"
-                    action_type = "flip"
-                    collision_action = "MATCH_ACTIVE"
-                    collision_badge = "🟢 TOP OF BOOK"
-                    collision_reason = f"Active order ({active_qty}x) is top of book."
-                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
-
-            elif desk_upper == "TACTICAL":
-                if is_undercut:
-                    if active_ratio < 0.20:
-                        action = "CANCEL & MERGE"
-                        action_type = "flip"
-                        collision_action = "CANCEL_MERGE"
-                        collision_badge = "⚡ CANCEL & MERGE"
-                        collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (<20%). Cancel order & merge full {total_stack_qty}x."
-                        rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
-                    else:
-                        action = "MODIFY & HOLD"
-                        action_type = "hold"
-                        collision_action = "MODIFY_HOLD"
-                        collision_badge = "✏️ MODIFY & HOLD"
-                        collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (>=20%). Modify active order to {lowest_ask-0.01:,.2f}; hold {qty}x reserve."
-                        rec_sell = min_active_price
-                else:
-                    action = "FLIP (TACTICAL)"
-                    action_type = "flip"
-                    collision_action = "TOP_OF_BOOK"
-                    collision_badge = "🟢 TOP OF BOOK"
-                    collision_reason = f"Active order ({active_qty}x) is top of book."
-                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
-
-            else:
-                hold_meta = hold_desk_map.get(tid, {})
-                if is_undercut and hold_meta.get("is_expired"):
-                    action = f"TIME STOP ({hold_meta.get('days_held', 0)}d)"
-                    action_type = "time_stop"
-                    collision_action = "CANCEL_MERGE"
-                    collision_badge = "⏱️ TIME STOP"
-                    collision_reason = f"Position held {hold_meta.get('days_held', 0)}d (expired). Liquidate at {lowest_ask-0.01:,.2f}."
-                    rec_sell = round(lowest_ask - 0.01, 2)
-                elif is_undercut:
-                    action = "SELF-UNDERCUT RISK"
-                    action_type = "hold"
-                    collision_action = "HOLD_HANGAR"
-                    collision_badge = "⚠️ SELF-UNDERCUT"
-                    collision_reason = f"Active order exists @ {min_active_price:,.2f}. Avoid self-undercutting."
-                    rec_sell = min_active_price
-                else:
-                    action = "MARKET EXIT"
-                    action_type = "flip"
-                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
-        else:
-            if desk == "EVERGREEN":
-                action = "FAST FLIP"
-                action_type = "flip"
-                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
-            elif desk in ["TACTICAL", "HOLD"]:
-                hold_meta = hold_desk_map.get(tid, {})
-                days_held = hold_meta.get("days_held", 0)
-                max_days = hold_meta.get("max_days", 10 if desk == "TACTICAL" else 21)
-                is_expired = hold_meta.get("is_expired", False)
-                # Calculate unit financials at current live ask
-                effective_cost_unit = unit_cost * (1.0 + BUY_FEE_CITADEL) if unit_cost > 0 else 0.0
-                net_proceeds_unit = (lowest_ask - 0.01) * (1.0 - EXIT_FEE_JITA) if lowest_ask else 0.0
-                live_roi_pct = ((net_proceeds_unit - effective_cost_unit) / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
-                is_profitable = (net_proceeds_unit > effective_cost_unit) if effective_cost_unit > 0 else True
-                take_profit_ready = (
-                    lowest_ask and lowest_ask > 0.01 and effective_cost_unit > 0 and (
-                        (desk == "HOLD" and days_held >= 4 and live_roi_pct >= 8.0) or
-                        (desk == "TACTICAL" and days_held >= 5 and live_roi_pct >= 4.0)
-                    )
-                )
-
-                if lowest_ask and target_sell and lowest_ask >= target_sell:
-                    if is_profitable:
-                        action = "TARGET MET"
-                        action_type = "met"
-                        rec_sell = round(lowest_ask - 0.01, 2)
-                    else:
-                        # Prevent selling at a loss just because raw target price matched
-                        action = "HOLD (MARGIN COMPRESSED)"
-                        action_type = "hold"
-                        # Recommend breakeven exit plus 5% minimum margin
-                        breakeven_sell = round((effective_cost_unit * 1.05) / (1.0 - EXIT_FEE_JITA), 2)
-                        rec_sell = max(round(target_sell, 2), breakeven_sell)
-                elif desk in ["HOLD", "TACTICAL"] and is_expired:
-                    action = f"TIME STOP ({days_held}d)"
-                    action_type = "time_stop"
-                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
-                elif take_profit_ready:
-                    action = f"TAKE PROFIT ({days_held}d)"
-                    action_type = "met"
-                    rec_sell = round(lowest_ask - 0.01, 2)
-                elif target_sell:
-                    action = f"HOLD CYCLE ({days_held}d)" if desk == "HOLD" else "HOLD CYCLE"
-                    action_type = "hold"
-                    rec_sell = round(target_sell, 2)
-                else:
-                    action = "FAST FLIP"
-                    action_type = "flip"
-                    rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else 1000000.0
-            else:
-                action = "MARKET EXIT"
-                action_type = "unmanaged"
-                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (unit_cost * 1.05 if unit_cost > 0 else 1000000.0)
-
-        # Financial Calculations (Proceeds vs Costs)
-        line_value = rec_sell * qty
-        effective_cost_unit = unit_cost * (1.0 + BUY_FEE_CITADEL) if unit_cost > 0 else 0.0
-        line_cost = effective_cost_unit * qty
-        net_proceeds_unit = rec_sell * (1.0 - EXIT_FEE_JITA)
-        profit_unit = net_proceeds_unit - effective_cost_unit
-        line_profit = profit_unit * qty
-        margin_pct = (profit_unit / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
-
-        total_value += line_value
-        total_cost += line_cost
-        total_profit += line_profit
-
-        if action_type in ["flip", "met", "unmanaged", "time_stop"]:
-            ready_value += line_value
-            ready_cost += line_cost
-            ready_profit += line_profit
-            ready_lines.append(f"{name}\t{rec_sell:.2f}")
-        else:
-            hold_value += line_value
-            hold_cost += line_cost
-            hold_profit += line_profit
-
-        multisell_lines.append(f"{name}\t{rec_sell:.2f}")
-
-        items_result.append({
-            "type_id": tid,
-            "name": name,
-            "qty": qty,
-            "desk": desk,
-            "target_sell": target_sell,
-            "lowest_ask": lowest_ask,
-            "action": action,
-            "action_type": action_type,
-            "recommended_sell": rec_sell,
-            "line_value": round(line_value, 2),
-            "unit_cost": round(unit_cost, 2),
-            "line_cost": round(line_cost, 2),
-            "profit": round(line_profit, 2),
-            "margin_pct": round(margin_pct, 1),
-            "hold_data": hold_desk_map.get(tid, {}),
-            "cost_source": cost_source,
-            "collision": {
-                "has_collision": has_collision,
-                "active_qty": active_qty,
-                "active_price": min_active_price,
-                "active_ratio": round(active_ratio * 100, 1),
-                "is_undercut": is_undercut,
-                "action": collision_action,
-                "badge": collision_badge,
-                "reason": collision_reason
-            }
-        })
-
+def _summarize_advisor_results(items_result: list[dict]) -> dict:
+    """Aggregates portfolio totals and MultiSell clipboard strings from evaluated advisor items."""
     items_result.sort(key=lambda x: x["line_value"], reverse=True)
+    multisell_lines, ready_lines = [], []
+    total_value = total_cost = total_profit = 0.0
+    ready_value = ready_cost = ready_profit = 0.0
+    hold_value = hold_cost = hold_profit = 0.0
+
+    for it in items_result:
+        total_value += it["line_value"]
+        total_cost += it["line_cost"]
+        total_profit += it["profit"]
+        multisell_lines.append(f"{it['name']}\t{it['recommended_sell']:.2f}")
+
+        if it["action_type"] in ["flip", "met", "unmanaged", "time_stop"]:
+            ready_value += it["line_value"]
+            ready_cost += it["line_cost"]
+            ready_profit += it["profit"]
+            ready_lines.append(f"{it['name']}\t{it['recommended_sell']:.2f}")
+        else:
+            hold_value += it["line_value"]
+            hold_cost += it["line_cost"]
+            hold_profit += it["profit"]
+
     return {
         "multisell_text": "\n".join(multisell_lines),
         "ready_multisell_text": "\n".join(ready_lines),
@@ -812,118 +869,101 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
         "ready_profit": round(ready_profit, 2),
         "hold_value": round(hold_value, 2),
         "hold_cost": round(hold_cost, 2),
-        "hold_profit": round(hold_profit, 2)
+        "hold_profit": round(hold_profit, 2),
+    }
+
+
+def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False):
+    targets = _collect_advisor_targets(raw_text=raw_text, force_refresh=force_refresh)
+    if not targets:
+        return _summarize_advisor_results([])
+
+    session = create_session()
+    type_ids = [t["type_id"] for t in targets]
+    lowest_asks = {}
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(fetch_lowest_sell_order, session, tid): tid for tid in type_ids}
+        for fut in as_completed(futures):
+            tid, lowest_ask = fut.result()
+            lowest_asks[tid] = lowest_ask
+
+    history_map = get_historical_ledger_targets(type_ids)
+    ctx = {
+        "lowest_asks": lowest_asks,
+        "history_map": history_map,
+        "cost_basis_map": get_cost_basis_map(type_ids, history_map),
+        "active_sells_map": get_active_sell_orders_map(),
+        "hold_desk_map": get_hold_desk_params(type_ids, {t["type_id"]: t["name"] for t in targets}, history_map),
+    }
+    evaluated = [_evaluate_advisor_item(t, ctx) for t in targets]
+    return _summarize_advisor_results(evaluated)
+
+
+def evaluate_deal_opportunity(meta: dict, sells: list[tuple[float, int]], top_buy: float | None) -> dict | None:
+    """
+    Pure Deal Sniper classifier (INSTANT ARB, FIRESALE DUMP, DEEP DISCOUNT) with cluster-depth
+    and 30-day median guardrails.
+    """
+    if not sells:
+        return None
+    tid = int(meta["type_id"])
+    lowest_ask, qty_available = sells[0]
+    median_30d = float(meta.get("median_30d", 0.0))
+
+    cluster_qty = sum(q for p, q in sells if p <= (lowest_ask * 1.035))
+    if cluster_qty > 3 and (lowest_ask * cluster_qty) > 300_000_000:
+        return None
+
+    wall_ask = next((p for p, _ in sells[1:] if p >= (lowest_ask * 1.05)), None)
+
+    deal_type = None
+    target_exit = None
+    if top_buy and lowest_ask <= top_buy:
+        deal_type = "INSTANT ARB"
+        target_exit = top_buy
+    elif wall_ask and wall_ask > lowest_ask:
+        realistic_exit = min(wall_ask * 0.9999, median_30d * 1.05) if median_30d > 0 else (wall_ask * 0.9999)
+        if realistic_exit > (lowest_ask * 1.08):
+            deal_type = "FIRESALE DUMP"
+            target_exit = realistic_exit
+    elif median_30d > 0 and lowest_ask <= (median_30d * 0.85) and cluster_qty <= 2:
+        deal_type = "DEEP DISCOUNT"
+        target_exit = median_30d * 0.98
+
+    if not deal_type or not target_exit:
+        return None
+
+    eval_qty = min(int(qty_available), 5)
+    if (lowest_ask * eval_qty) > 1_500_000_000 and eval_qty > 1:
+        eval_qty = max(1, int(1_500_000_000 // lowest_ask))
+
+    fin = calc_line_financials(lowest_ask, target_exit, qty=eval_qty)
+    net_margin = fin["net_margin"]
+    est_profit = fin["profit"]
+    total_cost = lowest_ask * eval_qty
+
+    if net_margin < 5.0 or est_profit < 5_000_000:
+        return None
+
+    discount_pct = ((target_exit - lowest_ask) / target_exit) * 100.0
+    return {
+        "deal_type": deal_type,
+        "type_id": tid,
+        "name": meta["name"],
+        "item_name": meta["name"],
+        "qty": eval_qty,
+        "quantity": eval_qty,
+        "discount_pct": round(discount_pct, 1),
+        "ask_price": round(lowest_ask, 2),
+        "target_exit": round(target_exit, 2),
+        "target_sell": round(target_exit, 2),
+        "net_margin": round(net_margin, 1),
+        "capital": round(total_cost, 2),
+        "total_cost": round(total_cost, 2),
+        "profit": round(est_profit, 2),
+        "est_profit": round(est_profit, 2),
     }
 
 def get_live_missing_buys(desk_filter: str = "all"):
-    from services.ledgers import get_annotated_desks
-    eg, tac, hld = get_annotated_desks()
-    if desk_filter == "evergreen": pool = eg
-    elif desk_filter == "tactical": pool = tac
-    elif desk_filter == "hold": pool = hld
-    else: pool = eg + tac + hld
-
-    unplaced = [item for item in pool if item.get("char_status") == "UNPLACED"]
-    dedup = {}
-    for it in unplaced:
-        tid = it["type_id"]
-        if tid not in dedup: dedup[tid] = dict(it)
-        else:
-            dedup[tid]["qty"] += it["qty"]
-            dedup[tid]["capital"] += it["capital"]
-            dedup[tid]["profit"] += it["profit"]
-
-    missing_items = list(dedup.values())
-    if not missing_items:
-        return {"multibuy_text": "", "items": [], "total_items": 0, "total_escrow": 0.0}
-
-    session = create_session()
-    type_ids = [it["type_id"] for it in missing_items]
-    live_buys = {}
-    live_asks = {}
-
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(fetch_telemetry_pair, session, tid): tid for tid in type_ids}
-        for fut in as_completed(futures):
-            tid, ask_p, buy_p = fut.result()
-            live_asks[tid] = ask_p
-            live_buys[tid] = buy_p
-
-    # Lookup 14-day historical minimum trade price so we never recommend unfillable lowball bids
-    min_14d_map = {}
-    try:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        id_str = ",".join(str(int(t)) for t in set(type_ids))
-        rows = con.execute(f"""
-            SELECT type_id, QUANTILE_CONT(lowest, 0.25)
-            FROM forge_market_history
-            WHERE type_id IN ({id_str})
-              AND date >= (SELECT MAX(date) - INTERVAL 14 DAY FROM forge_market_history)
-              AND volume > 0
-            GROUP BY type_id
-        """).fetchall()
-        con.close()
-        min_14d_map = {int(r[0]): float(r[1]) for r in rows if r[1]}
-    except Exception:
-        pass
-
-    results = []
-    multibuy_lines = []
-    total_escrow = 0.0
-
-    for it in missing_items:
-        tid = it["type_id"]
-        name = it["name"]
-        qty = int(it["qty"])
-        target_buy = float(it.get("target_buy", 0.0))
-        csv_sell = float(it.get("target_sell", 0.0))
-        live_ask = live_asks.get(tid)
-        top_buy = live_buys.get(tid)
-        min_14d = min_14d_map.get(tid, 0.0)
-
-        # Blend live ask with CSV target sell so rising markets don't depress buy ceilings
-        if live_ask and live_ask > 0 and csv_sell > 0:
-            target_sell = round(max(live_ask * 0.995, csv_sell), 2) if desk_filter == "evergreen" else round(max(csv_sell, live_ask * 0.98), 2)
-        else:
-            target_sell = live_ask if (live_ask and live_ask > 0) else csv_sell
-
-        rec_buy = round(top_buy + 0.01, 2) if (top_buy and top_buy > 0) else round(max(target_buy, min_14d * 0.98), 2)
-        top_buy = top_buy or rec_buy
-
-        cost_unit = rec_buy * (1.0 + BUY_FEE_CITADEL)
-        net_proceeds = target_sell * (1.0 - EXIT_FEE_JITA)
-        profit_unit = net_proceeds - cost_unit
-        margin_pct = (profit_unit / cost_unit) * 100.0 if cost_unit > 0 else 0.0
-
-        min_desk_margin = 1.085 if desk_filter == "tactical" else (1.050 if desk_filter == "evergreen" else 1.045)
-        max_profitable_buy = (net_proceeds / min_desk_margin) / (1.0 + BUY_FEE_CITADEL)
-
-        # Skip items where competitive top_buy + 0.01 is unprofitable instead of squeezing into an unfillable lowball bid
-        if rec_buy > max_profitable_buy:
-            continue
-
-        # Keep rec_buy strictly at top_buy + 0.01 (never overbid above the #1 buy order)
-
-        line_escrow = rec_buy * qty
-        total_escrow += line_escrow
-
-        results.append({
-            "type_id": tid,
-            "name": name,
-            "qty": qty,
-            "top_buy": top_buy,
-            "recommended_buy": rec_buy,
-            "target_sell": target_sell,
-            "margin_pct": round(margin_pct, 1),
-            "line_escrow": round(line_escrow, 2),
-            "squeezed": False
-        })
-
-    results.sort(key=lambda x: x["line_escrow"], reverse=True)
-    multibuy_lines = [f"{r['name']} {r['qty']}" for r in results]
-    return {
-        "multibuy_text": "\n".join(multibuy_lines),
-        "items": results,
-        "total_items": len(results),
-        "total_escrow": round(total_escrow, 2)
-    }
+    from services.ledgers import get_missing_buy_orders
+    return get_missing_buy_orders(desk=desk_filter)

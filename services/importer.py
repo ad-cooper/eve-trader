@@ -3,18 +3,21 @@ import json
 import math
 import re
 import duckdb
-import requests
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from services.esi import get_character_auth
 from services.blacklist import load_active_blacklist
 from services.staging_diff import process_snapshot_diff, get_observed_staging_velocity
+from services.ledgers import get_desk_claimed_type_ids, is_item_blacklisted
 from services.market import (
     DUCKDB_PATH,
     SQLITE_PATH,
     JITA_STATION_ID,
     create_session,
-    fetch_lowest_sell_order,
+    fetch_station_asks_bulk,
+    ensure_jita_asks,
+    resolve_primary_character,
+    fetch_character_locations_stock,
 )
 
 IMPORT_CACHE_FILE = "ledgers/import_suggestions_cache.json"
@@ -81,19 +84,6 @@ EXCLUDED_META_GROUPS = (5, 15)
 EXCLUDED_TYPE_IDS = (44992,)
 
 # Packaged ship volumes (m3) by SDE groupID
-PACKAGED_SHIP_M3 = {
-    25: 2500.0, 324: 2500.0, 830: 2500.0, 831: 2500.0, 834: 2500.0, 893: 2500.0, 1283: 2500.0, 1527: 2500.0,  # Frigates
-    420: 5000.0, 541: 5000.0, 1305: 5000.0, 1534: 5000.0,  # Destroyers
-    26: 10000.0, 358: 10000.0, 832: 10000.0, 833: 10000.0, 894: 10000.0, 906: 10000.0, 963: 10000.0, 1972: 10000.0,  # Cruisers
-    419: 15000.0, 540: 15000.0, 1201: 15000.0,  # Battlecruisers
-    27: 50000.0, 898: 50000.0, 900: 50000.0,  # Battleships
-    28: 20000.0, 380: 20000.0, 1202: 20000.0,  # Haulers / DST / BR
-    463: 3750.0, 543: 3750.0,  # Mining Barges / Exhumers
-    941: 500000.0,  # Industrial Command Ships (Orca / Porpoise)
-    513: 1000000.0, 902: 1000000.0,  # Freighters / Jump Freighters
-}
-
-
 def calc_hisec_single_contract(m3: float, collateral: float, warps: int = 35, lowsec_warps: int = 0) -> tuple[str, float]:
     """
     Exact single-contract reward for highsec haulage:
@@ -225,51 +215,7 @@ def calc_courier_freight(
     return max(col_reward, vol_reward)
 
 
-def fetch_structure_order_book(structure_id: int, access_token: str) -> tuple[dict, list[dict]]:
-    """
-    Downloads all pages of a player structure's market and returns:
-      (aggregated_book_by_type_id, raw_orders_list)
-    """
-    headers = {"Authorization": f"Bearer {access_token}"}
-    first = requests.get(
-        f"https://esi.evetech.net/latest/markets/structures/{structure_id}/?datasource=tranquility&page=1",
-        headers=headers,
-        timeout=10,
-    )
-    first.raise_for_status()
-    total_pages = int(first.headers.get("X-Pages", 1))
-    all_orders = list(first.json())
-
-    if total_pages > 1:
-        def get_page(p: int):
-            r = requests.get(
-                f"https://esi.evetech.net/latest/markets/structures/{structure_id}/?datasource=tranquility&page={p}",
-                headers=headers,
-                timeout=10,
-            )
-            return r.json() if r.status_code == 200 else []
-
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            for rows in ex.map(get_page, range(2, total_pages + 1)):
-                all_orders.extend(rows)
-
-    book = {}
-    for o in all_orders:
-        tid = int(o["type_id"])
-        price = float(o["price"])
-        vol = int(o["volume_remain"])
-        entry = book.setdefault(tid, {"lowest_ask": None, "sell_vol": 0, "top_buy": None, "daily_vol": None})
-        if o.get("is_buy_order"):
-            if entry["top_buy"] is None or price > entry["top_buy"]:
-                entry["top_buy"] = price
-        else:
-            entry["sell_vol"] += vol
-            if entry["lowest_ask"] is None or price < entry["lowest_ask"]:
-                entry["lowest_ask"] = price
-    return book, all_orders
-
-
-def _fetch_fuzzwork_station_asks(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
+def fetch_station_asks_bulk(session, station_id: int, tids: list[int]) -> dict[int, float]:
     """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""
     asks: dict[int, float] = {}
     if not tids:
@@ -301,14 +247,14 @@ def _fetch_fuzzwork_station_asks(session: requests.Session, station_id: int, tid
     return asks
 
 
-def _fetch_station_order_book(session: requests.Session, dest: dict, tids: list[int], jita_asks: dict[int, float | None]) -> dict:
+def _fetch_station_order_book(session, dest: dict, tids: list[int], jita_asks: dict[int, float | None]) -> dict:
     """Bulk-screens station asks via Fuzzwork, then validates 30d regional volume only on profitable candidates."""
     region_id = dest["region_id"]
     station_id = dest["location_id"]
     min_margin = dest["min_margin_pct"]
     min_daily_vol = dest.get("min_dest_units_day", 0.0)
 
-    station_asks = _fetch_fuzzwork_station_asks(session, station_id, tids)
+    station_asks = fetch_station_asks_bulk(session, station_id, tids)
     profitable_tids = [
         tid for tid, dest_ask in station_asks.items()
         if jita_asks.get(tid) and dest_ask > jita_asks[tid] * (1.0 + min_margin / 100.0)
@@ -318,13 +264,7 @@ def _fetch_station_order_book(session: requests.Session, dest: dict, tids: list[
         dest_ask = station_asks[tid]
         daily_vol = None
         if min_daily_vol > 0:
-            h_url = f"https://esi.evetech.net/latest/markets/{region_id}/history/?datasource=tranquility&type_id={tid}"
-            r_hist = session.get(h_url, timeout=7)
-            daily_vol = 0.0
-            if r_hist.status_code == 200:
-                hist = r_hist.json()[-30:]
-                if hist:
-                    daily_vol = sum(float(d.get("volume", 0)) for d in hist) / 30.0
+            daily_vol = get_30d_average_volume(tid, region_id=region_id)
             if daily_vol < min_daily_vol:
                 return None
 
@@ -353,7 +293,7 @@ def _get_jita_high_velocity_candidates(
     Selects high-velocity Jita player-consumed items clearing both ISK/day and units/day cutoffs,
     plus any extra_tids with proven local staging burn rates.
     """
-    bl_items, bl_groups, _ = load_active_blacklist()
+    bl_items, bl_groups, bl_meta = load_active_blacklist()
     con = duckdb.connect(DUCKDB_PATH, read_only=True)
     con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
     allowed_cats = ",".join(f"'{c}'" for c in ALLOWED_SDE_CATEGORIES)
@@ -428,7 +368,7 @@ def _get_jita_high_velocity_candidates(
     for tid, name, raw_vol, gid, gname, d_units, d_isk in rows:
         name_s = str(name)
         grp_s = str(gname)
-        if name_s in bl_items or grp_s in bl_groups:
+        if is_item_blacklisted(name_s, grp_s, bl_items, bl_groups, bl_meta):
             continue
         m3 = PACKAGED_SHIP_M3.get(int(gid), float(raw_vol or 0.01))
         meta[int(tid)] = {
@@ -441,13 +381,13 @@ def _get_jita_high_velocity_candidates(
     return meta
 
 
-def _ensure_jita_asks(session: requests.Session, tids: list[int], jita_asks: dict[int, float | None]):
+def ensure_jita_asks(session, tids: list[int], jita_asks: dict[int, float | None]):
     """Bulk-fetches Jita 4-4 lowest sell prices via Fuzzwork (100 IDs/request) with ESI fallback."""
     missing = [tid for tid in tids if tid not in jita_asks]
     if not missing:
         return
 
-    bulk = _fetch_fuzzwork_station_asks(session, JITA_STATION_ID, missing)
+    bulk = fetch_station_asks_bulk(session, JITA_STATION_ID, missing)
     jita_asks.update(bulk)
 
     still_missing = [tid for tid in missing if tid not in jita_asks]
@@ -470,374 +410,216 @@ def load_cached_import_suggestions() -> dict | None:
 
 
 
-def _resolve_cj6mt_seller(default_name: str = "Skie Ankora") -> tuple[str, str, int]:
-    """
-    Resolves (character_name, access_token, character_id) for the C-J6MT seller.
-    Supports both list-based and dict-based ledgers/sso_token.json formats.
-    """
-    target_name = default_name
-    sso_path = "ledgers/sso_token.json"
-    if os.path.exists(sso_path):
-        try:
-            with open(sso_path, "r", encoding="utf-8") as f:
-                sso = json.load(f)
-            if isinstance(sso, list) and sso:
-                primary_name = str(sso[0].get("character_name") or "")
-                tagged = [x for x in sso if isinstance(x, dict) and x.get("role") == "cj6mt"]
-                if tagged and tagged[-1].get("character_name"):
-                    target_name = str(tagged[-1]["character_name"])
-                else:
-                    others = [
-                        str(x["character_name"])
-                        for x in sso[1:]
-                        if isinstance(x, dict) and x.get("character_name") and str(x["character_name"]) != primary_name
-                    ]
-                    if others:
-                        target_name = others[-1]
-            elif isinstance(sso, dict):
-                primary_name = sso.get("character_name")
-                if sso.get("cj6mt_character"):
-                    target_name = sso["cj6mt_character"]
-                elif isinstance(sso.get("characters"), dict):
-                    others = [k for k in sso["characters"].keys() if k != primary_name]
-                    if others:
-                        target_name = others[-1]
-        except Exception as e:
-            print(f"[!] Warning reading {sso_path}: {e}")
+def _estimate_destination_daily_vol(
+    tid: int,
+    info: dict,
+    s_entry: dict,
+    scale_factor: float,
+    obs_confidence: float,
+    days_tracked: float,
+    observed_by_type: dict,
+) -> tuple[float, float | None, bool, str]:
+    """Resolves expected daily destination unit volume from regional history or blended staging burn."""
+    if s_entry["daily_vol"] is not None:
+        return float(s_entry["daily_vol"]), None, False, "REGIONAL_30D"
 
-    token, char_id = get_character_auth(target_name)
-    if not token:
-        raise RuntimeError(
-            f"Unable to load or refresh '{target_name}' token from ledgers/sso_token.json. "
-            f"Click 'Switch C-J6MT Seller' in the Imports tab or visit /sso/login?role=cj6mt"
+    extrapolated_vol = info["jita_vol_30d"] * scale_factor
+    sell_vol = s_entry["sell_vol"]
+    obs_entry = observed_by_type.get(tid)
+
+    if obs_confidence > 0.0 and obs_entry and obs_entry["real_daily_burn"] > 0:
+        observed_daily = obs_entry["real_daily_burn"]
+        blended = ((1.0 - obs_confidence) * extrapolated_vol) + (obs_confidence * observed_daily)
+        return (
+            blended,
+            observed_daily,
+            obs_confidence < 0.85,
+            "OBSERVED" if obs_confidence >= 0.85 else f"BLENDED_{int(round(obs_confidence * 100))}PCT",
         )
-    return target_name, token, int(char_id)
+    if obs_confidence > 0.0 and days_tracked >= 1.0 and sell_vol > 0:
+        return (1.0 - obs_confidence) * extrapolated_vol, 0.0, True, f"DAMPENED_{int(round(obs_confidence * 100))}PCT"
+
+    return extrapolated_vol, None, True, "EST_4.5PCT_JITA"
 
 
-
-def fetch_character_structure_stock(
-    character_id: int,
-    access_token: str,
-    structure_id: int = 1049588174021,
-) -> dict[int, dict]:
-    """
-    Fetches a character's hangar assets (including nested containers) and active sell orders
-    inside `structure_id`, returning {type_id: {'hangar_qty': int, 'sell_qty': int, 'my_lowest_sell': float|None}}.
-    """
-    headers = {"Authorization": f"Bearer {access_token}"}
-    stock: dict[int, dict] = {}
-
-    all_assets = []
-    page = 1
-    while True:
-        r = requests.get(
-            f"https://esi.evetech.net/latest/characters/{character_id}/assets/?datasource=tranquility&page={page}",
-            headers=headers,
-            timeout=10,
-        )
-        if r.status_code != 200:
-            break
-        rows = r.json()
-        if not rows:
-            break
-        all_assets.extend(rows)
-        total_pages = int(r.headers.get("X-Pages", 1))
-        if page >= total_pages:
-            break
-        page += 1
-
-    parent_map = {
-        int(a["item_id"]): int(a["location_id"])
-        for a in all_assets
-        if "item_id" in a and "location_id" in a
-    }
-
-    def is_in_structure(loc_id: int) -> bool:
-        seen = set()
-        cur = loc_id
-        while cur and cur not in seen:
-            if cur == structure_id:
-                return True
-            seen.add(cur)
-            cur = parent_map.get(cur)
-        return False
-
-    for a in all_assets:
-        loc_id = int(a.get("location_id") or 0)
-        if not is_in_structure(loc_id):
-            continue
-        flag = str(a.get("location_flag") or "")
-        if flag not in ("Hangar", "Unlocked", "AutoFit", "Cargo", "FleetHangar", "ShipHangar"):
-            continue
-        tid = int(a["type_id"])
-        qty = int(a.get("quantity", 1))
-        entry = stock.setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
-        entry["hangar_qty"] += qty
-
-    r_ord = requests.get(
-        f"https://esi.evetech.net/latest/characters/{character_id}/orders/?datasource=tranquility",
-        headers=headers,
-        timeout=10,
+def _evaluate_import_candidate(
+    tid: int,
+    info: dict,
+    jita_ask: float,
+    s_entry: dict,
+    dest: dict,
+    rate_ov: float | None,
+    my_struct_stock: dict,
+    my_jita_hangar: dict[int, int],
+    obs_confidence: float,
+    days_tracked: float,
+    observed_by_type: dict,
+) -> dict | None:
+    """Computes pricing, margin, freight, and stock-deducted restock quantities for one candidate."""
+    is_structure = dest["type"] == "structure"
+    est_daily_vol, observed_daily, vol_is_extrapolated, vol_source = _estimate_destination_daily_vol(
+        tid, info, s_entry, dest.get("volume_scale_factor", 1.0), obs_confidence, days_tracked, observed_by_type
     )
-    if r_ord.status_code == 200:
-        for o in r_ord.json():
-            if int(o.get("location_id") or 0) != structure_id or o.get("is_buy_order"):
-                continue
-            tid = int(o["type_id"])
-            vol = int(o.get("volume_remain", 0))
-            price = float(o.get("price", 0.0))
-            entry = stock.setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
-            entry["sell_qty"] += vol
-            if price > 0 and (entry["my_lowest_sell"] is None or price < entry["my_lowest_sell"]):
-                entry["my_lowest_sell"] = price
-
-    return stock
-
-
-def check_cj6mt_seller_stock(structure_id: int = 1049588174021) -> dict:
-    """
-    Audits the C-J6MT seller character's current hangar inventory and active sell orders
-    in 1st Taj Mahgoon against live structure asks and Jita 4-4 replacement prices.
-    """
-    char_name, token, char_id = _resolve_cj6mt_seller()
-    structure_warning = None
-    try:
-        dest_book, _ = fetch_structure_order_book(structure_id, token)
-    except requests.exceptions.HTTPError as e:
-        code = e.response.status_code if e.response is not None else 0
-        dest_book = {}
-        structure_warning = (
-            f"Structure market returned HTTP {code} for {char_name}. "
-            f"Click 'C-J6MT Seller (Switch)' to re-authorize with esi-markets.structure_markets.v1, "
-            f"and confirm {char_name} has docking/market access to 1st Taj Mahgoon."
-        )
-    my_stock = fetch_character_structure_stock(char_id, token, structure_id)
-
-    tids = sorted(my_stock.keys())
-    if not tids:
-        return {
-            "character_name": char_name,
-            "character_id": char_id,
-            "structure_id": structure_id,
-            "total_lines": 0,
-            "total_hangar_units": 0,
-            "total_listed_units": 0,
-            "est_shelf_value": 0.0,
-            "est_hangar_value": 0.0,
-            "structure_warning": structure_warning,
-            "items": [],
-        }
-
-    con = duckdb.connect(DUCKDB_PATH, read_only=True)
-    con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
-    id_str = ",".join(str(t) for t in tids)
-    rows = con.execute(f"""
-        SELECT t.typeID, t.typeName, t.volume, t.groupID, g.groupName
-        FROM sde.invTypes t
-        JOIN sde.invGroups g ON t.groupID = g.groupID
-        WHERE t.typeID IN ({id_str})
-    """).fetchall()
-    con.close()
-
-    sde_meta = {
-        int(tid): {
-            "name": str(name),
-            "m3": max(PACKAGED_SHIP_M3.get(int(gid), float(vol or 0.01)), 0.01),
-            "group": str(grp),
-        }
-        for tid, name, vol, gid, grp in rows
-    }
-
-    session = create_session()
-    jita_asks: dict[int, float | None] = {}
-    _ensure_jita_asks(session, tids, jita_asks)
-
-    audit_rows = []
-    tot_hangar_val = 0.0
-    tot_shelf_val = 0.0
-
-    for tid in tids:
-        st = my_stock[tid]
-        info = sde_meta.get(tid, {"name": f"Type {tid}", "m3": 1.0, "group": "Unknown"})
-        book_entry = dest_book.get(tid) or {}
-        lowest_ask = book_entry.get("lowest_ask")
-        jita_ask = jita_asks.get(tid) or 0.0
-
-        rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0) else (round(jita_ask * 1.25, 2) if jita_ask > 0 else 0.0)
-        hangar_qty = st["hangar_qty"]
-        sell_qty = st["sell_qty"]
-        my_sell = st["my_lowest_sell"]
-
-        hangar_val = hangar_qty * (rec_sell or jita_ask)
-        shelf_val = sell_qty * (my_sell or rec_sell or jita_ask)
-        tot_hangar_val += hangar_val
-        tot_shelf_val += shelf_val
-
-        if hangar_qty > 0 and sell_qty == 0:
-            status = "UNLISTED_HANGAR"
-        elif my_sell and lowest_ask and my_sell > lowest_ask + 0.01:
-            status = "UNDERCUT"
-        elif hangar_qty > 0 and sell_qty > 0:
-            status = "ACTIVE + RESERVE"
-        else:
-            status = "TOP_ASK"
-
-        audit_rows.append({
-            "type_id": tid,
-            "name": info["name"],
-            "group": info["group"],
-            "hangar_qty": hangar_qty,
-            "sell_qty": sell_qty,
-            "total_qty": hangar_qty + sell_qty,
-            "my_sell_price": round(my_sell, 2) if my_sell else None,
-            "structure_lowest_ask": round(lowest_ask, 2) if lowest_ask else None,
-            "recommended_sell": rec_sell,
-            "jita_ask": round(jita_ask, 2) if jita_ask else None,
-            "est_total_value": round(hangar_val + shelf_val, 2),
-            "status": status,
-        })
-
-    audit_rows.sort(key=lambda x: x["est_total_value"], reverse=True)
-    return {
-        "character_name": char_name,
-        "character_id": char_id,
-        "structure_id": structure_id,
-        "total_lines": len(audit_rows),
-        "total_hangar_units": sum(x["hangar_qty"] for x in audit_rows),
-        "total_listed_units": sum(x["sell_qty"] for x in audit_rows),
-        "est_shelf_value": round(tot_shelf_val, 2),
-        "est_hangar_value": round(tot_hangar_val, 2),
-        "structure_warning": structure_warning,
-        "items": audit_rows,
-    }
-
-
-
-def _resolve_primary_character() -> tuple[str | None, str | None, int | None]:
-    sso_path = "ledgers/sso_token.json"
-    if not os.path.exists(sso_path):
-        return None, None, None
-    try:
-        with open(sso_path, "r", encoding="utf-8") as f:
-            sso = json.load(f)
-        if isinstance(sso, list) and sso and isinstance(sso[0], dict):
-            cname = sso[0].get("character_name")
-        elif isinstance(sso, dict):
-            cname = sso.get("character_name")
-        else:
-            cname = None
-        if cname:
-            tok, cid = get_character_auth(cname)
-            return cname, tok, int(cid) if cid else None
-    except Exception:
-        pass
-    return None, None, None
-
-
-def _load_jita_desk_tids() -> set[int]:
-    tids: set[int] = set()
-    for fname in ("evergreen_ledger.csv", "tactical_ledger.csv", "hold_ledger.csv"):
-        path = os.path.join("ledgers", fname)
-        if os.path.exists(path):
-            try:
-                import csv
-                with open(path, "r", encoding="utf-8") as f:
-                    for row in csv.DictReader(f):
-                        if row.get("type_id"):
-                            tids.add(int(row["type_id"]))
-            except Exception:
-                pass
-    return tids
-
-
-def fetch_character_locations_stock(
-    character_id: int | None,
-    access_token: str | None,
-    location_ids: list[int],
-) -> dict[int, dict[int, dict]]:
-    """
-    Fetches a character's hangar assets (walking nested container chains) and active sell orders
-    across multiple `location_ids` in a single ESI pass.
-    Returns {location_id: {type_id: {'hangar_qty': int, 'sell_qty': int, 'my_lowest_sell': float|None}}}.
-    """
-    target_locs = {int(loc) for loc in location_ids if loc}
-    result: dict[int, dict[int, dict]] = {loc: {} for loc in target_locs}
-    if not character_id or not access_token or not target_locs:
-        return result
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-    all_assets = []
-    page = 1
-    while True:
-        try:
-            r = requests.get(
-                f"https://esi.evetech.net/latest/characters/{character_id}/assets/?datasource=tranquility&page={page}",
-                headers=headers,
-                timeout=10,
-            )
-            if r.status_code != 200:
-                break
-            rows = r.json()
-            if not rows:
-                break
-            all_assets.extend(rows)
-            total_pages = int(r.headers.get("X-Pages", 1))
-            if page >= total_pages:
-                break
-            page += 1
-        except Exception:
-            break
-
-    parent_map = {
-        int(a["item_id"]): int(a["location_id"])
-        for a in all_assets
-        if "item_id" in a and "location_id" in a
-    }
-
-    def resolve_target_loc(loc_id: int) -> int | None:
-        seen = set()
-        cur = loc_id
-        while cur and cur not in seen:
-            if cur in target_locs:
-                return cur
-            seen.add(cur)
-            cur = parent_map.get(cur)
+    if est_daily_vol < dest.get("min_dest_units_day", 1.0):
         return None
 
-    for a in all_assets:
-        matched_loc = resolve_target_loc(int(a.get("location_id") or 0))
-        if matched_loc is None:
-            continue
-        flag = str(a.get("location_flag") or "")
-        if flag not in ("Hangar", "Unlocked", "AutoFit", "Cargo", "FleetHangar", "ShipHangar"):
-            continue
-        tid = int(a["type_id"])
-        qty = int(a.get("quantity", 1))
-        entry = result[matched_loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
-        entry["hangar_qty"] += qty
+    m3 = info["m3"]
+    dest_ask = s_entry["lowest_ask"]
+    sell_vol = s_entry["sell_vol"]
+    top_buy = s_entry["top_buy"]
 
-    try:
-        r_ord = requests.get(
-            f"https://esi.evetech.net/latest/characters/{character_id}/orders/?datasource=tranquility",
-            headers=headers,
-            timeout=10,
-        )
-        if r_ord.status_code == 200:
-            for o in r_ord.json():
-                loc = int(o.get("location_id") or 0)
-                if loc not in target_locs or o.get("is_buy_order"):
-                    continue
-                tid = int(o["type_id"])
-                vol = int(o.get("volume_remain", 0))
-                price = float(o.get("price", 0.0))
-                entry = result[loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
-                entry["sell_qty"] += vol
-                if price > 0 and (entry["my_lowest_sell"] is None or price < entry["my_lowest_sell"]):
-                    entry["my_lowest_sell"] = price
-    except Exception:
-        pass
+    freight_cost = calc_courier_freight(m3, jita_ask, dest, rate_override=rate_ov, apply_min=False)
+    landed_cost = jita_ask + freight_cost
 
-    return result
+    if dest_ask and dest_ask > 0:
+        list_price = round(dest_ask - 0.01, 2)
+        status = ("LOW_STOCK" if sell_vol < est_daily_vol * 1.5 else "ACTIVE_BOOK") if is_structure else "UNDERCUT_LIST"
+    elif is_structure and top_buy and top_buy > landed_cost * 1.15:
+        list_price = round(max(top_buy * 1.15, jita_ask * 1.25), 2)
+        status = "STOCKOUT_BUY_DEMAND"
+    elif is_structure:
+        list_price = round(jita_ask * 1.25, 2)
+        status = "STOCKOUT_HIGH_VEL"
+    else:
+        return None
+
+    exit_fee = dest["exit_fee"]
+    net_rev = list_price * (1.0 - exit_fee)
+    profit_unit = net_rev - landed_cost
+    margin_pct = (profit_unit / landed_cost) * 100.0 if landed_cost > 0 else 0.0
+    isk_per_m3 = profit_unit / m3
+
+    if margin_pct < dest["min_margin_pct"] or isk_per_m3 < dest["min_isk_per_m3"] or profit_unit <= 0:
+        return None
+    if dest.get("max_markup_pct") is not None and margin_pct > dest["max_markup_pct"]:
+        return None
+
+    raw_qty = max(1, int(round(est_daily_vol * dest.get("target_days_supply", 3.0))))
+    max_cap_qty = max(1, int(1.5e9 // max(jita_ask, 1.0)))
+    target_qty = min(raw_qty, max_cap_qty)
+
+    st_local = my_struct_stock.get(tid) or {"hangar_qty": 0, "sell_qty": 0}
+    my_hangar_q = int(st_local["hangar_qty"])
+    my_sell_q = int(st_local["sell_qty"])
+    my_jita_q = int(my_jita_hangar.get(tid, 0))
+    my_local_qty = my_hangar_q + my_sell_q + my_jita_q
+    suggested_qty = max(0, target_qty - my_local_qty)
+
+    if suggested_qty == 0:
+        status = "FULLY_STOCKED"
+    elif my_local_qty > 0:
+        status = "RESTOCK"
+
+    line_m3 = m3 * suggested_qty
+    line_jita = jita_ask * suggested_qty
+    solo_freight = calc_courier_freight(line_m3, line_jita, dest, rate_override=rate_ov, apply_min=True)
+    solo_landed = line_jita + solo_freight
+    solo_profit = (net_rev * suggested_qty) - solo_landed
+    solo_margin_pct = (solo_profit / solo_landed) * 100.0 if solo_landed > 0 else 0.0
+
+    row = {
+        "destination": dest["name"],
+        "location_id": dest["location_id"],
+        "type_id": tid,
+        "name": info["name"],
+        "group": info["group_name"],
+        "m3": round(m3, 2),
+        "jita_ask": round(jita_ask, 2),
+        "jita_vol_30d": round(info["jita_vol_30d"], 1),
+        "jita_isk_30d": round(info["jita_isk_30d"], 0),
+        "dest_ask": round(dest_ask, 2) if dest_ask else None,
+        "dest_sell_vol": sell_vol,
+        "target_qty": target_qty,
+        "my_local_stock": my_local_qty,
+        "my_hangar_qty": my_hangar_q,
+        "my_sell_qty": my_sell_q,
+        "my_jita_qty": my_jita_q,
+        "dest_top_buy": round(top_buy, 2) if top_buy else None,
+        "dest_daily_vol": round(est_daily_vol, 1),
+        "observed_daily_vol": round(observed_daily, 2) if observed_daily is not None else None,
+        "vol_extrapolated": vol_is_extrapolated,
+        "vol_source": vol_source,
+        "suggested_sell": list_price,
+        "freight_cost": round(freight_cost, 2),
+        "landed_cost": round(landed_cost, 2),
+        "profit_unit": round(profit_unit, 2),
+        "margin_pct": round(margin_pct, 1),
+        "isk_per_m3": round(isk_per_m3, 1),
+        "suggested_qty": suggested_qty,
+        "est_daily_profit": round(profit_unit * est_daily_vol, 2),
+        "est_total_profit": round(profit_unit * suggested_qty, 2),
+        "solo_freight_cost": round(solo_freight, 2),
+        "solo_margin_pct": round(solo_margin_pct, 1),
+        "status": status,
+    }
+    if is_structure:
+        row["structure_id"] = dest["location_id"]
+    return row
+
+
+def _build_destination_section(
+    dest: dict,
+    opportunities: list[dict],
+    limit: int,
+    rate_ov: float | None,
+    meta_ctx: dict,
+) -> dict:
+    """Sorts opportunities, computes top-100 MultiBuy batch metrics, and builds the API section payload."""
+    is_hisec_tiered = dest.get("pricing_model") == "hisec_tiered"
+    is_structure = dest["type"] == "structure"
+    exit_fee = dest["exit_fee"]
+
+    opportunities.sort(
+        key=lambda x: (x["suggested_qty"] > 0, x["est_daily_profit"], x["est_total_profit"]),
+        reverse=True,
+    )
+    trimmed = opportunities[:limit]
+    actionable = [x for x in trimmed if x["suggested_qty"] > 0]
+    batch = actionable[:100]
+
+    batch_m3 = sum(x["m3"] * x["suggested_qty"] for x in batch)
+    batch_collateral = sum(x["jita_ask"] * x["suggested_qty"] for x in batch)
+    batch_freight = calc_courier_freight(batch_m3, batch_collateral, dest, rate_override=rate_ov, apply_min=True) if batch else 0.0
+    batch_net_rev = sum(x["suggested_sell"] * (1.0 - exit_fee) * x["suggested_qty"] for x in batch)
+    batch_profit = batch_net_rev - batch_collateral - batch_freight
+
+    all_m3 = sum(x["m3"] * x["suggested_qty"] for x in actionable)
+    all_collateral = sum(x["jita_ask"] * x["suggested_qty"] for x in actionable)
+    all_freight = calc_courier_freight(all_m3, all_collateral, dest, rate_override=rate_ov, apply_min=True) if actionable else 0.0
+
+    section = {
+        "location_id": dest["location_id"],
+        "pricing_model": dest.get("pricing_model", "per_m3"),
+        "warps": int(rate_ov) if (is_hisec_tiered and rate_ov is not None) else dest.get("warps"),
+        "freight_rate_m3": None if is_hisec_tiered else (rate_ov if rate_ov is not None else dest["freight_rate_m3"]),
+        "collateral_pct": dest.get("collateral_pct", 0.0),
+        "min_freight": dest.get("min_freight", 0.0),
+        "max_freight": dest.get("max_freight"),
+        "volume_scale_factor": dest.get("volume_scale_factor", 1.0),
+        "min_jita_isk_day": dest["min_jita_isk_day"],
+        "count": len(trimmed),
+        "multibuy_text": "\n".join(f"{x['name']} {x['suggested_qty']}" for x in batch),
+        "multibuy_m3": round(batch_m3, 1),
+        "multibuy_collateral": round(batch_collateral, 2),
+        "multibuy_freight": round(batch_freight, 2),
+        "multibuy_profit": round(batch_profit, 2),
+        "all_m3": round(all_m3, 1),
+        "all_collateral": round(all_collateral, 2),
+        "all_freight": round(all_freight, 2),
+        "items": trimmed,
+    }
+    if is_hisec_tiered:
+        w = section["warps"]
+        lw = int(dest.get("lowsec_warps", 0))
+        section["split_plan_top20"] = calc_hisec_optimal_split(batch_m3, batch_collateral, w, lw)["plan"] if batch else "None"
+        section["split_plan_all"] = calc_hisec_optimal_split(all_m3, all_collateral, w, lw)["plan"] if trimmed else "None"
+
+    if is_structure:
+        section.update(meta_ctx)
+    else:
+        section["station_id"] = dest["location_id"]
+
+    return section
 
 
 def get_import_suggestions(
@@ -849,43 +631,33 @@ def get_import_suggestions(
     session = create_session()
     jita_asks: dict[int, float | None] = {}
     results = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}
-    primary_name, primary_tok, primary_id = _resolve_primary_character()
-    jita_desk_tids = _load_jita_desk_tids()
+
+    primary_name, primary_tok, primary_id = resolve_primary_character()
+    jita_desk_tids = get_desk_claimed_type_ids()
     primary_locs = fetch_character_locations_stock(primary_id, primary_tok, [JITA_STATION_ID, 60008494])
 
     for dest in IMPORT_DESTINATIONS:
         key = dest["key"]
         rate_ov = rate_overrides.get(key)
-        is_hisec_tiered = dest.get("pricing_model") == "hisec_tiered"
-        exit_fee = dest["exit_fee"]
-        min_margin_pct = dest["min_margin_pct"]
-        max_markup_pct = dest.get("max_markup_pct")
-        min_isk_per_m3 = dest["min_isk_per_m3"]
-        scale_factor = dest.get("volume_scale_factor", 1.0)
-        min_dest_units = dest.get("min_dest_units_day", 1.0)
-        target_days = dest.get("target_days_supply", 3.0)
         is_structure = dest["type"] == "structure"
+        min_dest_units = dest.get("min_dest_units_day", 1.0)
 
-        char_id = None
-        char_name = None
-        diff_summary = None
-        my_struct_stock = {}
-        observed_stats = {"days_tracked": 0.0, "snapshot_count": 0, "by_type": {}}
+        my_jita_hangar: dict[int, int] = {
+            tid_k: int(st_v.get("hangar_qty", 0))
+            for tid_k, st_v in primary_locs.get(JITA_STATION_ID, {}).items()
+            if tid_k not in jita_desk_tids
+        }
 
-        my_jita_hangar: dict[int, int] = {}
         if is_structure:
-            char_name, access_token, char_id = _resolve_cj6mt_seller(dest["character_name"])
+            char_name, access_token, char_id = resolve_role_character("cj6mt", dest["character_name"])
             dest_book, raw_orders = fetch_structure_order_book(dest["location_id"], access_token)
             seller_locs = fetch_character_locations_stock(char_id, access_token, [dest["location_id"], JITA_STATION_ID])
             my_struct_stock = seller_locs.get(dest["location_id"], {})
             for tid_k, st_v in seller_locs.get(JITA_STATION_ID, {}).items():
                 my_jita_hangar[tid_k] = my_jita_hangar.get(tid_k, 0) + int(st_v.get("hangar_qty", 0))
-            for tid_k, st_v in primary_locs.get(JITA_STATION_ID, {}).items():
-                if tid_k not in jita_desk_tids:
-                    my_jita_hangar[tid_k] = my_jita_hangar.get(tid_k, 0) + int(st_v.get("hangar_qty", 0))
+
             diff_summary = process_snapshot_diff(dest["location_id"], raw_orders)
             observed_stats = get_observed_staging_velocity(dest["location_id"])
-
             proven_tids = [
                 tid for tid, st in observed_stats["by_type"].items()
                 if observed_stats["days_tracked"] >= 2.0 and st["real_daily_burn"] >= min_dest_units
@@ -896,26 +668,21 @@ def get_import_suggestions(
                 limit=dest["candidate_limit"],
                 extra_tids=proven_tids,
             )
-            candidate_tids = list(meta.keys())
-            _ensure_jita_asks(session, candidate_tids, jita_asks)
+            ensure_jita_asks(session, list(meta.keys()), jita_asks)
         else:
+            observed_stats = {"days_tracked": 0.0, "snapshot_count": 0, "by_type": {}}
             meta = _get_jita_high_velocity_candidates(
                 min_isk_day=dest["min_jita_isk_day"],
                 min_units_day=dest["min_jita_units_day"],
                 limit=dest["candidate_limit"],
             )
-            candidate_tids = list(meta.keys())
-            _ensure_jita_asks(session, candidate_tids, jita_asks)
-            dest_book = _fetch_station_order_book(session, dest, candidate_tids, jita_asks)
-            char_name = primary_name
-            char_id = primary_id
+            ensure_jita_asks(session, list(meta.keys()), jita_asks)
+            dest_book = _fetch_station_order_book(session, dest, list(meta.keys()), jita_asks)
+            char_name, char_id = primary_name, primary_id
             my_struct_stock = primary_locs.get(dest["location_id"], {})
-            for tid_k, st_v in primary_locs.get(JITA_STATION_ID, {}).items():
-                if tid_k not in jita_desk_tids:
-                    my_jita_hangar[tid_k] = int(st_v.get("hangar_qty", 0))
+            diff_summary = None
 
         days_tracked = observed_stats["days_tracked"]
-        observed_by_type = observed_stats["by_type"]
         obs_confidence = min(1.0, days_tracked / 7.0) if days_tracked >= 0.25 else 0.0
 
         opportunities = []
@@ -923,234 +690,45 @@ def get_import_suggestions(
             jita_ask = jita_asks.get(tid)
             if not jita_ask or jita_ask <= 0:
                 continue
-
             s_entry = dest_book.get(tid)
             if not s_entry and not is_structure:
                 continue
             s_entry = s_entry or {"lowest_ask": None, "sell_vol": 0, "top_buy": None, "daily_vol": None}
 
-            dest_ask = s_entry["lowest_ask"]
-            sell_vol = s_entry["sell_vol"]
-            top_buy = s_entry["top_buy"]
-            m3 = info["m3"]
-            observed_daily = None
+            row = _evaluate_import_candidate(
+                tid=tid,
+                info=info,
+                jita_ask=jita_ask,
+                s_entry=s_entry,
+                dest=dest,
+                rate_ov=rate_ov,
+                my_struct_stock=my_struct_stock,
+                my_jita_hangar=my_jita_hangar,
+                obs_confidence=obs_confidence,
+                days_tracked=days_tracked,
+                observed_by_type=observed_stats["by_type"],
+            )
+            if row is not None:
+                opportunities.append(row)
 
-            if s_entry["daily_vol"] is not None:
-                est_daily_vol = float(s_entry["daily_vol"])
-                vol_is_extrapolated = False
-                vol_source = "REGIONAL_30D"
-            else:
-                extrapolated_vol = info["jita_vol_30d"] * scale_factor
-                obs_entry = observed_by_type.get(tid)
-                if obs_confidence > 0.0 and obs_entry and obs_entry["real_daily_burn"] > 0:
-                    observed_daily = obs_entry["real_daily_burn"]
-                    est_daily_vol = ((1.0 - obs_confidence) * extrapolated_vol) + (obs_confidence * observed_daily)
-                    vol_is_extrapolated = obs_confidence < 0.85
-                    vol_source = "OBSERVED" if obs_confidence >= 0.85 else f"BLENDED_{int(round(obs_confidence * 100))}PCT"
-                elif obs_confidence > 0.0 and days_tracked >= 1.0 and sell_vol > 0:
-                    observed_daily = 0.0
-                    est_daily_vol = (1.0 - obs_confidence) * extrapolated_vol
-                    vol_is_extrapolated = True
-                    vol_source = f"DAMPENED_{int(round(obs_confidence * 100))}PCT"
-                else:
-                    est_daily_vol = extrapolated_vol
-                    vol_is_extrapolated = True
-                    vol_source = "EST_4.5PCT_JITA"
-
-            if est_daily_vol < min_dest_units:
-                continue
-
-            freight_cost = calc_courier_freight(m3, jita_ask, dest, rate_override=rate_ov, apply_min=False)
-            landed_cost = jita_ask + freight_cost
-
-            if dest_ask and dest_ask > 0:
-                list_price = round(dest_ask - 0.01, 2)
-                status = ("LOW_STOCK" if sell_vol < est_daily_vol * 1.5 else "ACTIVE_BOOK") if is_structure else "UNDERCUT_LIST"
-            elif is_structure and top_buy and top_buy > landed_cost * 1.15:
-                list_price = round(max(top_buy * 1.15, jita_ask * 1.25), 2)
-                status = "STOCKOUT_BUY_DEMAND"
-            elif is_structure:
-                list_price = round(jita_ask * 1.25, 2)
-                status = "STOCKOUT_HIGH_VEL"
-            else:
-                continue
-
-            net_rev = list_price * (1.0 - exit_fee)
-            profit_unit = net_rev - landed_cost
-            margin_pct = (profit_unit / landed_cost) * 100.0 if landed_cost > 0 else 0.0
-            isk_per_m3 = profit_unit / m3
-
-            if margin_pct < min_margin_pct or isk_per_m3 < min_isk_per_m3 or profit_unit <= 0:
-                continue
-            if max_markup_pct is not None and margin_pct > max_markup_pct:
-                continue
-
-            raw_qty = max(1, int(round(est_daily_vol * target_days)))
-            max_cap_qty = max(1, int(1.5e9 // max(jita_ask, 1.0)))
-            target_qty = min(raw_qty, max_cap_qty)
-            st_local = my_struct_stock.get(tid) or {"hangar_qty": 0, "sell_qty": 0}
-            my_hangar_q = int(st_local["hangar_qty"])
-            my_sell_q = int(st_local["sell_qty"])
-            my_jita_q = int(my_jita_hangar.get(tid, 0))
-            my_local_qty = my_hangar_q + my_sell_q + my_jita_q
-            suggested_qty = max(0, target_qty - my_local_qty)
-            if suggested_qty == 0:
-                status = "FULLY_STOCKED"
-            elif my_local_qty > 0:
-                status = "RESTOCK"
-            est_daily_profit = profit_unit * est_daily_vol
-
-            line_m3 = m3 * suggested_qty
-            line_jita = jita_ask * suggested_qty
-            solo_freight = calc_courier_freight(line_m3, line_jita, dest, rate_override=rate_ov, apply_min=True)
-            solo_landed = line_jita + solo_freight
-            solo_profit = (net_rev * suggested_qty) - solo_landed
-            solo_margin_pct = (solo_profit / solo_landed) * 100.0 if solo_landed > 0 else 0.0
-
-            row = {
-                "destination": dest["name"],
-                "location_id": dest["location_id"],
-                "type_id": tid,
-                "name": info["name"],
-                "group": info["group_name"],
-                "m3": round(m3, 2),
-                "jita_ask": round(jita_ask, 2),
-                "jita_vol_30d": round(info["jita_vol_30d"], 1),
-                "jita_isk_30d": round(info["jita_isk_30d"], 0),
-                "dest_ask": round(dest_ask, 2) if dest_ask else None,
-                "dest_sell_vol": sell_vol,
-                "target_qty": target_qty,
-                "my_local_stock": my_local_qty,
-                "my_hangar_qty": my_hangar_q,
-                "my_sell_qty": my_sell_q,
-                "my_jita_qty": my_jita_q,
-                "dest_top_buy": round(top_buy, 2) if top_buy else None,
-                "dest_daily_vol": round(est_daily_vol, 1),
-                "observed_daily_vol": round(observed_daily, 2) if observed_daily is not None else None,
-                "vol_extrapolated": vol_is_extrapolated,
-                "vol_source": vol_source,
-                "suggested_sell": list_price,
-                "freight_cost": round(freight_cost, 2),
-                "landed_cost": round(landed_cost, 2),
-                "profit_unit": round(profit_unit, 2),
-                "margin_pct": round(margin_pct, 1),
-                "isk_per_m3": round(isk_per_m3, 1),
-                "suggested_qty": suggested_qty,
-                "est_daily_profit": round(est_daily_profit, 2),
-                "est_total_profit": round(profit_unit * suggested_qty, 2),
-                "solo_freight_cost": round(solo_freight, 2),
-                "solo_margin_pct": round(solo_margin_pct, 1),
-                "status": status,
-            }
-            if is_structure:
-                row["structure_id"] = dest["location_id"]
-            opportunities.append(row)
-
-        opportunities.sort(
-            key=lambda x: (x["suggested_qty"] > 0, x["est_daily_profit"], x["est_total_profit"]),
-            reverse=True,
-        )
-
-        trimmed = opportunities[:limit]
-        actionable = [x for x in trimmed if x["suggested_qty"] > 0]
-        batch = actionable[:100]
-        batch_m3 = sum(x["m3"] * x["suggested_qty"] for x in batch)
-        batch_collateral = sum(x["jita_ask"] * x["suggested_qty"] for x in batch)
-        batch_freight = calc_courier_freight(batch_m3, batch_collateral, dest, rate_override=rate_ov, apply_min=True) if batch else 0.0
-        batch_net_rev = sum(x["suggested_sell"] * (1.0 - exit_fee) * x["suggested_qty"] for x in batch)
-        batch_profit = batch_net_rev - batch_collateral - batch_freight
-
-        all_m3 = sum(x["m3"] * x["suggested_qty"] for x in actionable)
-        all_collateral = sum(x["jita_ask"] * x["suggested_qty"] for x in actionable)
-        all_freight = calc_courier_freight(all_m3, all_collateral, dest, rate_override=rate_ov, apply_min=True) if actionable else 0.0
-
-        section = {
-            "location_id": dest["location_id"],
-            "pricing_model": dest.get("pricing_model", "per_m3"),
-            "warps": int(rate_ov) if (is_hisec_tiered and rate_ov is not None) else dest.get("warps"),
-            "freight_rate_m3": None if is_hisec_tiered else (rate_ov if rate_ov is not None else dest["freight_rate_m3"]),
-            "collateral_pct": dest.get("collateral_pct", 0.0),
-            "min_freight": dest.get("min_freight", 0.0),
-            "max_freight": dest.get("max_freight"),
-            "volume_scale_factor": scale_factor,
-            "min_jita_isk_day": dest["min_jita_isk_day"],
-            "count": len(trimmed),
-            "multibuy_text": "\n".join(f"{x['name']} {x['suggested_qty']}" for x in batch),
-            "multibuy_m3": round(batch_m3, 1),
-            "multibuy_collateral": round(batch_collateral, 2),
-            "multibuy_freight": round(batch_freight, 2),
-            "multibuy_profit": round(batch_profit, 2),
-            "all_m3": round(all_m3, 1),
-            "all_collateral": round(all_collateral, 2),
-            "all_freight": round(all_freight, 2),
-            "items": trimmed,
+        meta_ctx = {
+            "structure_id": dest["location_id"],
+            "character_id": char_id,
+            "character_name": char_name,
+            "seller_stock_types": len(my_struct_stock),
+            "total_structure_types": len(dest_book),
+            "tracking_days": days_tracked,
+            "tracking_snapshots": observed_stats["snapshot_count"],
+            "tracking_confidence_pct": round(obs_confidence * 100.0, 1),
+            "last_diff": diff_summary,
         }
-        if is_hisec_tiered:
-            w = section["warps"]
-            lw = int(dest.get("lowsec_warps", 0))
-            section["split_plan_top20"] = calc_hisec_optimal_split(batch_m3, batch_collateral, w, lw)["plan"] if batch else "None"
-            section["split_plan_all"] = calc_hisec_optimal_split(all_m3, all_collateral, w, lw)["plan"] if trimmed else "None"
-
-        if is_structure:
-            section["structure_id"] = dest["location_id"]
-            section["character_id"] = char_id
-            section["character_name"] = char_name
-            section["seller_stock_types"] = len(my_struct_stock)
-            section["total_structure_types"] = len(dest_book)
-            section["tracking_days"] = observed_stats["days_tracked"]
-            section["tracking_snapshots"] = observed_stats["snapshot_count"]
-            section["tracking_confidence_pct"] = round(obs_confidence * 100.0, 1)
-            section["last_diff"] = diff_summary
-        else:
-            section["station_id"] = dest["location_id"]
-
-        results[key] = section
+        results[key] = _build_destination_section(dest, opportunities, limit, rate_ov, meta_ctx)
 
     os.makedirs("ledgers", exist_ok=True)
     with open(IMPORT_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
     return results
-
-
-
-
-def _parse_eve_item_lines(raw_text: str) -> list[dict]:
-    """
-    Parses pasted EVE Inventory (tab-separated 'Name\tQty\t...') or MultiBuy ('Name 5' / 'Name x5')
-    into [{'name': str, 'qty': int}]. Aggregates duplicate lines.
-    """
-    counts: dict[str, int] = {}
-    if not raw_text:
-        return []
-
-    for raw_line in raw_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        name = None
-        qty = 1
-
-        if "\t" in line:
-            parts = [p.strip() for p in line.split("\t")]
-            name = parts[0]
-            if len(parts) > 1 and parts[1]:
-                num_str = re.sub(r"[^\d]", "", parts[1])
-                if num_str:
-                    qty = max(1, int(num_str))
-        else:
-            m = re.match(r"^(.*?)\s+(?:x\s*)?(\d[\d,]*)$", line, flags=re.IGNORECASE)
-            if m and m.group(1).strip():
-                name = m.group(1).strip()
-                qty = max(1, int(m.group(2).replace(",", "")))
-            else:
-                name = line
-                qty = 1
-
-        if name:
-            counts[name] = counts.get(name, 0) + qty
-
-    return [{"name": k, "qty": v} for k, v in counts.items()]
 
 
 def _resolve_items_for_bundling(
@@ -1207,31 +785,10 @@ def _resolve_items_for_bundling(
     sde_by_tid: dict[int, dict] = {}
 
     if need_lookup:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
-        names_to_find = [it["name"].replace("'", "''") for it in need_lookup if it.get("name")]
-        tids_to_find = [int(it["type_id"]) for it in need_lookup if it.get("type_id")]
-
-        clauses = []
-        if names_to_find:
-            in_names = ",".join(f"'{n}'" for n in set(names_to_find))
-            clauses.append(f"LOWER(t.typeName) IN ({in_names.lower()})")
-        if tids_to_find:
-            in_tids = ",".join(str(t) for t in set(tids_to_find))
-            clauses.append(f"t.typeID IN ({in_tids})")
-
-        if clauses:
-            rows = con.execute(f"""
-                SELECT t.typeID, t.typeName, t.volume, t.groupID
-                FROM sde.invTypes t
-                WHERE ({' OR '.join(clauses)})
-            """).fetchall()
-            for tid, tname, raw_vol, gid in rows:
-                m3 = PACKAGED_SHIP_M3.get(int(gid), float(raw_vol or 0.01))
-                rec = {"type_id": int(tid), "name": str(tname), "unit_m3": max(m3, 0.01)}
-                sde_by_tid[int(tid)] = rec
-                sde_by_name[str(tname).lower()] = rec
-        con.close()
+        sde_by_tid, sde_by_name = resolve_sde_items(
+            names=[it["name"] for it in need_lookup if it.get("name")],
+            type_ids=[int(it["type_id"]) for it in need_lookup if it.get("type_id")],
+        )
 
     resolved: list[dict] = []
     missing_price_tids: list[int] = []
@@ -1260,7 +817,7 @@ def _resolve_items_for_bundling(
     if missing_price_tids:
         session = create_session()
         jita_asks: dict[int, float | None] = {}
-        _ensure_jita_asks(session, missing_price_tids, jita_asks)
+        ensure_jita_asks(session, missing_price_tids, jita_asks)
         for it in resolved:
             if it["unit_price"] <= 0 and it.get("type_id"):
                 it["unit_price"] = float(jita_asks.get(it["type_id"]) or 0.0)

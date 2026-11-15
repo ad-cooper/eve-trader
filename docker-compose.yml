@@ -8,6 +8,19 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    command: >
+      uvicorn app:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-include "*.py"
+      --reload-include "*.html"
+      --reload-exclude "data/*"
+      --reload-exclude "ledgers/*"
+      --reload-exclude "tests/*"
+      --reload-exclude "*.duckdb*"
+      --reload-exclude "*.json"
+      --reload-exclude "*.csv"
     volumes:
       - ./data:/app/data
       - ./ledgers:/app/ledgers
@@ -15,6 +28,7 @@ services:
       - ./static:/app/static
       - ./services:/app/services
       - ./scripts:/app/scripts
+      - ./tests:/app/tests
       - ./app.py:/app/app.py
     environment:
       - TZ=UTC

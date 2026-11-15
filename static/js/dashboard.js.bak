@@ -44,18 +44,60 @@ async function copyToClipboard(text) {
   }
 }
 
-async function fetchData() {
+let isFetchingState = false;
+let lastStateSignature = '';
+let lastChartSignature = '';
+
+function computeStateSignature(d) {
+  if (!d) return '';
+  const m = d.metrics || {};
+  const c = d.character || {};
+  const st = d.status || {};
+  const deskRows = d.desks?.[currentTab] || [];
+  const firstRow = deskRows[0] || {};
+  const lastRow = deskRows[deskRows.length - 1] || {};
+  return [
+    c.orders_count,
+    c.total_escrow,
+    c.ledger_coverage,
+    m.total_capital,
+    m.total_profit,
+    m.liquid_reserve,
+    st.sniper_running,
+    st.ledger_running,
+    st.last_ledger_run,
+    d.sniper?.timestamp,
+    (d.sniper?.deals || []).length,
+    deskRows.length,
+    firstRow.live_ask,
+    firstRow.action_text,
+    lastRow.live_ask,
+    lastRow.action_text,
+    d.performance?.kpis?.net_profit_30d
+  ].join('|');
+}
+
+async function fetchData(forceRender = false) {
+  if (isFetchingState) return;
+  isFetchingState = true;
   try {
     const res = await fetch('/api/state');
     if (!res.ok) {
       console.error('Failed to fetch /api/state: HTTP', res.status);
       return;
     }
-    globalData = await res.json();
-    renderMetrics();
-    renderActiveTab();
+    const nextData = await res.json();
+    const sig = computeStateSignature(nextData);
+    globalData = nextData;
+    if (forceRender || sig !== lastStateSignature) {
+      lastStateSignature = sig;
+      renderMetrics();
+      renderActiveTab();
+    }
   } catch (err) {
     console.error('FetchData error:', err);
+  } finally {
+    isFetchingState = false;
   }
 }
 
@@ -273,7 +315,10 @@ function renderPerformanceTable() {
 
 function renderChart(chartData) {
   const ctx = document.getElementById('dailyProfitsChart').getContext('2d');
+  const chartSig = JSON.stringify([chartData.labels, chartData.running_totals, chartData.daily_profits]);
   if (chartInstance) {
+    if (chartSig === lastChartSignature) return;
+    lastChartSignature = chartSig;
     chartInstance.data.labels = chartData.labels;
     chartInstance.data.datasets[0].data = chartData.running_totals;
     chartInstance.data.datasets[1].data = chartData.daily_profits;
@@ -281,6 +326,7 @@ function renderChart(chartData) {
     chartInstance.update('none');
     return;
   }
+  lastChartSignature = chartSig;
 
   chartInstance = new Chart(ctx, {
     type: 'bar',
@@ -312,7 +358,8 @@ function renderChart(chartData) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      animation: { duration: 600 },
+      devicePixelRatio: Math.min(window.devicePixelRatio || 1, 1.5),
+      animation: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -392,7 +439,7 @@ function renderTableRows(rows) {
         <span>★ PRIME DIP</span>
       </span>`;
     } else if (r.action_code === 'BUMP_VIABLE') {
-      deskActionBadge = `<span class="bg-cyan-950/90 text-cyan-300 border border-cyan-500/90 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono animate-pulse">
+      deskActionBadge = `<span class="bg-cyan-950/90 text-cyan-300 border border-cyan-500/90 px-2 py-0.5 rounded text-[10px] font-bold tracking-wider inline-flex items-center gap-1 font-mono">
         <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
         <span>${r.action_text || 'BUMP VIABLE'}</span>
       </span>`;
@@ -786,7 +833,7 @@ function renderAdvisorTable() {
     } else if (item.action_type === 'time_stop') {
       const hd = item.hold_data || {};
       const reason = `Holding period exceeded: held ${hd.days_held || 0}d (max ${hd.max_days || 60}d). Liquidating at market ask to recycle stagnant capital.`;
-      actionBadge = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-rose-950/80 border border-rose-600 text-rose-300 animate-pulse" title="${reason}">⏰ TIME STOP (${hd.days_held || 0}d)</span>`;
+      actionBadge = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-rose-950/80 border border-rose-600 text-rose-300" title="${reason}">⏰ TIME STOP (${hd.days_held || 0}d)</span>`;
     } else if (item.action_type === 'hold') {
       const hd = item.hold_data || {};
       const holdSuffix = hd.days_held ? ` (${hd.days_held}d/${hd.max_days || 60}d)` : '';

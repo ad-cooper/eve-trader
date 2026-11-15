@@ -121,123 +121,9 @@ async def index(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
 
-def _set_url_query_param(url: str, key: str, val: str) -> str:
-    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-    parts = list(urlparse(url))
-    q = parse_qs(parts[4], keep_blank_values=True)
-    q[key] = [val]
-    parts[4] = urlencode(q, doseq=True)
-    return urlunparse(parts)
-
-
-def _exchange_secondary_sso_code(code: str, role: str = "cj6mt") -> dict | None:
-    """Exchanges an EVE SSO auth code for a secondary character without overwriting primary character."""
-    import base64, time, requests
-    import services.esi as esi_mod
-
-    sso_file = getattr(esi_mod, "SSO_TOKEN_FILE", "ledgers/sso_token.json")
-    client_id = os.environ.get("EVE_CLIENT_ID") or getattr(esi_mod, "CLIENT_ID", "")
-    client_secret = os.environ.get("EVE_CLIENT_SECRET") or getattr(esi_mod, "CLIENT_SECRET", "")
-
-    auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-    resp = requests.post(
-        "https://login.eveonline.com/v2/oauth/token",
-        data={"grant_type": "authorization_code", "code": code},
-        headers={
-            "Authorization": f"Basic {auth_header}",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Host": "login.eveonline.com",
-        },
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        print(f"[!] Secondary SSO token exchange failed ({resp.status_code}): {resp.text}")
-        return None
-
-    tok = resp.json()
-    claims = esi_mod.decode_jwt_payload(tok["access_token"])
-    sub = claims.get("sub", "")
-    char_id = int(sub.split(":")[-1]) if ":" in sub else 0
-    char_name = claims.get("name", "Unknown")
-
-    new_entry = {
-        "character_id": char_id,
-        "character_name": char_name,
-        "access_token": tok["access_token"],
-        "refresh_token": tok["refresh_token"],
-        "token_type": tok.get("token_type", "Bearer"),
-        "expires_at": time.time() + float(tok.get("expires_in", 1199)),
-        "role": role,
-    }
-
-    bundle = []
-    if os.path.exists(sso_file):
-        try:
-            with open(sso_file, "r", encoding="utf-8") as f:
-                bundle = json.load(f)
-        except Exception:
-            bundle = []
-
-    if isinstance(bundle, list):
-        # Preserve index 0 (primary Jita character), replace any prior C-J6MT / Skie Ankora secondary entry
-        primary = bundle[0] if bundle else None
-        kept = [primary] if primary else []
-        for item in bundle[1:]:
-            if not isinstance(item, dict):
-                continue
-            cname = str(item.get("character_name") or "")
-            if role == "cj6mt" and (
-                item.get("role") == "cj6mt"
-                or cname.lower() == "skie ankora"
-                or cname.lower() == char_name.lower()
-            ):
-                continue
-            kept.append(item)
-        if primary and str(primary.get("character_name") or "").lower() == char_name.lower():
-            kept[0] = {**primary, **new_entry, "role": "primary"}
-        else:
-            kept.append(new_entry)
-        bundle = kept
-    elif isinstance(bundle, dict):
-        chars = bundle.setdefault("characters", {})
-        if role == "cj6mt" and char_name != "Skie Ankora":
-            chars.pop("Skie Ankora", None)
-        chars[char_name] = new_entry
-        if role == "cj6mt":
-            bundle["cj6mt_character"] = char_name
-    else:
-        bundle = [new_entry]
-
-    os.makedirs(os.path.dirname(sso_file) or ".", exist_ok=True)
-    with open(sso_file, "w", encoding="utf-8") as f:
-        json.dump(bundle, f, indent=2)
-
-    print(f"[+] Linked C-J6MT seller character: {char_name} (ID: {char_id})")
-    return new_entry
-
-
-
 @app.get("/sso/login")
 async def sso_login(role: str = "primary"):
-    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-    url = get_auth_url()
-    parts = list(urlparse(url))
-    q = parse_qs(parts[4], keep_blank_values=True)
-    existing = q.get("scope", [""])[0].split()
-    for s in [
-        "esi-wallet.read_character_wallet.v1",
-        "esi-assets.read_assets.v1",
-        "esi-markets.read_character_orders.v1",
-        "esi-markets.structure_markets.v1",
-        "esi-universe.read_structures.v1",
-    ]:
-        if s not in existing:
-            existing.append(s)
-    q["scope"] = [" ".join(existing)]
-    if role and role != "primary":
-        q["state"] = [role]
-    parts[4] = urlencode(q, doseq=True)
-    return RedirectResponse(urlunparse(parts))
+    return RedirectResponse(get_auth_url(state=role or "primary"))
 
 
 @app.get("/sso/callback")
@@ -247,9 +133,10 @@ async def sso_callback(code: str = None, state: str = None, error: str = None):
     if not code:
         return HTMLResponse("<h3>Error: No authorization code received</h3><p><a href='/'>Back to Dashboard</a></p>", status_code=400)
 
-    if state == "cj6mt":
-        sec = _exchange_secondary_sso_code(code, role="cj6mt")
-        if not sec:
+    role = state or "primary"
+    bundle = exchange_auth_code(code, role=role)
+    if role == "cj6mt":
+        if not bundle:
             return HTMLResponse(
                 "<h3>C-J6MT Seller SSO Exchange Failed</h3>"
                 "<p>Ensure <code>esi-markets.structure_markets.v1</code>, <code>esi-assets.read_assets.v1</code>, and <code>esi-markets.read_character_orders.v1</code> are enabled.</p>"
@@ -258,8 +145,6 @@ async def sso_callback(code: str = None, state: str = None, error: str = None):
             )
         threading.Thread(target=refresh_import_opportunities_job, daemon=True).start()
         return RedirectResponse("/?tab=imports", status_code=303)
-
-    bundle = exchange_auth_code(code)
     if not bundle:
         return HTMLResponse(
             "<h3>SSO Token Exchange Failed</h3>"
@@ -350,112 +235,8 @@ async def refresh_market_prices(bg: BackgroundTasks):
 
 @app.get("/api/orders/missing-buys")
 def api_missing_buys(desk: str = "all"):
-    import math, requests
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    eg, tac, hld = get_annotated_desks()
-    desk_map = {
-        "evergreen": eg,
-        "tactical": tac,
-        "hold": hld,
-        "all": eg + tac + hld,
-    }
-    rows = desk_map.get(desk.lower(), eg + tac + hld)
-    unplaced = [r for r in rows if r.get("char_status") == "UNPLACED"]
-    if not unplaced:
-        return {"total_items": 0, "total_escrow": 0.0, "items": [], "multibuy_text": ""}
-
-    def eve_tick(p: float) -> float:
-        if p <= 0:
-            return 0.01
-        mag = 10 ** math.floor(math.log10(p))
-        return max(0.01, mag / 1000.0)
-
-    def round_up_eve(p: float) -> float:
-        t = eve_tick(p)
-        return round(math.ceil(p / t) * t, 2)
-
-    def round_down_eve(p: float) -> float:
-        t = eve_tick(p)
-        return round(math.floor(p / t) * t, 2)
-
-    def fetch_jita_book(tid: int):
-        try:
-            r = requests.get(
-                f"https://esi.evetech.net/latest/markets/10000002/orders/?datasource=tranquility&order_type=all&type_id={tid}",
-                timeout=8,
-            )
-            if r.status_code != 200:
-                return tid, 0.0, 0.0
-            orders = r.json()
-            jita_buys = [o["price"] for o in orders if o.get("location_id") == 60003760 and o.get("is_buy_order")]
-            jita_sells = [o["price"] for o in orders if o.get("location_id") == 60003760 and not o.get("is_buy_order")]
-            return tid, (max(jita_buys) if jita_buys else 0.0), (min(jita_sells) if jita_sells else 0.0)
-        except Exception:
-            return tid, 0.0, 0.0
-
-    tids = list({int(r["type_id"]) for r in unplaced if r.get("type_id")})
-    books = {}
-    with ThreadPoolExecutor(max_workers=12) as ex:
-        for tid, top_b, low_s in ex.map(fetch_jita_book, tids):
-            books[tid] = (top_b, low_s)
-
-    BUY_BROKER = 0.005
-    SELL_TOTAL = 0.0462
-    MIN_MARGIN = 5.0
-
-    out_items = []
-    for r in unplaced:
-        tid = int(r["type_id"])
-        qty = int(r.get("qty") or 1)
-        target_buy = float(r.get("target_buy") or 0.0)
-        target_sell = float(r.get("target_sell") or 0.0)
-        top_buy, live_ask = books.get(tid, (0.0, 0.0))
-
-        eff_sell = live_ask if live_ask > 0 else target_sell
-        if eff_sell <= 0:
-            continue
-
-        max_buy_5pct = round_down_eve((eff_sell * (1.0 - SELL_TOTAL)) / ((1.0 + MIN_MARGIN / 100.0) * (1.0 + BUY_BROKER)))
-        if max_buy_5pct <= 0:
-            continue
-
-        desired_buy = round_up_eve(top_buy + eve_tick(top_buy)) if top_buy > 0 else target_buy
-        desired_buy = max(desired_buy, target_buy)
-
-        if desired_buy <= max_buy_5pct:
-            rec_buy = desired_buy
-            squeezed = False
-        else:
-            rec_buy = max(target_buy, max_buy_5pct) if target_buy <= eff_sell * 0.90 else max_buy_5pct
-            squeezed = True
-
-        unit_cost = rec_buy * (1.0 + BUY_BROKER)
-        unit_rev = eff_sell * (1.0 - SELL_TOTAL)
-        margin_pct = round(((unit_rev - unit_cost) / unit_cost) * 100.0, 1) if unit_cost > 0 else 0.0
-        line_escrow = round(rec_buy * qty, 2)
-
-        out_items.append({
-            "type_id": tid,
-            "name": r.get("name"),
-            "qty": qty,
-            "top_buy": round(top_buy, 2),
-            "recommended_buy": round(rec_buy, 2),
-            "margin_pct": margin_pct,
-            "line_escrow": line_escrow,
-            "squeezed": squeezed,
-        })
-
-    out_items.sort(key=lambda x: (x["squeezed"], -x["line_escrow"]))
-    multibuy_text = "\n".join(f"{it['name']} {it['qty']}" for it in out_items)
-    total_escrow = round(sum(it["line_escrow"] for it in out_items), 2)
-
-    return {
-        "total_items": len(out_items),
-        "total_escrow": total_escrow,
-        "items": out_items,
-        "multibuy_text": multibuy_text,
-    }
+    from services.ledgers import get_missing_buy_orders
+    return get_missing_buy_orders(desk=desk)
 
 
 @app.api_route("/api/inventory/advisor", methods=["GET", "POST"])
@@ -505,6 +286,14 @@ def api_import_bundles(payload: dict):
         from_jita_hangar=bool(payload.get("from_jita_hangar", False)),
         rate_override=payload.get("rate_override"),
     )
+
+
+@app.post("/api/ledgers/run")
+def api_ledgers_run():
+    if not STATE.get("ledger_running", False):
+        threading.Thread(target=run_ledger_subprocess, daemon=True).start()
+        return {"status": "started", "ledger_running": True}
+    return {"status": "already_running", "ledger_running": True}
 
 @app.post("/api/sniper/run")
 def api_sniper_run():

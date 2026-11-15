@@ -38,6 +38,8 @@ def load_active_blacklist():
             blacklisted_groups.add(name)
         elif target_type == "item":
             blacklisted_items.add(name)
+        elif target_type == "pattern":
+            pass  # Evaluated as regex via active_meta without polluting exact-name sets
         else:  # "any"
             blacklisted_items.add(name)
             blacklisted_groups.add(name)

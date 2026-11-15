@@ -4,6 +4,9 @@ import time
 import base64
 import urllib.parse
 import requests
+from concurrent.futures import ThreadPoolExecutor
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime, timezone
 
 EVE_AUTH_URL = "https://login.eveonline.com/v2/oauth/authorize"
@@ -13,21 +16,38 @@ ESI_BASE_URL = "https://esi.evetech.net/latest"
 CLIENT_ID = os.getenv("EVE_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("EVE_CLIENT_SECRET", "")
 CALLBACK_URL = os.getenv("EVE_CALLBACK_URL", "http://localhost:8000/sso/callback")
-SCOPES = "esi-markets.read_character_orders.v1 esi-wallet.read_character_wallet.v1 esi-assets.read_assets.v1"
+SCOPES = " ".join([
+    "esi-markets.read_character_orders.v1",
+    "esi-wallet.read_character_wallet.v1",
+    "esi-assets.read_assets.v1",
+    "esi-markets.structure_markets.v1",
+    "esi-universe.read_structures.v1",
+])
 
 SSO_TOKEN_FILE = "ledgers/sso_token.json"
 ORDERS_CACHE_FILE = "ledgers/character_orders.json"
 ASSETS_CACHE_FILE = "ledgers/character_assets.json"
 
+REGION_THE_FORGE = 10000002
 JITA_STATION_ID = 60003760
 
-def get_auth_url() -> str:
+
+def create_esi_session() -> requests.Session:
+    session = requests.Session()
+    retries = Retry(total=2, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
+    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=retries)
+    session.mount("https://", adapter)
+    session.headers.update({"User-Agent": "EVE-Desk-ESIClient/2.0"})
+    return session
+
+
+def get_auth_url(state: str = "primary") -> str:
     params = {
         "response_type": "code",
         "redirect_uri": CALLBACK_URL,
         "client_id": CLIENT_ID,
         "scope": SCOPES,
-        "state": "eve_trading_desk_secure"
+        "state": state or "primary",
     }
     return f"{EVE_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
@@ -150,7 +170,8 @@ def get_character_auth(character_name: str = None) -> tuple[str | None, int | No
 
 
 
-def exchange_auth_code(code: str) -> dict:
+def exchange_auth_code(code: str, role: str = "primary") -> dict:
+    """Exchanges an EVE SSO auth code for tokens, supporting both primary (index 0) and secondary roles."""
     if not CLIENT_SECRET or CLIENT_SECRET == "YOUR_CLIENT_SECRET_HERE":
         print("[!] CRITICAL: EVE_CLIENT_SECRET is missing or set to placeholder in docker-compose.yml!")
         return {}
@@ -158,33 +179,98 @@ def exchange_auth_code(code: str) -> dict:
     headers = {
         **get_basic_auth_header(),
         "Content-Type": "application/x-www-form-urlencoded",
-        "Host": "login.eveonline.com"
+        "Host": "login.eveonline.com",
     }
     data = {"grant_type": "authorization_code", "code": code}
 
     try:
         res = requests.post(EVE_TOKEN_URL, data=data, headers=headers, timeout=12)
-        if res.status_code == 200:
-            tokens = res.json()
-            claims = decode_jwt_payload(tokens["access_token"])
-            sub = claims.get("sub", "")
-            char_id = int(sub.split(":")[-1]) if ":" in sub else None
-            char_name = claims.get("name", "Unknown Pilot")
+        if res.status_code != 200:
+            print(f"[!] CCP Token Exchange Rejected ({role}): HTTP {res.status_code} - {res.text}")
+            return {}
 
-            bundle = {
-                "access_token": tokens["access_token"],
-                "refresh_token": tokens["refresh_token"],
-                "character_id": char_id,
-                "character_name": char_name
-            }
-            save_sso_tokens(bundle)
-            print(f"[+] Successfully authenticated pilot: {char_name} (ID: {char_id})")
-            return bundle
+        tokens = res.json()
+        claims = decode_jwt_payload(tokens["access_token"])
+        sub = claims.get("sub", "")
+        char_id = int(sub.split(":")[-1]) if ":" in sub else None
+        char_name = claims.get("name", "Unknown Pilot")
+
+        bundle = {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "token_type": tokens.get("token_type", "Bearer"),
+            "expires_at": time.time() + float(tokens.get("expires_in", 1199)),
+            "character_id": char_id,
+            "character_name": char_name,
+            "role": role or "primary",
+        }
+
+        if role and role != "primary":
+            os.makedirs("ledgers", exist_ok=True)
+            arr = _read_sso_array()
+            primary = arr[0] if arr else None
+            kept = [primary] if primary else []
+            for item in arr[1:]:
+                cname = str(item.get("character_name") or "")
+                if role == "cj6mt" and (
+                    item.get("role") == "cj6mt"
+                    or cname.lower() == "skie ankora"
+                    or cname.lower() == char_name.lower()
+                ):
+                    continue
+                kept.append(item)
+            if primary and str(primary.get("character_name") or "").lower() == char_name.lower():
+                kept[0] = {**primary, **bundle, "role": "primary"}
+            else:
+                kept.append(bundle)
+            with open(SSO_TOKEN_FILE, "w", encoding="utf-8") as f:
+                json.dump(kept, f, indent=2)
+            print(f"[+] Linked {role} character: {char_name} (ID: {char_id})")
         else:
-            print(f"[!] CCP Token Exchange Rejected: HTTP {res.status_code} - {res.text}")
+            save_sso_tokens(bundle)
+            print(f"[+] Successfully authenticated primary pilot: {char_name} (ID: {char_id})")
+
+        return bundle
     except Exception as e:
         print(f"[!] Exception during token exchange: {str(e)}")
     return {}
+
+
+def resolve_primary_character() -> tuple[str | None, str | None, int | None]:
+    """Resolves (character_name, valid_access_token, character_id) for the primary pilot."""
+    tokens = load_sso_tokens()
+    if not tokens:
+        return None, None, None
+    cname = tokens.get("character_name")
+    tok, cid = get_character_auth(cname)
+    return cname, tok, cid
+
+
+def resolve_role_character(role: str = "cj6mt", default_name: str = "Skie Ankora") -> tuple[str, str, int]:
+    """Resolves (character_name, valid_access_token, character_id) for a secondary role (e.g. C-J6MT seller)."""
+    target_name = default_name
+    arr = _read_sso_array()
+    if arr:
+        primary_name = str(arr[0].get("character_name") or "")
+        tagged = [x for x in arr if x.get("role") == role and x.get("character_name")]
+        if tagged:
+            target_name = str(tagged[-1]["character_name"])
+        else:
+            others = [
+                str(x["character_name"])
+                for x in arr[1:]
+                if x.get("character_name") and str(x["character_name"]) != primary_name
+            ]
+            if others:
+                target_name = others[-1]
+
+    token, char_id = get_character_auth(target_name)
+    if not token or not char_id:
+        raise RuntimeError(
+            f"Unable to load or refresh '{target_name}' token from {SSO_TOKEN_FILE}. "
+            f"Click 'C-J6MT Seller (Switch)' in the Imports tab or visit /sso/login?role={role}"
+        )
+    return target_name, token, int(char_id)
 
 
 
@@ -416,3 +502,230 @@ def get_14d_average_volume(type_id: int, region_id: int = 10000002) -> float:
         return 0.0
     total_vol = sum(day.get("volume", 0) for day in recent)
     return round(total_vol / len(recent), 2)
+
+
+def fetch_character_locations_stock(
+    character_id: int | None,
+    access_token: str | None,
+    location_ids: list[int],
+) -> dict[int, dict[int, dict]]:
+    """
+    Fetches a character's hangar assets (walking nested container chains) and active sell orders
+    across multiple `location_ids` in a single ESI pass.
+    Returns {location_id: {type_id: {'hangar_qty': int, 'sell_qty': int, 'my_lowest_sell': float|None}}}.
+    """
+    target_locs = {int(loc) for loc in location_ids if loc}
+    result: dict[int, dict[int, dict]] = {loc: {} for loc in target_locs}
+    if not character_id or not access_token or not target_locs:
+        return result
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    all_assets = []
+    page = 1
+    while True:
+        try:
+            r = requests.get(
+                f"{ESI_BASE_URL}/characters/{character_id}/assets/?datasource=tranquility&page={page}",
+                headers=headers,
+                timeout=10,
+            )
+            if r.status_code != 200:
+                break
+            rows = r.json()
+            if not rows:
+                break
+            all_assets.extend(rows)
+            total_pages = int(r.headers.get("X-Pages", 1))
+            if page >= total_pages:
+                break
+            page += 1
+        except Exception:
+            break
+
+    parent_map = {
+        int(a["item_id"]): int(a["location_id"])
+        for a in all_assets
+        if "item_id" in a and "location_id" in a
+    }
+
+    def resolve_target_loc(loc_id: int) -> int | None:
+        seen = set()
+        cur = loc_id
+        while cur and cur not in seen:
+            if cur in target_locs:
+                return cur
+            seen.add(cur)
+            cur = parent_map.get(cur)
+        return None
+
+    for a in all_assets:
+        matched_loc = resolve_target_loc(int(a.get("location_id") or 0))
+        if matched_loc is None:
+            continue
+        flag = str(a.get("location_flag") or "")
+        if flag not in ("Hangar", "Unlocked", "AutoFit", "Cargo", "FleetHangar", "ShipHangar"):
+            continue
+        tid = int(a["type_id"])
+        qty = int(a.get("quantity", 1))
+        entry = result[matched_loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
+        entry["hangar_qty"] += qty
+
+    try:
+        r_ord = requests.get(
+            f"{ESI_BASE_URL}/characters/{character_id}/orders/?datasource=tranquility",
+            headers=headers,
+            timeout=10,
+        )
+        if r_ord.status_code == 200:
+            for o in r_ord.json():
+                loc = int(o.get("location_id") or 0)
+                if loc not in target_locs or o.get("is_buy_order"):
+                    continue
+                tid = int(o["type_id"])
+                vol = int(o.get("volume_remain", 0))
+                price = float(o.get("price", 0.0))
+                entry = result[loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
+                entry["sell_qty"] += vol
+                if price > 0 and (entry["my_lowest_sell"] is None or price < entry["my_lowest_sell"]):
+                    entry["my_lowest_sell"] = price
+    except Exception:
+        pass
+
+    return result
+
+
+def fetch_structure_order_book(structure_id: int, access_token: str) -> tuple[dict, list[dict]]:
+    """
+    Downloads all pages of a player structure's market via ESI and returns:
+      (aggregated_book_by_type_id, raw_orders_list)
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    first = requests.get(
+        f"{ESI_BASE_URL}/markets/structures/{structure_id}/?datasource=tranquility&page=1",
+        headers=headers,
+        timeout=10,
+    )
+    first.raise_for_status()
+    total_pages = int(first.headers.get("X-Pages", 1))
+    all_orders = list(first.json())
+
+    if total_pages > 1:
+        def get_page(p: int):
+            r = requests.get(
+                f"{ESI_BASE_URL}/markets/structures/{structure_id}/?datasource=tranquility&page={p}",
+                headers=headers,
+                timeout=10,
+            )
+            return r.json() if r.status_code == 200 else []
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for rows in ex.map(get_page, range(2, total_pages + 1)):
+                all_orders.extend(rows)
+
+    book = {}
+    for o in all_orders:
+        tid = int(o["type_id"])
+        price = float(o["price"])
+        vol = int(o["volume_remain"])
+        entry = book.setdefault(tid, {"lowest_ask": None, "sell_vol": 0, "top_buy": None, "daily_vol": None})
+        if o.get("is_buy_order"):
+            if entry["top_buy"] is None or price > entry["top_buy"]:
+                entry["top_buy"] = price
+        else:
+            entry["sell_vol"] += vol
+            if entry["lowest_ask"] is None or price < entry["lowest_ask"]:
+                entry["lowest_ask"] = price
+    return book, all_orders
+
+
+def fetch_lowest_sell_order(session: requests.Session, type_id: int, station_id: int = JITA_STATION_ID, region_id: int = REGION_THE_FORGE):
+    url = f"{ESI_BASE_URL}/markets/{region_id}/orders/?datasource=tranquility&order_type=sell&type_id={type_id}"
+    try:
+        r = session.get(url, timeout=7)
+        if r.status_code == 200:
+            orders = [o for o in r.json() if o.get("location_id") == station_id]
+            if orders:
+                return type_id, min(o["price"] for o in orders)
+    except Exception:
+        pass
+    return type_id, None
+
+
+def fetch_top_buy_order(session: requests.Session, type_id: int, station_id: int = JITA_STATION_ID, region_id: int = REGION_THE_FORGE):
+    url = f"{ESI_BASE_URL}/markets/{region_id}/orders/?datasource=tranquility&order_type=buy&type_id={type_id}"
+    try:
+        r = session.get(url, timeout=7)
+        if r.status_code == 200:
+            orders = r.json()
+            if not orders:
+                return type_id, None
+            competing = []
+            for o in orders:
+                loc = o.get("location_id")
+                rng = str(o.get("range", "")).lower()
+                if loc == station_id:
+                    competing.append(o["price"])
+                elif rng == "region":
+                    competing.append(o["price"])
+                elif loc and loc >= 1_000_000_000_000 and rng in ["1", "2", "3", "4", "5", "region"]:
+                    competing.append(o["price"])
+            if competing:
+                return type_id, max(competing)
+            return type_id, max(o["price"] for o in orders)
+    except Exception:
+        pass
+    return type_id, None
+
+
+def fetch_telemetry_pair(session: requests.Session, type_id: int):
+    _, ask = fetch_lowest_sell_order(session, type_id)
+    _, buy = fetch_top_buy_order(session, type_id)
+    return type_id, ask, buy
+
+
+def fetch_jita_book_top(type_id: int) -> tuple[int, float, float]:
+    """Fetches (type_id, top_buy, lowest_sell) in Jita 4-4 via a single ESI order_type=all query."""
+    try:
+        r = requests.get(
+            f"{ESI_BASE_URL}/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=all&type_id={type_id}",
+            headers=ESI_HEADERS,
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return type_id, 0.0, 0.0
+        orders = r.json()
+        jita_buys = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and o.get("is_buy_order")]
+        jita_sells = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and not o.get("is_buy_order")]
+        return type_id, (max(jita_buys) if jita_buys else 0.0), (min(jita_sells) if jita_sells else 0.0)
+    except Exception:
+        return type_id, 0.0, 0.0
+
+
+def fetch_universe_names(ids: list[int]) -> dict[int, str]:
+    """Resolves EVE universe IDs to names via POST /universe/names/."""
+    clean_ids = sorted({int(i) for i in (ids or []) if i})
+    if not clean_ids:
+        return {}
+    try:
+        res = requests.post(
+            f"{ESI_BASE_URL}/universe/names/?datasource=tranquility",
+            json=clean_ids,
+            headers=ESI_HEADERS,
+            timeout=6,
+        )
+        if res.status_code == 200:
+            return {int(entry["id"]): str(entry["name"]) for entry in res.json()}
+    except Exception:
+        pass
+    return {}
+
+
+def get_30d_average_volume(type_id: int, region_id: int = REGION_THE_FORGE) -> float:
+    """Calculates average daily regional volume over the past 30 days using cached ESI history."""
+    history = fetch_market_history(type_id, region_id)
+    if not history:
+        return 0.0
+    recent = history[-30:]
+    if not recent:
+        return 0.0
+    return round(sum(float(day.get("volume", 0)) for day in recent) / 30.0, 2)

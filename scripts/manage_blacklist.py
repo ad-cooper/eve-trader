@@ -105,8 +105,8 @@ def main():
     p_add = subparsers.add_parser("add", help="Add or update an item in the blacklist")
     p_add.add_argument("name", help="Item Name or Group Name")
     p_add.add_argument("--reason", required=True, help="Reason/Notes (e.g. Patch notes, meta shift)")
-    p_add.add_argument("--type", choices=["item", "group", "any"], default="item", help="Exclusion level")
-    p_add.add_argument("--category", default="patch_notes", choices=["patch_notes", "meta_shift", "market_trend", "logistics", "capital_cap"])
+    p_add.add_argument("--type", choices=["item", "group", "pattern", "any"], default="item", help="Exclusion level")
+    p_add.add_argument("--category", default="patch_notes", choices=["patch_notes", "meta_shift", "market_trend", "seasonal_event", "logistics", "capital_cap"])
     p_add.add_argument("--days", type=int, default=None, help="Temporary duration in days (default: indefinite)")
 
     # Remove command

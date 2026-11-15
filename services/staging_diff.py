@@ -111,6 +111,83 @@ def init_diff_schema(con: duckdb.DuckDBPyConnection):
     """)
 
 
+def _detect_order_fill_events(
+    structure_id: int,
+    df_old: pd.DataFrame,
+    df_new: pd.DataFrame,
+    now: datetime,
+    prev_scan_time: datetime,
+) -> list[tuple]:
+    """
+    Pure DataFrame diff engine comparing two consecutive structure order snapshots.
+    Detects PARTIAL_FILL, non-expired FULL_BUYOUT, and INTRA_SCAN_FILL events.
+    """
+    events: list[tuple] = []
+
+    merged = pd.merge(df_old, df_new, on=["order_id", "type_id"], suffixes=("_old", "_new"))
+    partial_fills = merged[merged["volume_remain_old"] > merged["volume_remain_new"]]
+    for _, r in partial_fills.iterrows():
+        qty = int(r["volume_remain_old"] - r["volume_remain_new"])
+        price = float(r["price_new"])
+        events.append((structure_id, int(r["type_id"]), int(r["order_id"]), now, prev_scan_time, qty, price, qty * price, "PARTIAL_FILL"))
+
+    old_ids = set(df_old["order_id"])
+    new_ids = set(df_new["order_id"])
+    disappeared_ids = old_ids - new_ids
+    if disappeared_ids:
+        disappeared = df_old[df_old["order_id"].isin(disappeared_ids)]
+        for _, r in disappeared.iterrows():
+            issued_dt = pd.to_datetime(r["issued"]).to_pydatetime().replace(tzinfo=None)
+            expires_at = issued_dt + pd.to_timedelta(r["duration"], unit="D")
+            if now < expires_at:
+                qty = int(r["volume_remain"])
+                price = float(r["price"])
+                events.append((structure_id, int(r["type_id"]), int(r["order_id"]), now, prev_scan_time, qty, price, qty * price, "FULL_BUYOUT"))
+
+    new_only_ids = new_ids - old_ids
+    if new_only_ids:
+        new_only = df_new[df_new["order_id"].isin(new_only_ids)]
+        intra_fills = new_only[new_only["volume_remain"] < new_only["volume_total"]]
+        for _, r in intra_fills.iterrows():
+            qty = int(r["volume_total"] - r["volume_remain"])
+            price = float(r["price"])
+            events.append((structure_id, int(r["type_id"]), int(r["order_id"]), now, prev_scan_time, qty, price, qty * price, "INTRA_SCAN_FILL"))
+
+    return events
+
+
+def _persist_snapshot_and_prune(
+    con,
+    snapshot_id: int,
+    structure_id: int,
+    scan_time: datetime,
+    order_count: int,
+    df_new: pd.DataFrame,
+    keep_snapshots: int = 3,
+) -> None:
+    """Writes snapshot metadata + order rows to DuckDB and prunes older snapshots."""
+    con.execute("INSERT INTO staging_snapshots_meta VALUES (?, ?, ?, ?);", [snapshot_id, structure_id, scan_time, order_count])
+    df_insert = df_new.copy()
+    df_insert["snapshot_id"] = snapshot_id
+    con.register("df_snap_insert", df_insert)
+    con.execute("""
+        INSERT INTO staging_order_snapshots
+        SELECT snapshot_id, structure_id, order_id, type_id, price,
+               volume_remain, volume_total, is_buy_order,
+               CAST(issued AS TIMESTAMP), duration
+        FROM df_snap_insert;
+    """)
+    con.execute(f"""
+        DELETE FROM staging_order_snapshots
+        WHERE snapshot_id NOT IN (
+            SELECT snapshot_id FROM staging_snapshots_meta
+            WHERE structure_id = ?
+            ORDER BY scan_time DESC
+            LIMIT {int(keep_snapshots)}
+        );
+    """, [structure_id])
+
+
 def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -> dict:
     """Diffs the current structure market scan against the previous scan in DuckDB."""
     con = duckdb.connect(DB_PATH)
@@ -148,16 +225,7 @@ def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -
     """, [structure_id]).fetchall()
 
     if not last_meta:
-        con.execute("INSERT INTO staging_snapshots_meta VALUES (?, ?, ?, ?);", [now_ms, structure_id, now, len(raw_orders)])
-        df_new["snapshot_id"] = now_ms
-        con.register("df_initial", df_new)
-        con.execute("""
-            INSERT INTO staging_order_snapshots
-            SELECT snapshot_id, structure_id, order_id, type_id, price,
-                   volume_remain, volume_total, is_buy_order,
-                   CAST(issued AS TIMESTAMP), duration
-            FROM df_initial;
-        """)
+        _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
         con.close()
         print(f"[+] Initial C-J6MT baseline snapshot saved ({len(df_new)} active sell orders).")
         return {"baseline": True, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
@@ -171,18 +239,8 @@ def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -
         con.close()
         return {"baseline": False, "skipped_too_soon": True, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
 
-    # If gap exceeds 12h (e.g. container downtime), reset baseline instead of counting stale cancellations as sales
     if hours_since > 12.0:
-        con.execute("INSERT INTO staging_snapshots_meta VALUES (?, ?, ?, ?);", [now_ms, structure_id, now, len(raw_orders)])
-        df_new["snapshot_id"] = now_ms
-        con.register("df_reset", df_new)
-        con.execute("""
-            INSERT INTO staging_order_snapshots
-            SELECT snapshot_id, structure_id, order_id, type_id, price,
-                   volume_remain, volume_total, is_buy_order,
-                   CAST(issued AS TIMESTAMP), duration
-            FROM df_reset;
-        """)
+        _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
         con.close()
         print(f"[+] Gap was {hours_since:.1f}h (>12h) — saved fresh C-J6MT baseline snapshot.")
         return {"baseline": True, "reset_after_gap": round(hours_since, 2), "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
@@ -193,64 +251,11 @@ def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -
         WHERE snapshot_id = ?;
     """, [prev_snapshot_id]).df()
 
-    events = []
-
-    # 1. Partial Fills
-    merged = pd.merge(df_old, df_new, on=["order_id", "type_id"], suffixes=("_old", "_new"))
-    partial_fills = merged[merged["volume_remain_old"] > merged["volume_remain_new"]]
-    for _, r in partial_fills.iterrows():
-        qty = int(r["volume_remain_old"] - r["volume_remain_new"])
-        price = float(r["price_new"])
-        events.append((structure_id, int(r["type_id"]), int(r["order_id"]), now, prev_scan_time, qty, price, qty * price, "PARTIAL_FILL"))
-
-    # 2. Full Buyouts (not expired)
-    old_ids = set(df_old["order_id"])
-    new_ids = set(df_new["order_id"])
-    disappeared_ids = old_ids - new_ids
-    if disappeared_ids:
-        disappeared = df_old[df_old["order_id"].isin(disappeared_ids)]
-        for _, r in disappeared.iterrows():
-            issued_dt = pd.to_datetime(r["issued"]).to_pydatetime().replace(tzinfo=None)
-            expires_at = issued_dt + pd.to_timedelta(r["duration"], unit="D")
-            if now < expires_at:
-                qty = int(r["volume_remain"])
-                price = float(r["price"])
-                events.append((structure_id, int(r["type_id"]), int(r["order_id"]), now, prev_scan_time, qty, price, qty * price, "FULL_BUYOUT"))
-
-    # 3. Intra-Scan Fills
-    new_only_ids = new_ids - old_ids
-    if new_only_ids:
-        new_only = df_new[df_new["order_id"].isin(new_only_ids)]
-        intra_fills = new_only[new_only["volume_remain"] < new_only["volume_total"]]
-        for _, r in intra_fills.iterrows():
-            qty = int(r["volume_total"] - r["volume_remain"])
-            price = float(r["price"])
-            events.append((structure_id, int(r["type_id"]), int(r["order_id"]), now, prev_scan_time, qty, price, qty * price, "INTRA_SCAN_FILL"))
-
+    events = _detect_order_fill_events(structure_id, df_old, df_new, now, prev_scan_time)
     if events:
         con.executemany("INSERT INTO staging_sales_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);", events)
 
-    con.execute("INSERT INTO staging_snapshots_meta VALUES (?, ?, ?, ?);", [now_ms, structure_id, now, len(raw_orders)])
-    df_new["snapshot_id"] = now_ms
-    con.register("df_insert", df_new)
-    con.execute("""
-        INSERT INTO staging_order_snapshots
-        SELECT snapshot_id, structure_id, order_id, type_id, price,
-               volume_remain, volume_total, is_buy_order,
-               CAST(issued AS TIMESTAMP), duration
-        FROM df_insert;
-    """)
-
-    con.execute("""
-        DELETE FROM staging_order_snapshots
-        WHERE snapshot_id NOT IN (
-            SELECT snapshot_id FROM staging_snapshots_meta
-            WHERE structure_id = ?
-            ORDER BY scan_time DESC
-            LIMIT 3
-        );
-    """, [structure_id])
-
+    _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
     con.close()
 
     total_qty = sum(e[5] for e in events)
@@ -266,7 +271,6 @@ def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -
         "units_sold": total_qty,
         "gross_isk": round(total_isk, 2),
     }
-
 
 def get_observed_staging_velocity(structure_id: int) -> dict:
     """Returns tracking coverage and observed 14d daily burn rates per type_id for the structure."""
