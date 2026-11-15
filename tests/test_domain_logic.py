@@ -134,12 +134,19 @@ def test_wallet_transactions_cache_avoids_duplicate_esi_calls(monkeypatch, tmp_p
 
 def test_update_ledger_market_prices_uses_bulk_asks_and_targeted_esi(monkeypatch, tmp_path):
     import services.market as mkt_mod
-    import services.ledgers as led_mod
 
     cache_out = tmp_path / "market_cache.json"
     monkeypatch.setattr(mkt_mod, "MARKET_CACHE_FILE", str(cache_out))
-    monkeypatch.setattr(led_mod, "load_desk_csv", lambda fname: [{"type_id": 10}, {"type_id": 20}, {"type_id": 30}] if "evergreen" in fname else [])
-    monkeypatch.setattr(led_mod, "load_cached_orders", lambda: {"buys": {"10": {"price": 90.0}}, "sells": {"20": {"price": 110.0}}})
+    monkeypatch.setattr(
+        mkt_mod,
+        "load_all_desk_ledgers",
+        lambda: {"evergreen": [{"type_id": 10}, {"type_id": 20}, {"type_id": 30}], "tactical": [], "hold": []},
+    )
+    monkeypatch.setattr(
+        mkt_mod,
+        "load_cached_orders",
+        lambda: {"buys": {"10": {"price": 90.0}}, "sells": {"20": {"price": 110.0}}},
+    )
     monkeypatch.setattr(mkt_mod, "fetch_station_asks_bulk", lambda session, station_id, tids: {10: 100.0, 20: 112.0, 30: 50.0})
 
     esi_polled = []

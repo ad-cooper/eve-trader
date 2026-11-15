@@ -1,41 +1,23 @@
-import os
-import re
-import json
 import duckdb
 import requests
 from datetime import datetime, timezone
 from collections import defaultdict
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from services.esi import load_cached_assets, fetch_character_assets
 
-from services.ledgers import get_desk_profile
-
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-SQLITE_PATH = "data/latest-sqlite.db"
-MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
-
-REGION_THE_FORGE = 10000002
-JITA_STATION_ID = 60003760
-
-from services.accounting import (
-    BUY_SCC_SURCHARGE as BUY_FEE_CITADEL,
-    TOTAL_EXIT_FEE as EXIT_FEE_JITA,
-    calc_unit_cost,
-    calc_net_proceeds,
-    calc_line_financials,
-)
-
+from services.ledgers import get_desk_profile, load_all_desk_ledgers, load_cached_orders, load_desk_csv
+from services.storage import read_json, write_json
+from services.accounting import calc_line_financials
 from services.esi import (
+    JITA_STATION_ID,
     create_esi_session as create_session,
     fetch_lowest_sell_order,
-    fetch_top_buy_order,
-    fetch_telemetry_pair,
     fetch_jita_book_top,
-    resolve_primary_character,
-    fetch_character_locations_stock,
+    fetch_wallet_transactions,
 )
+from services.sde import resolve_type_ids
+
+DUCKDB_PATH = "data/eve_analytics.duckdb"
+MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
 
 def fetch_station_asks_bulk(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
     """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""
@@ -91,11 +73,8 @@ def update_ledger_market_prices():
     for all ledger items, and targeted ESI order_type=all calls only for active buy orders
     or items missing from Fuzzwork.
     """
-    from services.ledgers import load_desk_csv, load_cached_orders
-    eg = load_desk_csv("evergreen_ledger.csv")
-    tac = load_desk_csv("tactical_ledger.csv")
-    hld = load_desk_csv("hold_ledger.csv")
-    all_items = eg + tac + hld
+    ledgers = load_all_desk_ledgers()
+    all_items = ledgers["evergreen"] + ledgers["tactical"] + ledgers["hold"]
 
     tid_set = {int(it["type_id"]) for it in all_items if it.get("type_id")}
 
@@ -137,105 +116,119 @@ def update_ledger_market_prices():
             "timestamp": now_str,
         }
 
-    os.makedirs("ledgers", exist_ok=True)
-    with open(MARKET_CACHE_FILE, "w") as f:
-        json.dump(prices, f, indent=2)
+    write_json(MARKET_CACHE_FILE, prices)
 
     return prices
 
 def load_market_prices_cache():
-    if os.path.exists(MARKET_CACHE_FILE):
-        try:
-            with open(MARKET_CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return read_json(MARKET_CACHE_FILE, default={})
 
-from services.sde import (
-    resolve_type_names,
-    resolve_type_ids,
-    get_latest_ledger_targets as get_historical_ledger_targets,
-    parse_eve_item_lines as parse_multisell_export_text,
-)
+def _query_wallet_buys(type_ids: list[int]) -> dict[int, list[dict]]:
+    """Groups live ESI wallet buy transactions by type_id for cost-basis and hold-duration lookups."""
+    target_set = set(type_ids)
+    buys_by_type: dict[int, list[dict]] = defaultdict(list)
+    try:
+        for tx in fetch_wallet_transactions() or []:
+            if not tx.get("is_buy"):
+                continue
+            tid = tx.get("type_id")
+            if tid not in target_set:
+                continue
+            dt_obj = None
+            raw_d = tx.get("date")
+            if raw_d:
+                try:
+                    dt_obj = datetime.fromisoformat(str(raw_d).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            buys_by_type[tid].append({
+                "qty": int(tx.get("quantity", 1)),
+                "price": float(tx.get("unit_price", 0.0)),
+                "date": dt_obj,
+            })
+    except Exception:
+        pass
+    return buys_by_type
+
+
+def _query_historical_buys_db(type_ids: list[int], name_map: dict[int, str] | None = None) -> dict[int, dict]:
+    """Queries DuckDB historical_wallet_buys for weighted average cost and earliest acquisition date."""
+    if not type_ids:
+        return {}
+    resolved = name_map if name_map is not None else resolve_type_ids(type_ids)
+    name_to_tid = {v: k for k, v in resolved.items() if v}
+    if not name_to_tid:
+        return {}
+
+    out: dict[int, dict] = {}
+    try:
+        con = duckdb.connect(DUCKDB_PATH, read_only=True)
+        quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in name_to_tid.keys())
+        query = f"""
+        WITH ranked AS (
+            SELECT
+                item_name,
+                price,
+                quantity,
+                date,
+                ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY date DESC) AS rn
+            FROM historical_wallet_buys
+            WHERE item_name IN ({quoted_names})
+        )
+        SELECT
+            item_name,
+            ROUND(SUM(price * quantity) / SUM(quantity), 2) AS avg_price,
+            MIN(date) AS first_date
+        FROM ranked
+        WHERE rn <= 10
+        GROUP BY item_name;
+        """
+        for iname, avg_p, first_dt in con.execute(query).fetchall():
+            tid = name_to_tid.get(iname)
+            if tid:
+                out[tid] = {"avg_price": float(avg_p or 0.0), "first_date": first_dt}
+        con.close()
+    except Exception:
+        pass
+    return out
+
 
 def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
     if not type_ids:
         return {}
     cost_map = {}
 
-    # 1. From character wallet buy transactions (exact executed fill price)
-    try:
-        from services.esi import fetch_wallet_transactions
-        txs = fetch_wallet_transactions()
-        if txs:
-            buys_by_type = defaultdict(list)
-            for tx in txs:
-                if tx.get("is_buy"):
-                    buys_by_type[tx["type_id"]].append((tx.get("quantity", 1), tx.get("unit_price", 0.0)))
-            for tid in type_ids:
-                if tid in buys_by_type:
-                    total_q = sum(q for q, p in buys_by_type[tid])
-                    if total_q > 0:
-                        avg_p = sum(q * p for q, p in buys_by_type[tid]) / total_q
-                        cost_map[tid] = {"unit_cost": avg_p, "source": "WALLET"}
-    except Exception:
-        pass
+    # 1. Live ESI wallet buy transactions
+    wallet_buys = _query_wallet_buys(type_ids)
+    for tid in type_ids:
+        fills = wallet_buys.get(tid, [])
+        total_q = sum(f["qty"] for f in fills)
+        if total_q > 0:
+            avg_p = sum(f["qty"] * f["price"] for f in fills) / total_q
+            cost_map[tid] = {"unit_cost": avg_p, "source": "WALLET"}
 
-    # 2. From jEveAssets lifetime wallet buys in DuckDB (exact historical executed fill)
+    # 2. jEveAssets lifetime wallet buys in DuckDB
     unmatched_for_jeve = [tid for tid in type_ids if tid not in cost_map]
-    if unmatched_for_jeve:
-        try:
-            name_map = resolve_type_ids(unmatched_for_jeve)
-            name_to_tid = {v: k for k, v in name_map.items() if v}
-            if name_to_tid:
-                con = duckdb.connect(DUCKDB_PATH, read_only=True)
-                quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in name_to_tid.keys())
-                jeve_query = f"""
-                WITH ranked AS (
-                    SELECT 
-                        item_name,
-                        price,
-                        quantity,
-                        date,
-                        ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY date DESC) as rn
-                    FROM historical_wallet_buys
-                    WHERE item_name IN ({quoted_names})
-                )
-                SELECT 
-                    item_name, 
-                    ROUND(SUM(price * quantity) / SUM(quantity), 2) as avg_price,
-                    MAX(date) as last_date
-                FROM ranked
-                WHERE rn <= 10
-                GROUP BY item_name;
-                """
-                jeve_rows = con.execute(jeve_query).fetchall()
-                con.close()
-                for r in jeve_rows:
-                    iname, avg_p, last_dt = r[0], r[1], r[2]
-                    tid = name_to_tid.get(iname)
-                    if tid and avg_p and avg_p > 0:
-                        cost_map[tid] = {"unit_cost": float(avg_p), "source": "JEVEASSETS"}
-        except Exception:
-            pass
+    for tid, info in _query_historical_buys_db(unmatched_for_jeve).items():
+        if info["avg_price"] > 0:
+            cost_map[tid] = {"unit_cost": info["avg_price"], "source": "JEVEASSETS"}
 
-    # 3. From historical ledger snapshots (target_buy)
+    # 3. Historical ledger snapshots (target_buy)
     for tid in type_ids:
         if tid not in cost_map and tid in history_map:
             tb = history_map[tid].get("target_buy")
             if tb and tb > 0:
                 cost_map[tid] = {"unit_cost": float(tb), "source": "LEDGER"}
 
-    # 4. Fallback: 30d VWAP from DuckDB forge_market_history for unmatched items
+    # 4. Fallback: 30d VWAP from DuckDB forge_market_history
     unmatched_tids = [tid for tid in type_ids if tid not in cost_map]
     if unmatched_tids:
         try:
             con = duckdb.connect(DUCKDB_PATH, read_only=True)
             id_str = ",".join(str(int(t)) for t in set(unmatched_tids))
             query = f"""
-                SELECT 
-                    type_id, 
+                SELECT
+                    type_id,
                     SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap
                 FROM forge_market_history
                 WHERE type_id IN ({id_str}) AND date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history)
@@ -256,6 +249,7 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
 
     return cost_map
 
+
 def get_active_sell_orders_map() -> dict:
     """
     Loads cached character orders and groups active sell orders by integer type_id.
@@ -263,7 +257,6 @@ def get_active_sell_orders_map() -> dict:
     Returns: { type_id_int: [ {order_id, price, volume_remain}, ... ] }
     """
     try:
-        from services.ledgers import load_cached_orders
         raw = load_cached_orders()
         sells_raw = raw.get("sells", {}) if isinstance(raw, dict) else {}
         
@@ -293,31 +286,30 @@ def get_active_sell_orders_map() -> dict:
 
 
 
+def _parse_utc_dt(raw_dt) -> datetime | None:
+    if not raw_dt:
+        return None
+    dt_obj = raw_dt if isinstance(raw_dt, datetime) else None
+    if dt_obj is None:
+        try:
+            dt_obj = datetime.fromisoformat(str(raw_dt)[:19])
+        except Exception:
+            return None
+    return dt_obj.replace(tzinfo=timezone.utc) if dt_obj.tzinfo is None else dt_obj
+
+
 def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = None) -> dict:
-    """
-    Builds a lookup of holding parameters for Hold and Tactical desk items.
-    Resolution order for date_acquired:
-      1. Explicit CSV override (hold_ledger.csv or tactical_ledger.csv)
-      2. Live ESI wallet transactions (most recent buy date)
-      3. DuckDB historical_wallet_buys (MAX date)
-      4. DuckDB clean_transactions (MAX buy tx_date)
-      5. DuckDB ledger_history (MAX snapshot_time)
-    """
+    """Builds holding-duration parameters for Hold and Tactical desk items."""
     if not type_ids:
         return {}
-
-    from datetime import datetime, timezone
-    import duckdb
-    from services.ledgers import load_desk_csv, get_desk_profile
 
     now_utc = datetime.now(timezone.utc)
     hold_params = {}
 
-    # 1. Read CSV overrides from both hold_ledger and tactical_ledger
+    # 1. Explicit CSV overrides
     csv_meta = {}
-    for fname in ["hold_ledger.csv", "tactical_ledger.csv"]:
-        rows = load_desk_csv(fname)
-        for r in rows:
+    for fname in ("hold_ledger.csv", "tactical_ledger.csv"):
+        for r in load_desk_csv(fname):
             try:
                 tid = int(r.get("type_id"))
                 raw_d = str(r.get("date_acquired", "")).strip()
@@ -325,104 +317,62 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
                 raw_days = str(r.get("max_days", "")).strip()
                 default_max = get_desk_profile("tactical" if "tactical" in fname else "hold").max_hold_days
                 days_val = int(raw_days) if raw_days.isdigit() else default_max
-                csv_meta[tid] = {"date_acquired": date_val, "max_days": days_val, "desk_hint": "TACTICAL" if "tactical" in fname else "HOLD"}
+                csv_meta[tid] = {"date_acquired": date_val, "max_days": days_val}
             except (ValueError, TypeError):
                 continue
 
-    # 2. Query live ESI wallet transactions for most recent buy date
-    esi_latest_buys = {}
-    try:
-        from services.esi import fetch_wallet_transactions
-        txs = fetch_wallet_transactions() or []
-        for tx in txs:
-            if tx.get("is_buy"):
-                tid = tx.get("type_id")
-                raw_d = tx.get("date")
-                if tid in type_ids and raw_d:
-                    try:
-                        clean_iso = str(raw_d).replace("Z", "+00:00")
-                        d_obj = datetime.fromisoformat(clean_iso)
-                        if tid not in esi_latest_buys or d_obj < esi_latest_buys[tid]:
-                            esi_latest_buys[tid] = d_obj
-                    except Exception:
-                        pass
-    except Exception as e:
-        print("[!] Warning reading ESI wallet buy dates:", e)
+    # 2. Live ESI wallet transactions (earliest active fill date)
+    wallet_buys = _query_wallet_buys(type_ids)
+    esi_earliest_buys = {
+        tid: min(f["date"] for f in fills if f["date"] is not None)
+        for tid, fills in wallet_buys.items()
+        if any(f["date"] is not None for f in fills)
+    }
 
-    # 3. Query DuckDB for MAX(date) if not in live ESI buffer
-    db_latest = {}
+    # 3. DuckDB historical buys & ledger snapshots
+    db_hist_buys = _query_historical_buys_db(type_ids, name_map=name_map)
+    db_clean_buys: dict[str, object] = {}
+    db_snap_dates: dict[int, object] = {}
     try:
         con = duckdb.connect(DUCKDB_PATH, read_only=True)
         names_to_lookup = [name_map.get(tid) for tid in type_ids if name_map.get(tid)]
         if names_to_lookup:
-            clean_names = [n.replace("'", "''") for n in names_to_lookup]
-            quoted_names = ",".join("'" + cn + "'" for cn in clean_names)
-            q1 = f"SELECT item_name, MIN(date) FROM historical_wallet_buys WHERE item_name IN ({quoted_names}) GROUP BY item_name"
-            for row in con.execute(q1).fetchall():
-                if row[1]:
-                    db_latest[row[0]] = row[1]
-
+            quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in names_to_lookup)
             q_clean = f"SELECT item_name, MIN(tx_date) FROM clean_transactions WHERE tx_type = 'buy' AND item_name IN ({quoted_names}) GROUP BY item_name"
-            for row in con.execute(q_clean).fetchall():
-                if row[1]:
-                    item_n = row[0]
-                    if item_n not in db_latest or row[1] > db_latest[item_n]:
-                        db_latest[item_n] = row[1]
+            for iname, dt_val in con.execute(q_clean).fetchall():
+                if dt_val:
+                    db_clean_buys[iname] = dt_val
 
         id_str = ",".join(str(int(t)) for t in type_ids)
-        q2 = f"SELECT type_id, MIN(snapshot_time) FROM ledger_history WHERE type_id IN ({id_str}) GROUP BY type_id"
-        for row in con.execute(q2).fetchall():
-            if row[1]:
-                db_latest[row[0]] = row[1]
+        q_snap = f"SELECT type_id, MIN(snapshot_time) FROM ledger_history WHERE type_id IN ({id_str}) GROUP BY type_id"
+        for tid_row, snap_dt in con.execute(q_snap).fetchall():
+            if snap_dt:
+                db_snap_dates[int(tid_row)] = snap_dt
         con.close()
-    except Exception as e:
-        print("[!] Warning reading DuckDB hold history:", e)
+    except Exception:
+        pass
 
     for tid in type_ids:
         meta = csv_meta.get(tid, {})
         desk_from_hist = (history_map or {}).get(tid, {}).get("desk", "HOLD")
-        default_days = get_desk_profile(desk_from_hist).max_hold_days
-        max_days = meta.get("max_days", default_days)
+        max_days = meta.get("max_days", get_desk_profile(desk_from_hist).max_hold_days)
         date_acq = meta.get("date_acquired")
         item_name = name_map.get(tid, "")
 
         dt_parsed = None
-        # Priority 1: Explicit CSV override
         if date_acq:
             try:
                 dt_parsed = datetime.strptime(date_acq[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
             except Exception:
                 pass
-
-        # Priority 2: Live ESI wallet transaction
-        if not dt_parsed and tid in esi_latest_buys:
-            dt_parsed = esi_latest_buys[tid]
-
-        # Priority 3: DuckDB latest buy by name
-        if not dt_parsed and item_name in db_latest:
-            raw_dt = db_latest[item_name]
-            if isinstance(raw_dt, datetime):
-                dt_parsed = raw_dt
-            else:
-                try:
-                    dt_parsed = datetime.fromisoformat(str(raw_dt)[:19])
-                except Exception:
-                    pass
-            if dt_parsed and dt_parsed.tzinfo is None:
-                dt_parsed = dt_parsed.replace(tzinfo=timezone.utc)
-
-        # Priority 4: DuckDB latest snapshot by type_id
-        if not dt_parsed and tid in db_latest:
-            raw_dt = db_latest[tid]
-            if isinstance(raw_dt, datetime):
-                dt_parsed = raw_dt
-            else:
-                try:
-                    dt_parsed = datetime.fromisoformat(str(raw_dt)[:19])
-                except Exception:
-                    pass
-            if dt_parsed and dt_parsed.tzinfo is None:
-                dt_parsed = dt_parsed.replace(tzinfo=timezone.utc)
+        if not dt_parsed:
+            dt_parsed = esi_earliest_buys.get(tid)
+        if not dt_parsed and tid in db_hist_buys:
+            dt_parsed = _parse_utc_dt(db_hist_buys[tid].get("first_date"))
+        if not dt_parsed and item_name in db_clean_buys:
+            dt_parsed = _parse_utc_dt(db_clean_buys[item_name])
+        if not dt_parsed and tid in db_snap_dates:
+            dt_parsed = _parse_utc_dt(db_snap_dates[tid])
 
         if dt_parsed:
             days_held = max(0, (now_utc - dt_parsed).days)
@@ -435,10 +385,11 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
             "date_acquired": date_str,
             "days_held": days_held,
             "max_days": max_days,
-            "is_expired": bool(days_held >= max_days and days_held > 0)
+            "is_expired": bool(days_held >= max_days and days_held > 0),
         }
 
     return hold_params
+
 
 def evaluate_deal_opportunity(meta: dict, sells: list[tuple[float, int]], top_buy: float | None) -> dict | None:
     """
@@ -505,6 +456,3 @@ def evaluate_deal_opportunity(meta: dict, sells: list[tuple[float, int]], top_bu
         "est_profit": round(est_profit, 2),
     }
 
-def get_live_missing_buys(desk_filter: str = "all"):
-    from workflows.buy_orders import audit_missing_buys
-    return audit_missing_buys(desk=desk_filter)

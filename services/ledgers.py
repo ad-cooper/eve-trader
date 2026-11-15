@@ -1,15 +1,12 @@
-from __future__ import annotations
 from dataclasses import dataclass
 import os
 import json
 import pandas as pd
+from services.storage import read_json, read_csv_records
 from services.esi import get_14d_average_volume
 from services.accounting import (
     BUY_SCC_SURCHARGE,
     TOTAL_EXIT_FEE,
-    eve_tick,
-    round_up_eve,
-    round_down_eve,
     calc_unit_cost,
     calc_net_proceeds,
     calc_max_profitable_buy,
@@ -176,15 +173,9 @@ def select_desk_candidates(
 
 LEDGER_DIR = "ledgers"
 ORDERS_CACHE_FILE = "ledgers/character_orders.json"
-SNIPER_DEALS_FILE = "ledgers/sniper_deals.json"
 MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
 
 
-
-
-
-BUY_FEE_CITADEL = BUY_SCC_SURCHARGE
-TOTAL_EXIT_FEES = TOTAL_EXIT_FEE
 
 
 
@@ -459,43 +450,29 @@ def is_item_blacklisted(name: str, group_name: str, bl_items: set, bl_groups: se
     return False
 
 
-def load_desk_csv(filename: str):
-    path = os.path.join(LEDGER_DIR, filename)
-    if not os.path.exists(path):
-        return []
-    try:
-        return pd.read_csv(path).to_dict(orient="records")
-    except Exception:
-        return []
+def load_desk_csv(filename: str) -> list[dict]:
+    return read_csv_records(os.path.join(LEDGER_DIR, filename))
 
-def load_cached_orders():
-    if os.path.exists(ORDERS_CACHE_FILE):
-        try:
-            with open(ORDERS_CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0}
 
-def load_sniper_deals():
-    target = "ledgers/sniper_deals.json"
-    if os.path.exists(target):
-        try:
-            with open(target, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else data.get("deals", [])
-        except Exception:
-            pass
-    return []
+def load_all_desk_ledgers() -> dict[str, list[dict]]:
+    return {
+        "evergreen": load_desk_csv("evergreen_ledger.csv"),
+        "tactical": load_desk_csv("tactical_ledger.csv"),
+        "hold": load_desk_csv("hold_ledger.csv"),
+    }
 
-def load_market_prices_cache():
-    if os.path.exists(MARKET_CACHE_FILE):
-        try:
-            with open(MARKET_CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+
+def load_cached_orders() -> dict:
+    return read_json(ORDERS_CACHE_FILE, default={"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0})
+
+
+def load_sniper_deals() -> list:
+    data = read_json("ledgers/sniper_deals.json", default=[])
+    return data if isinstance(data, list) else data.get("deals", [])
+
+
+def load_market_prices_cache() -> dict:
+    return read_json(MARKET_CACHE_FILE, default={})
 
 def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_buy: float, sells: dict) -> tuple:
     """Determines target buy, target sell, and recommended quantity per desk strategy."""

@@ -1,4 +1,5 @@
 import { html, useState } from '../lib.js';
+import { MarketLink } from './ui.js';
 import { fmtISK } from '../utils.js';
 
 export function SniperTab({ sniper }) {
@@ -61,7 +62,7 @@ export function SniperTab({ sniper }) {
                           </span>
                         </td>
                         <td class="p-3 font-semibold text-white">
-                          <a href=${`https://evetycoon.com/market/${typeId}`} target="_blank" class="hover:text-eveCyan hover:underline">${name}</a>
+                          <${MarketLink} typeId=${typeId} name=${name} />
                         </td>
                         <td class="p-3 text-right text-slate-300">${qty}</td>
                         <td class="p-3 text-right text-amber-400 font-semibold">-${discount}%</td>

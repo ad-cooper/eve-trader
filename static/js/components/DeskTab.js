@@ -1,19 +1,6 @@
 import { html, useState, useEffect, useMemo } from '../lib.js';
 import { fmtISK } from '../utils.js';
-
-function DeskTagBadge({ desk }) {
-  const d = String(desk || '').toUpperCase();
-  if (d === 'EVERGREEN') {
-    return html`<span class="bg-cyan-950/70 text-cyan-300 border border-cyan-800 px-1.5 py-0.5 rounded text-[10px] font-bold">EVERGREEN</span>`;
-  }
-  if (d === 'TACTICAL') {
-    return html`<span class="bg-purple-950/70 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded text-[10px] font-bold">TACTICAL</span>`;
-  }
-  if (d === 'HOLD') {
-    return html`<span class="bg-amber-950/70 text-amber-300 border border-amber-800 px-1.5 py-0.5 rounded text-[10px] font-bold">HOLD</span>`;
-  }
-  return null;
-}
+import { DeskBadge, MarketLink, FilterPills } from './ui.js';
 
 function OrderStatusBadge({ status }) {
   if (status === 'BUY_ACTIVE') {
@@ -142,19 +129,12 @@ export function DeskTab({ desks = {}, deskMetrics = {}, initialDesk = 'all', ask
   return html`
     <div class="font-mono space-y-3">
       <div class="flex flex-wrap items-center justify-between bg-eveCard border border-eveBorder p-3.5 rounded-lg text-xs gap-3">
-        <div class="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800">
-          ${deskFilters.map(df => html`
-            <button
-              key=${df.key}
-              onClick=${() => setSelectedDesk(df.key)}
-              class=${selectedDesk === df.key
-                ? 'px-3 py-1.5 rounded font-bold bg-eveCyan/20 text-eveCyan border border-eveCyan/40 transition'
-                : 'px-3 py-1.5 rounded font-semibold text-slate-400 hover:text-slate-200 transition'}
-            >
-              ${df.label}
-            </button>
-          `)}
-        </div>
+        <${FilterPills}
+          options=${deskFilters.map(df => [df.key, df.label])}
+          value=${selectedDesk}
+          onChange=${setSelectedDesk}
+          activeClass="bg-eveCyan/20 text-eveCyan border border-eveCyan/40"
+        />
 
         <div class="flex flex-wrap items-center gap-2">
           <label class="text-xs text-slate-400 flex items-center gap-1.5 cursor-pointer bg-slate-900 border border-slate-700 px-2.5 py-1.5 rounded">
@@ -232,11 +212,11 @@ export function DeskTab({ desks = {}, deskMetrics = {}, initialDesk = 'all', ask
                     return html`
                       <tr key=${`${r.desk_type}-${r.type_id || i}`} class="hover:bg-slate-800/40 transition">
                         <td class="p-3 text-slate-500">${i + 1}</td>
-                        ${selectedDesk === 'all' && html`<td class="p-3"><${DeskTagBadge} desk=${r.desk_type} /></td>`}
+                        ${selectedDesk === 'all' && html`<td class="p-3"><${DeskBadge} desk=${r.desk_type} /></td>`}
                         <td class="p-3"><${OrderStatusBadge} status=${r.char_status} /></td>
                         <td class="p-3 text-center"><${ActionGuidanceBadge} code=${r.action_code} text=${r.action_text} /></td>
                         <td class="p-3 font-semibold text-white">
-                          <a href=${`https://evetycoon.com/market/${r.type_id}`} target="_blank" class="hover:text-eveCyan hover:underline">${r.name}</a>
+                          <${MarketLink} typeId=${r.type_id} name=${r.name} />
                         </td>
                         <td class="p-3 text-right text-slate-300">${r.qty}</td>
                         <td class="p-3 text-right text-slate-400">${Number(r.dump_freq || 0).toFixed(1)}%</td>

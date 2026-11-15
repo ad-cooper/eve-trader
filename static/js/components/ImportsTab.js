@@ -1,4 +1,5 @@
 import { html, useState, useEffect, useMemo } from '../lib.js';
+import { MarketLink } from './ui.js';
 import { fmtISK, copyToClipboard } from '../utils.js';
 
 export function ImportsTab() {
@@ -320,7 +321,7 @@ export function ImportsTab() {
                             <td class="p-3 text-slate-500">${i + 1}</td>
                             <td class="p-3"><span class=${`border px-2 py-0.5 rounded text-[10px] font-bold ${badgeClass}`}>${st}</span></td>
                             <td class="p-3 font-semibold text-white">
-                              <a href=${`https://evetycoon.com/market/${r.type_id}`} target="_blank" class="hover:text-eveCyan hover:underline">${r.name}</a>
+                              <${MarketLink} typeId=${r.type_id} name=${r.name} />
                               <span class="text-[10px] text-slate-500 ml-1">(${r.group || ''})</span>
                             </td>
                             <td class=${`p-3 text-right font-semibold ${qty > 0 ? 'text-slate-200' : 'text-emerald-400'}`}>

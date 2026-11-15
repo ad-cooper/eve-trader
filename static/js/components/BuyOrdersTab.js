@@ -1,5 +1,6 @@
 import { html, useState, useEffect, useCallback } from '../lib.js';
 import { fmtISK, copyToClipboard } from '../utils.js';
+import { MarketLink, FilterPills } from './ui.js';
 
 export function BuyOrdersTab() {
   const [deskFilter, setDeskFilter] = useState('all');
@@ -50,24 +51,17 @@ export function BuyOrdersTab() {
     <div class="space-y-4 font-mono text-xs">
       <div class="bg-eveCard border border-eveBorder rounded-lg p-4 flex flex-wrap justify-between items-center gap-3">
         <div class="flex flex-wrap items-center gap-3">
-          <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800">
-            ${[
+          <${FilterPills}
+            options=${[
               ['all', 'All Desks'],
               ['evergreen', 'Evergreen'],
               ['tactical', 'Tactical'],
               ['hold', 'Hold'],
-            ].map(([key, label]) => html`
-              <button
-                key=${key}
-                onClick=${() => setDeskFilter(key)}
-                class=${deskFilter === key
-                  ? 'px-3 py-1.5 rounded font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40 transition'
-                  : 'px-3 py-1.5 rounded font-semibold text-slate-400 hover:text-slate-200 transition'}
-              >
-                ${label}
-              </button>
-            `)}
-          </div>
+            ]}
+            value=${deskFilter}
+            onChange=${setDeskFilter}
+            activeClass="bg-blue-500/20 text-blue-300 border border-blue-500/40"
+          />
 
           <div class="flex items-center gap-3 text-slate-300">
             <span class="bg-blue-950 text-blue-300 border border-blue-800 px-2.5 py-1 rounded font-bold">
@@ -128,7 +122,7 @@ export function BuyOrdersTab() {
                       <tr key=${it.type_id || i} class="hover:bg-slate-800/40 transition">
                         <td class="p-3 text-slate-500">${i + 1}</td>
                         <td class="p-3 font-semibold text-white">
-                          <a href=${`https://evetycoon.com/market/${it.type_id}`} target="_blank" class="hover:text-eveCyan hover:underline">${it.name}</a>
+                          <${MarketLink} typeId=${it.type_id} name=${it.name} />
                           ${it.squeezed && html`<span class="ml-1.5 text-[9px] bg-red-950 text-red-400 border border-red-800 px-1 py-0.5 rounded font-bold">MARGIN CAP</span>`}
                         </td>
                         <td class="p-3 text-right text-slate-300 font-semibold">${Number(it.qty || 0).toLocaleString()}</td>

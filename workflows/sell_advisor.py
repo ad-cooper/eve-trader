@@ -1,9 +1,6 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from services.accounting import (
     calc_net_proceeds,
     calc_unit_cost,
-    calc_line_financials,
-    BUY_SCC_SURCHARGE as BUY_FEE_CITADEL,
     TOTAL_EXIT_FEE as EXIT_FEE_JITA,
 )
 from services.esi import (
@@ -11,7 +8,6 @@ from services.esi import (
     fetch_character_assets,
     JITA_STATION_ID,
     create_esi_session as create_session,
-    fetch_lowest_sell_order,
 )
 from services.ledgers import get_desk_profile
 from services.sde import (

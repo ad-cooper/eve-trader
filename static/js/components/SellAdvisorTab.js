@@ -1,5 +1,6 @@
 import { html, useState, useEffect, useMemo, useCallback } from '../lib.js';
 import { fmtISK, copyToClipboard } from '../utils.js';
+import { DeskBadge, MarketLink, FilterPills } from './ui.js';
 
 export function SellAdvisorTab() {
   const [data, setData] = useState(null);
@@ -100,24 +101,16 @@ export function SellAdvisorTab() {
       </div>
 
       <div class="bg-eveCard border border-eveBorder rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3">
-        <div class="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
-          ${[
+        <${FilterPills}
+          options=${[
             ['all', `All Items (${totalCount})`],
             ['ready', `Ready to Sell (${readyCount})`],
             ['hold', 'Hold Cycle'],
             ['unmanaged', 'Unmanaged / Custom'],
-          ].map(([key, label]) => html`
-            <button
-              key=${key}
-              onClick=${() => setFilter(key)}
-              class=${filter === key
-                ? 'px-3 py-1.5 rounded font-semibold bg-slate-800 text-slate-100 transition'
-                : 'px-3 py-1.5 rounded font-semibold text-slate-400 hover:text-slate-200 transition'}
-            >
-              ${label}
-            </button>
-          `)}
-        </div>
+          ]}
+          value=${filter}
+          onChange=${setFilter}
+        />
 
         <div class="flex flex-wrap items-center gap-2">
           <button onClick=${() => setPasteOpen(v => !v)} class="px-3 py-1.5 text-xs rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
@@ -175,10 +168,7 @@ export function SellAdvisorTab() {
                   : !rows.length
                     ? html`<tr><td colspan="8" class="text-center py-8 text-slate-500 font-sans">No loose items matching this filter. (Items inside containers or other regions are ignored)</td></tr>`
                     : rows.map((item, idx) => {
-                        let deskBadge = html`<span class="text-slate-400 font-semibold text-[10px] bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">UNMANAGED</span>`;
-                        if (item.desk === 'EVERGREEN') deskBadge = html`<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-950/70 text-cyan-300 border border-cyan-800">EVERGREEN</span>`;
-                        else if (item.desk === 'TACTICAL') deskBadge = html`<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-950/70 text-purple-300 border border-purple-800">TACTICAL</span>`;
-                        else if (item.desk === 'HOLD') deskBadge = html`<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950/70 text-amber-300 border border-amber-800">HOLD</span>`;
+                        const deskBadge = html`<${DeskBadge} desk=${item.desk} />`;
 
                         let actionBadge;
                         if (item.collision?.has_collision) {
@@ -213,7 +203,7 @@ export function SellAdvisorTab() {
                               ${item.collision?.has_collision && html`
                                 <span class="inline-block mr-1.5 px-1 rounded text-[9px] font-bold bg-amber-950 text-amber-300 border border-amber-500/60" title=${item.collision.reason}>COLLISION</span>
                               `}
-                              <a href=${`https://evetycoon.com/market/${item.type_id}`} target="_blank" class="hover:text-eveCyan hover:underline">${item.name}</a>
+                              <${MarketLink} typeId=${item.type_id} name=${item.name} />
                             </td>
                             <td class="py-2.5 px-2">${deskBadge}</td>
                             <td class="py-2.5 px-2 text-right text-slate-300">${item.qty}</td>

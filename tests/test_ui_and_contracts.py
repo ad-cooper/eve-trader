@@ -18,6 +18,7 @@ def test_all_services_import_cleanly():
         "services.market",
         "services.sde",
         "services.staging_diff",
+        "services.storage",
         "workflows.daily_pipeline",
         "workflows.scheduler",
         "workflows.dashboard",

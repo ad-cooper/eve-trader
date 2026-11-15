@@ -7,7 +7,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from datetime import datetime, timezone
+from services.storage import read_json, write_json
 
 EVE_AUTH_URL = "https://login.eveonline.com/v2/oauth/authorize"
 EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
@@ -306,115 +306,96 @@ def fetch_character_orders():
     return None
 
 WALLET_CACHE_FILE = "data/wallet_cache.json"
-
-def fetch_wallet_balance(force_refresh: bool = False) -> float:
-    """
-    Fetches the live liquid ISK balance of the authenticated character.
-    Caches balance locally for 60 seconds to avoid ESI 429 rate limits.
-    Falls back to last known balance on rate limit or network failure.
-    """
-    import time
-    tokens = load_sso_tokens()
-    if not tokens or not tokens.get("character_id"):
-        return 0.0
-
-    cid = tokens["character_id"]
-    now = time.time()
-    cached_val = 0.0
-
-    if os.path.exists(WALLET_CACHE_FILE):
-        try:
-            with open(WALLET_CACHE_FILE, "r") as f:
-                cdata = json.load(f)
-                if cdata.get("character_id") == cid:
-                    cached_val = float(cdata.get("balance", 0.0))
-                    if not force_refresh and (now - cdata.get("timestamp", 0) < 300):
-                        return cached_val
-        except Exception:
-            pass
-
-    token = get_valid_access_token()
-    if not token:
-        return cached_val
-
-    url = f"{ESI_BASE_URL}/characters/{cid}/wallet/?datasource=tranquility"
-    try:
-        res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
-        if res.status_code == 200:
-            bal = float(res.text)
-            try:
-                os.makedirs(os.path.dirname(WALLET_CACHE_FILE), exist_ok=True)
-                with open(WALLET_CACHE_FILE, "w") as f:
-                    json.dump({"character_id": cid, "balance": bal, "timestamp": now}, f)
-            except Exception:
-                pass
-            return bal
-        elif res.status_code == 429:
-            return cached_val
-        else:
-            return cached_val
-    except Exception as e:
-        print(f"[!] Wallet balance fetch failed: {str(e)}")
-        return cached_val
-
-
 WALLET_TX_CACHE_FILE = "data/wallet_transactions_cache.json"
+_MEM_WALLET_BAL_CACHE: dict = {"character_id": None, "timestamp": 0.0, "balance": 0.0}
 _MEM_WALLET_TX_CACHE: dict = {"character_id": None, "timestamp": 0.0, "transactions": []}
 
 
+def _cached_esi_get(
+    mem_cache: dict,
+    cache_file: str,
+    character_id: int,
+    max_age_seconds: int,
+    value_field: str,
+    default_value,
+    fetch_fn,
+    force_refresh: bool = False,
+):
+    """3-tier ESI cache (in-memory -> disk TTL -> live fetch with stale fallback on error/429)."""
+    now = time.time()
+    if (
+        not force_refresh
+        and mem_cache.get("character_id") == character_id
+        and (now - float(mem_cache.get("timestamp", 0.0))) < max_age_seconds
+    ):
+        return mem_cache.get(value_field, default_value)
+
+    stale_val = default_value
+    cdata = read_json(cache_file)
+    if isinstance(cdata, dict) and cdata.get("character_id") == character_id:
+        stale_val = cdata.get(value_field, default_value)
+        ts = float(cdata.get("timestamp", 0.0))
+        if not force_refresh and (now - ts) < max_age_seconds:
+            mem_cache.update({"character_id": character_id, "timestamp": ts, value_field: stale_val})
+            return stale_val
+
+    fresh_val = fetch_fn()
+    if fresh_val is not None:
+        mem_cache.update({"character_id": character_id, "timestamp": now, value_field: fresh_val})
+        write_json(cache_file, {"character_id": character_id, "timestamp": now, value_field: fresh_val}, indent=None)
+        return fresh_val
+    return stale_val
+
+
+def fetch_wallet_balance(force_refresh: bool = False) -> float:
+    """Fetches live liquid ISK balance with 300s memory/disk caching and 429 fallback."""
+    tokens = load_sso_tokens()
+    if not tokens or not tokens.get("character_id"):
+        return 0.0
+    cid = int(tokens["character_id"])
+
+    def _fetch():
+        token = get_valid_access_token()
+        if not token:
+            return None
+        url = f"{ESI_BASE_URL}/characters/{cid}/wallet/?datasource=tranquility"
+        try:
+            res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+            if res.status_code == 200:
+                return float(res.text)
+        except Exception as e:
+            print(f"[!] Wallet balance fetch failed: {e}")
+        return None
+
+    val = _cached_esi_get(
+        _MEM_WALLET_BAL_CACHE, WALLET_CACHE_FILE, cid, 300, "balance", 0.0, _fetch, force_refresh=force_refresh
+    )
+    return float(val or 0.0)
+
+
 def fetch_wallet_transactions(force_refresh: bool = False, max_age_seconds: int = 300) -> list:
-    """
-    Fetches character wallet transactions with a 300s memory + disk cache
-    and graceful fallback on ESI 429 / transient network failures.
-    """
+    """Fetches character wallet transactions with a 300s memory + disk cache and stale fallback."""
     tokens = load_sso_tokens()
     if not tokens or not tokens.get("character_id"):
         return []
-
     cid = int(tokens["character_id"])
-    now = time.time()
 
-    if (
-        not force_refresh
-        and _MEM_WALLET_TX_CACHE.get("character_id") == cid
-        and (now - _MEM_WALLET_TX_CACHE.get("timestamp", 0.0)) < max_age_seconds
-    ):
-        return _MEM_WALLET_TX_CACHE.get("transactions", [])
-
-    cached_txs = []
-    if os.path.exists(WALLET_TX_CACHE_FILE):
+    def _fetch():
+        token = get_valid_access_token()
+        if not token:
+            return None
+        url = f"{ESI_BASE_URL}/characters/{cid}/wallet/transactions/?datasource=tranquility"
         try:
-            with open(WALLET_TX_CACHE_FILE, "r", encoding="utf-8") as f:
-                cdata = json.load(f)
-            if cdata.get("character_id") == cid:
-                cached_txs = cdata.get("transactions", [])
-                if not force_refresh and (now - float(cdata.get("timestamp", 0.0))) < max_age_seconds:
-                    _MEM_WALLET_TX_CACHE.update({"character_id": cid, "timestamp": cdata["timestamp"], "transactions": cached_txs})
-                    return cached_txs
-        except Exception:
-            pass
+            res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
+            if res.status_code == 200:
+                return res.json()
+        except Exception as e:
+            print(f"[!] Wallet transactions fetch failed: {e}")
+        return None
 
-    token = get_valid_access_token()
-    if not token:
-        return cached_txs
-
-    url = f"{ESI_BASE_URL}/characters/{cid}/wallet/transactions/?datasource=tranquility"
-    try:
-        res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
-        if res.status_code == 200:
-            txs = res.json()
-            _MEM_WALLET_TX_CACHE.update({"character_id": cid, "timestamp": now, "transactions": txs})
-            try:
-                os.makedirs(os.path.dirname(WALLET_TX_CACHE_FILE), exist_ok=True)
-                with open(WALLET_TX_CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump({"character_id": cid, "timestamp": now, "transactions": txs}, f)
-            except Exception:
-                pass
-            return txs
-        return cached_txs
-    except Exception as e:
-        print(f"[!] Wallet transactions fetch failed: {str(e)}")
-        return cached_txs
+    return _cached_esi_get(
+        _MEM_WALLET_TX_CACHE, WALLET_TX_CACHE_FILE, cid, max_age_seconds, "transactions", [], _fetch, force_refresh=force_refresh
+    )
 
 def fetch_character_assets():
     tokens = load_sso_tokens()

@@ -10,7 +10,7 @@ Order of Priority:
 
 import os
 import sys
-import json
+from services.storage import read_json
 import argparse
 import duckdb
 import pandas as pd
@@ -32,11 +32,6 @@ DUCKDB_PATH = "data/eve_analytics.duckdb"
 SQLITE_PATH = "data/latest-sqlite.db"
 OUTPUT_DIR = "ledgers"
 MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
-
-BUY_FEE_CITADEL = 0.0050   # 0.50% SCC surcharge (Citadel 1-jump)
-SELL_FEE_JITA = 0.0123     # 1.23% Broker Relations V
-SALES_TAX_JITA = 0.03375   # 3.375% Accounting V
-TOTAL_EXIT_FEES = SELL_FEE_JITA + SALES_TAX_JITA  # 4.605%
 
 DESK_RATIOS = {k: cfg.ratio for k, cfg in DESK_PROFILES.items()}
 DEFAULT_FALLBACK_BUDGET = 50.0e9
@@ -67,32 +62,22 @@ def resolve_dynamic_budget(capital_arg: str) -> float:
         print(f"[!] Live ESI equity lookup failed: {e}")
 
     if escrow <= 0.0:
-        for orders_path in ["ledgers/character_orders.json", "data/character_orders.json"]:
-            if os.path.exists(orders_path):
-                try:
-                    with open(orders_path, "r", encoding="utf-8") as f:
-                        c_orders = json.load(f)
-                        cached_escrow = float(c_orders.get("total_escrow", 0.0))
-                        if cached_escrow > 0:
-                            print(f"[*] Recovered {cached_escrow/1e9:.2f}B ISK escrow from local cache ({orders_path})")
-                            escrow = cached_escrow
-                            break
-                except Exception:
-                    pass
+        for orders_path in ("ledgers/character_orders.json", "data/character_orders.json"):
+            c_orders = read_json(orders_path) or {}
+            cached_escrow = float(c_orders.get("total_escrow", 0.0))
+            if cached_escrow > 0:
+                print(f"[*] Recovered {cached_escrow/1e9:.2f}B ISK escrow from local cache ({orders_path})")
+                escrow = cached_escrow
+                break
 
     if wallet <= 0.0:
-        for wallet_path in ["data/wallet_cache.json", "ledgers/wallet_cache.json"]:
-            if os.path.exists(wallet_path):
-                try:
-                    with open(wallet_path, "r", encoding="utf-8") as f:
-                        w_data = json.load(f)
-                        cached_wallet = float(w_data.get("balance", 0.0))
-                        if cached_wallet > 0:
-                            print(f"[*] Recovered {cached_wallet/1e9:.2f}B ISK wallet from local cache ({wallet_path})")
-                            wallet = cached_wallet
-                            break
-                except Exception:
-                    pass
+        for wallet_path in ("data/wallet_cache.json", "ledgers/wallet_cache.json"):
+            w_data = read_json(wallet_path) or {}
+            cached_wallet = float(w_data.get("balance", 0.0))
+            if cached_wallet > 0:
+                print(f"[*] Recovered {cached_wallet/1e9:.2f}B ISK wallet from local cache ({wallet_path})")
+                wallet = cached_wallet
+                break
 
     total_equity = wallet + escrow
     if total_equity > 1.0e9:
@@ -104,13 +89,7 @@ def resolve_dynamic_budget(capital_arg: str) -> float:
 
 
 def load_cached_market_telemetry() -> dict:
-    if os.path.exists(MARKET_CACHE_FILE):
-        try:
-            with open(MARKET_CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return read_json(MARKET_CACHE_FILE, default={})
 
 
 def load_claimed_ids_from_csv(filename: str) -> set:
@@ -131,26 +110,16 @@ def load_incumbent_positions() -> tuple[dict, dict, dict, dict]:
     """
     buys, sells, assets, prior_desks = {}, {}, {}, {}
 
-    if os.path.exists("ledgers/character_orders.json"):
-        try:
-            with open("ledgers/character_orders.json", "r", encoding="utf-8") as f:
-                odata = json.load(f)
-            buys = {int(k): v for k, v in (odata.get("buys") or {}).items() if str(k).isdigit()}
-            sells = {int(k): v for k, v in (odata.get("sells") or {}).items() if str(k).isdigit()}
-        except Exception:
-            pass
+    odata = read_json("ledgers/character_orders.json") or {}
+    buys = {int(k): v for k, v in (odata.get("buys") or {}).items() if str(k).isdigit()}
+    sells = {int(k): v for k, v in (odata.get("sells") or {}).items() if str(k).isdigit()}
 
-    if os.path.exists("ledgers/character_assets.json"):
-        try:
-            with open("ledgers/character_assets.json", "r", encoding="utf-8") as f:
-                adata = json.load(f)
-            if isinstance(adata, list):
-                for row in adata:
-                    tid = row.get("type_id")
-                    if tid is not None:
-                        assets[int(tid)] = assets.get(int(tid), 0) + int(row.get("quantity", 1))
-        except Exception:
-            pass
+    adata = read_json("ledgers/character_assets.json")
+    if isinstance(adata, list):
+        for row in adata:
+            tid = row.get("type_id")
+            if tid is not None:
+                assets[int(tid)] = assets.get(int(tid), 0) + int(row.get("quantity", 1))
 
     for dname in ("hold", "tactical", "evergreen"):
         for tid in load_claimed_ids_from_csv(f"{dname}_ledger.csv"):

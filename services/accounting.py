@@ -1,6 +1,5 @@
-import json
 import math
-import duckdb
+from services.storage import read_json, write_json
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
 from services.esi import fetch_wallet_transactions
@@ -276,14 +275,9 @@ def calculate_performance():
         "last_sync": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
 
-    with open(PERF_CACHE_FILE, "w") as f:
-        json.dump(perf, f, indent=2)
+    write_json(PERF_CACHE_FILE, perf)
     return perf
 
 
 def load_performance():
-    try:
-        with open(PERF_CACHE_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    return read_json(PERF_CACHE_FILE)

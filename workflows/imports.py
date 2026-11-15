@@ -1,7 +1,6 @@
 import os
-import json
+from services.storage import read_json, write_json
 import math
-import re
 import duckdb
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -407,13 +406,7 @@ def ensure_jita_asks(session, tids: list[int], jita_asks: dict[int, float | None
 
 
 def load_cached_import_suggestions() -> dict | None:
-    if os.path.exists(IMPORT_CACHE_FILE):
-        try:
-            with open(IMPORT_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return None
+    return read_json(IMPORT_CACHE_FILE)
 
 
 
@@ -836,9 +829,7 @@ def scan_import_opportunities(
         }
         results[key] = _build_destination_section(dest, opportunities, limit, rate_ov, meta_ctx)
 
-    os.makedirs("ledgers", exist_ok=True)
-    with open(IMPORT_CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
+    write_json(IMPORT_CACHE_FILE, results)
 
     return results
 
