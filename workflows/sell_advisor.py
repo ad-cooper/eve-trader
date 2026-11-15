@@ -171,8 +171,22 @@ def _resolve_unlisted_strategy(
     from services.ledgers import get_desk_profile
 
     if desk == "EVERGREEN":
-        rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
-        return "FAST FLIP", "flip", rec_sell
+        eg_cfg = get_desk_profile("evergreen")
+        days_held = hold_meta.get("days_held", 0)
+        is_expired = hold_meta.get("is_expired", False) or (days_held >= eg_cfg.max_hold_days and days_held > 0)
+        if lowest_ask and lowest_ask > 0.01:
+            undercut_price = round(lowest_ask - 0.01, 2)
+            eff_cost = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
+            min_net = eff_cost * (1.0 + eg_cfg.take_profit_roi / 100.0)
+            if eff_cost > 0 and not is_expired and calc_net_proceeds(undercut_price) < min_net:
+                floor_sell = round(min_net / (1.0 - EXIT_FEE_JITA), 2)
+                rec_sell = max(round(target_sell, 2) if target_sell else 0.0, floor_sell)
+                return "HOLD (MARGIN FLOOR)", "hold", rec_sell
+            if is_expired:
+                return f"TIME STOP ({days_held}d)", "time_stop", undercut_price
+            return "FAST FLIP", "flip", undercut_price
+        rec_sell = round(target_sell, 2) if target_sell else 1000000.0
+        return ("TIME STOP (0d)" if is_expired else "FAST FLIP"), ("time_stop" if is_expired else "flip"), rec_sell
 
     if desk in ["TACTICAL", "HOLD"]:
         desk_cfg = get_desk_profile(desk)

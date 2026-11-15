@@ -62,7 +62,7 @@ DESK_PROFILES: dict[str, DeskProfile] = {
         min_turnover_m=10.0,
         min_spread_pct=8.0,
         min_history_days=60,
-        max_vwap_ratio_180d=0.98,
+        max_vwap_ratio_180d=0.94,
         excluded_categories=("Skill",),
     ),
     "tactical": DeskProfile(
@@ -76,14 +76,14 @@ DESK_PROFILES: dict[str, DeskProfile] = {
         sticky_margin_floor=4.5,
         cancel_floor=4.5,
         max_hold_days=10,
-        take_profit_days=5,
-        take_profit_roi=4.0,
+        take_profit_days=3,
+        take_profit_roi=4.5,
         sort_col="swing_score",
         price_col="price_m_30d",
         min_price_m=3.0,
         max_price_m=2500.0,
         min_turnover_m=25.0,
-        min_spread_pct=9.5,
+        min_spread_pct=13.5,
         min_dump_freq_pct=30.0,
     ),
     "evergreen": DeskProfile(
@@ -104,7 +104,7 @@ DESK_PROFILES: dict[str, DeskProfile] = {
         min_price_m=1.0,
         max_price_m=2500.0,
         min_turnover_m=45.0,
-        min_spread_pct=10.5,
+        min_spread_pct=12.0,
         min_daily_vol=3.0,
     ),
 }
@@ -501,6 +501,7 @@ def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_
         t_buy = min(t_buy, ceil_guard)
 
     else:  # hold
+        hold_cfg = get_desk_profile("hold")
         t_sell = (live_ask - 0.01) if (tid in sells and live_ask and live_ask > csv_sell) else csv_sell
         t_buy = csv_buy
         if live_top_buy and live_top_buy > 0:
@@ -511,7 +512,7 @@ def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_
         if tid in sells:
             qty = int(item.get("qty", 1))
         else:
-            qty = max(1, int(round(1_500_000_000.0 / cost_unit))) if cost_unit > 0 else 1
+            qty = max(1, int(round(hold_cfg.max_line_cap / cost_unit))) if cost_unit > 0 else 1
 
     return round(t_buy, 2), round(t_sell, 2), qty
 
@@ -622,12 +623,13 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
                 profit_unit = item["profit_unit"]
 
                 if prox is not None and 60.0 <= prox <= 92.0 and margin >= 20.0:
+                    hold_cfg = get_desk_profile("hold")
                     vol = get_14d_average_volume(int(tid)) if tid.isdigit() else -1.0
                     item["avg_daily_vol"] = vol
 
-                    base_qty = max(1, int(round(1_500_000_000.0 / cost_unit))) if cost_unit > 0 else 1
+                    base_qty = max(1, int(round(hold_cfg.max_line_cap / cost_unit))) if cost_unit > 0 else 1
                     if vol > 0:
-                        vol_cap = max(1, int(round(vol * 0.35)))
+                        vol_cap = max(1, int(round(vol * hold_cfg.vol_pct)))
                         final_qty = min(base_qty, vol_cap)
                     else:
                         final_qty = min(base_qty, max(1, int(item.get("qty", 1))))

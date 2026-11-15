@@ -158,3 +158,40 @@ def test_hisec_freight_splitting_and_jf_bundling():
     )
     assert bundles["contract_count"] == 2
     assert all(b["total_m3"] <= 350_000.0 for b in bundles["bundles"])
+
+
+def test_desk_profiles_fee_alignment_and_evergreen_floor():
+    from services.ledgers import get_desk_profile
+
+    hold = get_desk_profile("hold")
+    tac = get_desk_profile("tactical")
+    eg = get_desk_profile("evergreen")
+
+    # Gross spread floors must exceed round-trip fees (~5.35%) + min_margin
+    assert tac.min_spread_pct >= 13.5
+    assert eg.min_spread_pct >= 12.0
+    assert hold.max_vwap_ratio_180d <= 0.94
+    assert tac.take_profit_days == 3 and tac.take_profit_roi == 4.5
+
+    # Unlisted Evergreen item whose live ask compresses net return below 2.0% holds at floor
+    act_hold, type_hold, price_hold = _resolve_unlisted_strategy(
+        desk="EVERGREEN",
+        unit_cost=100_000_000.0,
+        lowest_ask=106_000_000.0,  # ~0.6% net after 0.5% buy + 4.605% exit -> below 2.0% floor
+        target_sell=110_000_000.0,
+        hold_meta={"days_held": 1, "is_expired": False},
+    )
+    assert type_hold == "hold"
+    assert "MARGIN FLOOR" in act_hold
+    assert price_hold >= 110_000_000.0
+
+    # Unlisted Evergreen item clearing >= 2.0% net flips immediately at lowest_ask - 0.01
+    act_flip, type_flip, price_flip = _resolve_unlisted_strategy(
+        desk="EVERGREEN",
+        unit_cost=100_000_000.0,
+        lowest_ask=112_000_000.0,
+        target_sell=112_000_000.0,
+        hold_meta={"days_held": 0, "is_expired": False},
+    )
+    assert type_flip == "flip"
+    assert price_flip == 111_999_999.99
