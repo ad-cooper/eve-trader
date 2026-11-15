@@ -76,25 +76,37 @@ def fetch_telemetry_pair(session: requests.Session, type_id: int):
     return type_id, ask, buy
 
 def update_ledger_market_prices():
-    from services.ledgers import load_desk_csv
+    from services.ledgers import load_desk_csv, load_cached_orders
     eg = load_desk_csv("evergreen_ledger.csv")
     tac = load_desk_csv("tactical_ledger.csv")
     hld = load_desk_csv("hold_ledger.csv")
     all_items = eg + tac + hld
-    if not all_items:
+
+    tid_set = {int(it["type_id"]) for it in all_items if it.get("type_id")}
+
+    # Include active ESI buy/sell order type_ids so rotated-out incumbent rows stay polled
+    orders = load_cached_orders() or {}
+    for bucket in ("buys", "sells"):
+        for k in (orders.get(bucket) or {}).keys():
+            if str(k).isdigit():
+                tid_set.add(int(k))
+
+    if not tid_set:
         return {}
 
-    unique_tids = list({int(it["type_id"]) for it in all_items if it.get("type_id")})
+    unique_tids = list(tid_set)
     session = create_session()
+    prev_cache = load_market_prices_cache()
     prices = {}
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = {executor.submit(fetch_telemetry_pair, session, tid): tid for tid in unique_tids}
         for fut in as_completed(futures):
             tid, ask, buy = fut.result()
+            prev = prev_cache.get(str(tid)) or {}
             prices[str(tid)] = {
-                "lowest_ask": ask,
-                "top_buy": buy,
+                "lowest_ask": ask if (ask and ask > 0) else prev.get("lowest_ask"),
+                "top_buy": buy if (buy and buy > 0) else prev.get("top_buy"),
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
             }
 

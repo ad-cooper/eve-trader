@@ -102,12 +102,27 @@
         <button onclick="switchTab('evergreen')" id="tab-evergreen" class="px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm transition">Evergreen</button>
         <button onclick="switchTab('tactical')" id="tab-tactical" class="px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm transition">Tactical</button>
         <button onclick="switchTab('hold')" id="tab-hold" class="px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm transition">Hold</button>
+        <button onclick="switchTab('imports')" id="tab-imports" class="px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm transition">Imports (Amarr / C-J6MT)</button>
         <button onclick="switchTab('guide')" id="tab-guide" class="px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm transition">Strategy Playbook</button>
       </div>
 
       <div class="flex items-center gap-3">
         <div id="sniper-controls" class="hidden flex items-center gap-2">
           <button onclick="toggleSniperRaw()" id="btn-toggle-raw" class="text-xs bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-700 px-2.5 py-1 rounded transition">Show Console Log</button>
+        </div>
+        <div id="imports-controls" class="hidden flex flex-wrap items-center gap-2 font-mono">
+          <label class="text-[11px] text-slate-400 flex items-center gap-1 bg-slate-900 border border-slate-700 px-2 py-1 rounded">
+            <span>Amarr Warps:</span>
+            <input type="number" id="imp-amarr-warps" value="35" step="1" class="w-16 bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-slate-200 text-right focus:outline-none focus:border-eveCyan">
+          </label>
+          <label class="text-[11px] text-slate-400 flex items-center gap-1 bg-slate-900 border border-slate-700 px-2 py-1 rounded">
+            <span>C-J6MT ISK/m³:</span>
+            <input type="number" id="imp-cj6mt-rate" value="800" step="50" class="w-16 bg-slate-800 border border-slate-600 rounded px-1.5 py-0.5 text-slate-200 text-right focus:outline-none focus:border-eveCyan">
+          </label>
+          <button id="btn-scan-imports" onclick="loadImportOpportunities(true)" class="text-xs bg-eveCyan/20 hover:bg-eveCyan/30 text-eveCyan border border-eveCyan/40 px-3 py-1 rounded font-semibold transition flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5 animate-spin hidden" id="spinner-imports" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
+            <span id="text-imports">Scan Live Books</span>
+          </button>
         </div>
         <div id="table-filters" class="hidden flex items-center gap-2">
           <label class="text-xs text-slate-400 flex items-center gap-1.5 cursor-pointer bg-slate-900 border border-slate-700 px-2.5 py-1 rounded">
@@ -297,7 +312,140 @@
       </div>
     </div>
 
-    <!-- PANEL 3: Strategy Playbook -->
+        <!-- TAB: IMPORTS -->
+    <div id="panel-imports" class="tab-content hidden space-y-4">
+      <!-- Destination & Freight Controls -->
+      <div class="bg-evePanel border border-eveBorder rounded-lg p-4 flex flex-wrap justify-between items-center gap-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <button id="btn-imp-cj6mt" onclick="setImportDest('cj6mt')" class="px-3.5 py-1.5 rounded text-xs font-bold bg-eveCyan/20 text-eveCyan border border-eveCyan/50 transition">
+            C-J6MT (1st Taj Mahgoon)
+          </button>
+          <button id="btn-imp-amarr" onclick="setImportDest('amarr')" class="px-3.5 py-1.5 rounded text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700 hover:text-slate-200 transition">
+            Amarr VIII (Oris)
+          </button>
+          <div class="flex items-center gap-1.5 ml-2 text-xs text-slate-400">
+            <span>JF ISK/m³:</span>
+            <input id="imp-cj6mt-rate" type="number" value="800" step="50" class="w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white text-xs font-mono">
+          </div>
+          <div class="flex items-center gap-1.5 text-xs text-slate-400">
+            <span>Amarr Warps:</span>
+            <input id="imp-amarr-warps" type="number" value="35" step="1" class="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white text-xs font-mono">
+          </div>
+          <button id="btn-scan-imports" onclick="loadImportOpportunities(true)" class="bg-eveCyan/20 hover:bg-eveCyan/30 text-eveCyan border border-eveCyan/50 px-3 py-1.5 rounded text-xs font-bold transition flex items-center gap-1.5">
+            <span id="spinner-imports" class="hidden animate-spin">⟳</span>
+            <span id="text-imports">Scan Live Books</span>
+          </button>
+        </div>
+        <div class="flex items-center gap-3 text-xs text-slate-400">
+          <span id="imp-item-count" class="font-semibold text-slate-300">0 items</span>
+          <span id="imp-scan-time">Last scan: --</span>
+        </div>
+      </div>
+
+      <!-- KPI Summary Cards -->
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div class="bg-evePanel border border-eveBorder rounded-lg p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">Top-100 Batch Volume</div>
+          <div id="imp-batch-m3" class="text-base font-bold text-white mt-0.5">0 m³</div>
+        </div>
+        <div class="bg-evePanel border border-eveBorder rounded-lg p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">Top-100 Collateral</div>
+          <div id="imp-batch-col" class="text-base font-bold text-eveCyan mt-0.5">0 ISK</div>
+        </div>
+        <div class="bg-evePanel border border-eveBorder rounded-lg p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">All-Items Jita Buy</div>
+          <div id="imp-all-buy" class="text-base font-bold text-slate-200 mt-0.5">0 ISK</div>
+        </div>
+        <div class="bg-evePanel border border-eveBorder rounded-lg p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">Top-100 Freight Est.</div>
+          <div id="imp-batch-freight" class="text-base font-bold text-eveAmber mt-0.5">0 ISK</div>
+        </div>
+        <div class="bg-evePanel border border-eveBorder rounded-lg p-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-400">Top-100 Net Profit</div>
+          <div id="imp-batch-profit" class="text-base font-bold text-eveGreen mt-0.5">+0 ISK</div>
+        </div>
+      </div>
+
+      <!-- Action Toolbar -->
+      <div class="flex flex-wrap justify-between items-center gap-2 bg-evePanel border border-eveBorder rounded-lg p-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="toggleImportBundler()" class="bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/50 px-3 py-1.5 rounded text-xs font-semibold transition">
+            Bundle Purchased Items
+          </button>
+          <label class="inline-flex items-center gap-1.5 text-xs text-slate-300 bg-slate-900 border border-slate-700 px-2.5 py-1.5 rounded cursor-pointer select-none">
+            <input type="checkbox" id="imp-hide-stocked" checked onchange="renderImportsTab()" class="accent-eveCyan">
+            <span>Hide Stocked</span>
+          </label>
+          <button onclick="copyImportMultibuy(this)" class="bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-200 border border-emerald-500/50 px-3 py-1.5 rounded text-xs font-semibold transition">
+            Copy Jita MultiBuy (Top 100)
+          </button>
+        </div>
+        <a href="/sso/login?role=cj6mt" id="btn-switch-cj6mt-char" class="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 px-3 py-1.5 rounded text-xs font-semibold transition">
+          C-J6MT Seller (Switch)
+        </a>
+      </div>
+
+      <!-- Courier Contract Bundler Drawer -->
+      <div id="import-bundler-drawer" class="hidden bg-slate-950/90 border border-indigo-500/40 rounded-lg p-4 space-y-3">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-slate-800 pb-2.5">
+          <div>
+            <h4 class="text-xs font-bold uppercase tracking-wider text-indigo-300">Courier Contract Bundler (Jita 4-4 &rarr; Destination)</h4>
+            <p class="text-[11px] text-slate-400 mt-0.5">Paste purchased items from EVE Inventory or MultiBuy, or auto-detect matching import stock in your Jita hangar.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="runImportBundler(true)" class="bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/50 px-2.5 py-1 rounded text-[11px] font-semibold transition">
+              Auto-Detect Jita Hangar
+            </button>
+            <button onclick="toggleImportBundler()" class="text-slate-400 hover:text-white text-sm px-2">&times;</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <div class="space-y-2">
+            <textarea id="imp-bundle-paste" rows="5" class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500" placeholder="Rattlesnake 2&#10;Guardian 7&#10;Harvester Mining Drone 3&#10;Large Trimark Armor Pump I 126"></textarea>
+            <button onclick="runImportBundler(false)" class="w-full bg-eveCyan/20 hover:bg-eveCyan/30 text-eveCyan border border-eveCyan/40 py-1.5 rounded text-xs font-bold transition">
+              Calculate Optimal Contracts
+            </button>
+          </div>
+          <div id="imp-bundle-results" class="lg:col-span-2 space-y-2 max-h-80 overflow-y-auto pr-1">
+            <div class="text-xs text-slate-500 p-4 border border-dashed border-slate-800 rounded text-center">
+              Paste purchased items on the left or click "Auto-Detect Jita Hangar" to pack into optimal courier contracts.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Imports Table -->
+      <div class="bg-evePanel border border-eveBorder rounded-lg overflow-hidden">
+        <div class="p-3 bg-slate-900/80 border-b border-eveBorder flex flex-wrap justify-between items-center gap-2">
+          <h3 id="imp-table-title" class="text-xs font-bold uppercase tracking-wider text-eveCyan">Jita 4-4 &rarr; C-J6MT (1st Taj Mahgoon) Import Opportunities</h3>
+          <span id="imp-rate-note" class="text-[11px] text-slate-400"></span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-900 border-b border-eveBorder text-slate-400 uppercase text-[10px]">
+              <tr>
+                <th class="p-3">#</th>
+                <th class="p-3">Status</th>
+                <th class="p-3">Item</th>
+                <th class="p-3 text-right">Buy Qty</th>
+                <th class="p-3 text-right">Imported / Stock</th>
+                <th class="p-3 text-right">Vol (m³)</th>
+                <th class="p-3 text-right">Jita Ask</th>
+                <th class="p-3 text-right">Freight</th>
+                <th class="p-3 text-right">Target Sell</th>
+                <th class="p-3 text-right">Net Margin</th>
+                <th class="p-3 text-right">ISK/m³</th>
+                <th class="p-3 text-right">Est. Profit</th>
+              </tr>
+            </thead>
+            <tbody id="imports-table-body" class="divide-y divide-slate-800"></tbody>
+            <tfoot id="imports-table-foot" class="bg-slate-900/90 border-t border-eveBorder font-bold text-xs"></tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+
+<!-- PANEL 3: Strategy Playbook -->
     <div id="panel-guide" class="hidden space-y-6">
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div class="bg-eveCard border border-eveBorder p-6 rounded-lg space-y-3">
@@ -578,6 +726,6 @@
     </div>
   </div>
 
-  <script src="/static/js/dashboard.js?v=clean_v1"></script>
+  <script src="/static/js/dashboard.js?v=imports_v17"></script>
 </body>
 </html>

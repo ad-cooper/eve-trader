@@ -1,4 +1,6 @@
-let currentTab = 'performance';
+let importData = null;
+let currentImportDest = 'cj6mt';
+let currentTab = new URLSearchParams(window.location.search).get('tab') || 'performance';
 let globalData = null;
 let chartInstance = null;
 let perfFilterMode = 'all';
@@ -119,7 +121,7 @@ function renderMetrics() {
 
 function switchTab(tab) {
   currentTab = tab;
-  ['performance', 'sniper', 'evergreen', 'tactical', 'hold', 'guide'].forEach(t => {
+  ['performance', 'sniper', 'evergreen', 'tactical', 'hold', 'imports', 'guide'].forEach(t => {
     const btn = document.getElementById('tab-' + t);
     if (!btn) return;
     if (t === tab) {
@@ -152,13 +154,14 @@ function toggleSniperRaw() {
 
 function renderActiveTab() {
   if (!globalData) return;
-  const panels = ['performance', 'sniper', 'table', 'guide'];
+  const panels = ['performance', 'sniper', 'table', 'imports', 'guide'];
   panels.forEach(p => {
     const el = document.getElementById('panel-' + p);
     if (el) el.classList.add('hidden');
   });
 
   document.getElementById('sniper-controls').classList.add('hidden');
+  if (document.getElementById('imports-controls')) document.getElementById('imports-controls').classList.add('hidden');
   document.getElementById('table-filters').classList.add('hidden');
 
   if (currentTab === 'performance') {
@@ -169,6 +172,14 @@ function renderActiveTab() {
     document.getElementById('sniper-controls').classList.remove('hidden');
     renderSniperTable(globalData.sniper.deals || []);
     document.getElementById('sniper-output').innerText = globalData.sniper.raw_output || 'No scans recorded.';
+  } else if (currentTab === 'imports') {
+    document.getElementById('panel-imports').classList.remove('hidden');
+    if (document.getElementById('imports-controls')) document.getElementById('imports-controls').classList.remove('hidden');
+    if (!importData) {
+      loadImportOpportunities(false);
+    } else {
+      renderImportsTab();
+    }
   } else if (currentTab === 'guide') {
     document.getElementById('panel-guide').classList.remove('hidden');
   } else {
@@ -402,7 +413,11 @@ function renderTableRows(rows) {
 
 
     let proxBadge = '<span class="text-slate-600 font-mono">--</span>';
-    let liveAskStr = r.live_ask ? fmtISK(r.live_ask) : "<span class=\"text-amber-400 font-bold text-[10px] bg-amber-950/70 border border-amber-800 px-1 py-0.5 rounded\">OUT OF STOCK</span>";
+    let liveAskStr = r.live_ask
+      ? fmtISK(r.live_ask)
+      : (r.ask_polled
+          ? "<span class=\"text-amber-400 font-bold text-[10px] bg-amber-950/70 border border-amber-800 px-1 py-0.5 rounded\">OUT OF STOCK</span>"
+          : "<span class=\"text-slate-400 font-mono text-[10px] bg-slate-800/80 border border-slate-700 px-1.5 py-0.5 rounded\">UNPOLLED</span>");
 
     if (r.proximity_pct !== null && r.proximity_pct !== undefined) {
       const p = r.proximity_pct;
@@ -843,3 +858,333 @@ async function copyAdvisorMultisell(type) {
     prompt("Clipboard blocked by browser. Press Ctrl+C to copy:", text);
   }
 }
+
+// ==========================================
+// CROSS-REGION IMPORTS (JITA -> AMARR / C-J6MT)
+// ==========================================
+async function loadImportOpportunities(force = false) {
+  const spinner = document.getElementById('spinner-imports');
+  const btnText = document.getElementById('text-imports');
+  const btn = document.getElementById('btn-scan-imports');
+  const tbody = document.getElementById('imports-table-body');
+
+  if (spinner) spinner.classList.remove('hidden');
+  if (btnText) btnText.innerText = force ? 'Scanning Books...' : 'Loading...';
+  if (btn) btn.disabled = true;
+
+  if (tbody && (!importData || force)) {
+    tbody.innerHTML = '<tr><td colspan="11" class="p-6 text-center text-slate-400">Scanning Jita 4-4, Amarr VIII & C-J6MT structure books...</td></tr>';
+  }
+
+  try {
+    const amarrWarps = parseInt(document.getElementById('imp-amarr-warps')?.value || '35', 10);
+    const cj6mtRate = parseFloat(document.getElementById('imp-cj6mt-rate')?.value) || 800;
+    const url = `/api/import/opportunities?amarr_warps=${amarrWarps}&cj6mt_rate=${cj6mtRate}&force=${force}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    importData = await res.json();
+    renderImportsTab();
+  } catch (err) {
+    console.error('Import scan failed:', err);
+    if (tbody) {
+      tbody.innerHTML = `<tr><td colspan="11" class="p-6 text-center text-rose-400">Failed to load import opportunities: ${err.message}</td></tr>`;
+    }
+  } finally {
+    if (spinner) spinner.classList.add('hidden');
+    if (btnText) btnText.innerText = 'Scan Live Books';
+    if (btn) btn.disabled = false;
+  }
+}
+
+function setImportDest(destKey) {
+  currentImportDest = destKey;
+  const btnCj = document.getElementById('btn-imp-cj6mt');
+  const btnAm = document.getElementById('btn-imp-amarr');
+  if (btnCj && btnAm) {
+    btnCj.className = destKey === 'cj6mt'
+      ? 'px-3.5 py-1.5 rounded text-xs font-bold bg-eveCyan/20 text-eveCyan border border-eveCyan/50 transition'
+      : 'px-3.5 py-1.5 rounded text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700 hover:text-slate-200 transition';
+    btnAm.className = destKey === 'amarr'
+      ? 'px-3.5 py-1.5 rounded text-xs font-bold bg-eveAmber/20 text-eveAmber border border-eveAmber/50 transition'
+      : 'px-3.5 py-1.5 rounded text-xs font-bold bg-slate-800 text-slate-400 border border-slate-700 hover:text-slate-200 transition';
+  }
+  renderImportsTab();
+}
+
+function renderImportsTab() {
+  if (!importData) return;
+  const sec = importData[currentImportDest];
+  const tbody = document.getElementById('imports-table-body');
+  if (!sec || !tbody) return;
+
+  const setTxt = (id, txt) => { const el = document.getElementById(id); if (el) el.innerText = txt; };
+  const isCj = currentImportDest === 'cj6mt';
+  setTxt('imp-scan-time', 'Last scan: ' + (importData.timestamp || '--'));
+  setTxt('imp-batch-m3', Math.round(Number(sec.multibuy_m3) || 0).toLocaleString() + ' m³');
+  const allJitaBuy = (sec.items || []).reduce((acc, r) => acc + ((Number(r.jita_ask) || 0) * (Number(r.suggested_qty) || 0)), 0);
+  setTxt('imp-batch-col', fmtISK(Number(sec.multibuy_collateral) || 0));
+  setTxt('imp-all-buy', fmtISK(allJitaBuy));
+  setTxt('imp-batch-freight', fmtISK(Number(sec.multibuy_freight) || 0));
+  setTxt('imp-batch-profit', '+' + fmtISK(Number(sec.multibuy_profit) || 0));
+  setTxt('imp-item-count', `${sec.count || 0} items`);
+  const sellerTag = (isCj && sec.character_name) ? ` [Seller: ${sec.character_name}]` : '';
+  setTxt('imp-table-title', isCj
+    ? `Jita 4-4 → C-J6MT (1st Taj Mahgoon) Import Opportunities${sellerTag}`
+    : 'Jita 4-4 → Amarr VIII (Oris) Import Opportunities');
+  const switchBtn = document.getElementById('btn-switch-cj6mt-char');
+  if (switchBtn && importData.cj6mt?.character_name) {
+    switchBtn.innerText = `C-J6MT Seller: ${importData.cj6mt.character_name} (Switch)`;
+  }
+
+  const freightEl = document.getElementById('imp-batch-freight');
+  if (sec.pricing_model === 'hisec_tiered') {
+    const splitNote = sec.split_plan_top20 ? ` | Top-100 Split: ${sec.split_plan_top20}` : '';
+    setTxt('imp-rate-note', `Highsec ${sec.warps || 35}w Tiered (<=1.5B: 52.5M DST / 87.5M Freighter)${splitNote}`);
+    if (freightEl) freightEl.title = `All-Items Split (${sec.count} items): ${sec.split_plan_all || ''} (${fmtISK(sec.all_freight || 0)})`;
+  } else {
+    const colPct = ((Number(sec.collateral_pct) || 0) * 100).toFixed(1);
+    const minNote = sec.min_freight > 0 ? ` | ${fmtISK(sec.min_freight)} Min / ${fmtISK(sec.max_freight)} Cap` : '';
+    const trackNote = (isCj && sec.tracking_snapshots)
+      ? ` | Burn Tracking: ${(Number(sec.tracking_days) || 0).toFixed(1)}d (${sec.tracking_snapshots} snaps, ${Math.round(Number(sec.tracking_confidence_pct) || 0)}% real)`
+      : '';
+    setTxt('imp-rate-note', `Courier: ${sec.freight_rate_m3} ISK/m³ | ${colPct}% Collateral${minNote}${trackNote}`);
+    if (freightEl) freightEl.title = '';
+  }
+
+  const hideStocked = document.getElementById('imp-hide-stocked')?.checked ?? true;
+  const rawItems = sec.items || [];
+  const items = hideStocked ? rawItems.filter(r => (Number(r.suggested_qty) || 0) > 0) : rawItems;
+  const tfoot = document.getElementById('imports-table-foot');
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="p-6 text-center text-slate-500">All candidate items are already stocked or no profitable opportunities found. Uncheck "Hide Stocked" to inspect existing inventory.</td></tr>';
+    if (tfoot) tfoot.innerHTML = '';
+    return;
+  }
+
+  tbody.innerHTML = items.map((r, i) => {
+    const st = String(r.status || 'ACTIVE');
+    let badgeClass = 'bg-slate-800 text-slate-300 border-slate-700';
+    if (st === 'FULLY_STOCKED') badgeClass = 'bg-emerald-950/80 text-emerald-300 border-emerald-600/80';
+    else if (st === 'RESTOCK') badgeClass = 'bg-indigo-950/80 text-indigo-300 border-indigo-600/80';
+    else if (st === 'LOW_STOCK') badgeClass = 'bg-amber-950/80 text-amber-300 border-amber-600/80';
+    else if (st.startsWith('STOCKOUT')) badgeClass = 'bg-rose-950/80 text-rose-300 border-rose-600/80';
+    else if (st === 'ACTIVE_BOOK' || st === 'UNDERCUT_LIST') badgeClass = 'bg-emerald-950/80 text-emerald-300 border-emerald-700/80';
+
+    const qty = Number(r.suggested_qty) || 0;
+    const targetQty = Number(r.target_qty) || qty;
+    const localStock = Number(r.my_local_stock) || 0;
+    const sellQty = Number(r.my_sell_qty) || 0;
+    const hangarQty = Number(r.my_hangar_qty) || 0;
+    const jitaQty = Number(r.my_jita_qty) || 0;
+    const m3 = Number(r.m3) || 0;
+    const jitaAsk = Number(r.jita_ask) || 0;
+    const freightCost = Number(r.freight_cost) || 0;
+    const suggSell = Number(r.suggested_sell) || 0;
+    const marginPct = Number(r.margin_pct) || 0;
+    const soloMarginPct = Number(r.solo_margin_pct) || marginPct;
+    const iskPerM3 = Number(r.isk_per_m3) || 0;
+    const estTotalProfit = Number(r.est_total_profit) || 0;
+
+    const iskM3 = iskPerM3 >= 1e6 ? (iskPerM3 / 1e6).toFixed(1) + 'M' : Math.round(iskPerM3).toLocaleString();
+    const volTip = r.vol_source && r.vol_source !== 'REGIONAL_30D'
+      ? `title="C-J6MT Burn: ~${r.dest_daily_vol}/day [${r.vol_source}]${r.observed_daily_vol !== null && r.observed_daily_vol !== undefined ? ` (Observed: ${r.observed_daily_vol}/d)` : ''} | Jita: ${r.jita_vol_30d}/d | Shelf Depth: ${r.dest_sell_vol}"`
+      : `title="Amarr 30d Daily Vol: ${r.dest_daily_vol}/day"`;
+
+    return `
+      <tr class="hover:bg-slate-800/40 transition" ${volTip}>
+        <td class="p-3 text-slate-500">${i + 1}</td>
+        <td class="p-3"><span class="border px-2 py-0.5 rounded text-[10px] font-bold ${badgeClass}">${st}</span></td>
+        <td class="p-3 font-semibold text-white">
+          <a href="https://evetycoon.com/market/${r.type_id}" target="_blank" class="hover:text-eveCyan hover:underline">${r.name}</a>
+          <span class="text-[10px] text-slate-500 ml-1">(${r.group || ''})</span>
+        </td>
+        <td class="p-3 text-right font-semibold ${qty > 0 ? 'text-slate-200' : 'text-emerald-400'}">
+          ${qty.toLocaleString()}
+          ${localStock > 0 ? `<div class="text-[10px] text-slate-400 font-normal">of ${targetQty.toLocaleString()} target</div>` : ''}
+        </td>
+        <td class="p-3 text-right text-[11px]">
+          ${localStock > 0
+            ? `<span class="text-cyan-300 font-semibold">${localStock.toLocaleString()} on hand</span>
+               <div class="text-[10px] text-slate-400">${[
+                 sellQty > 0 ? `${sellQty} listed` : '',
+                 hangarQty > 0 ? `${hangarQty} hangar` : '',
+                 jitaQty > 0 ? `${jitaQty} Jita` : ''
+               ].filter(Boolean).join(' · ')}</div>`
+            : '<span class="text-slate-600">0</span>'}
+        </td>
+        <td class="p-3 text-right text-slate-400">${Math.round(m3 * qty).toLocaleString()}</td>
+        <td class="p-3 text-right text-slate-300">${fmtISK(jitaAsk)}</td>
+        <td class="p-3 text-right text-eveAmber/90">${fmtISK(freightCost)}</td>
+        <td class="p-3 text-right text-white font-semibold">${fmtISK(suggSell)}</td>
+        <td class="p-3 text-right text-eveCyan font-bold">${marginPct.toFixed(1)}% <span class="text-[10px] text-slate-500 font-normal">(${soloMarginPct.toFixed(1)}%)</span></td>
+        <td class="p-3 text-right text-slate-300">${iskM3}</td>
+        <td class="p-3 text-right text-eveGreen font-bold">+${fmtISK(estTotalProfit)}</td>
+      </tr>`;
+  }).join('');
+
+  if (tfoot) {
+    const totQty = items.reduce((s, r) => s + (Number(r.suggested_qty) || 0), 0);
+    const totM3 = items.reduce((s, r) => s + ((Number(r.m3) || 0) * (Number(r.suggested_qty) || 0)), 0);
+    const totJita = items.reduce((s, r) => s + ((Number(r.jita_ask) || 0) * (Number(r.suggested_qty) || 0)), 0);
+    const totFreight = items.reduce((s, r) => s + ((Number(r.freight_cost) || 0) * (Number(r.suggested_qty) || 0)), 0);
+    const totProf = items.reduce((s, r) => s + (Number(r.est_total_profit) || 0), 0);
+
+    tfoot.innerHTML = `
+      <tr>
+        <td class="p-3 text-slate-400" colspan="3">TOTAL (${items.length} ITEMS)</td>
+        <td class="p-3 text-right text-white">${totQty.toLocaleString()}</td>
+        <td class="p-3"></td>
+        <td class="p-3 text-right text-slate-300">${Math.round(totM3).toLocaleString()} m³</td>
+        <td class="p-3 text-right text-eveCyan">${fmtISK(totJita)}</td>
+        <td class="p-3 text-right text-eveAmber">${fmtISK(totFreight)}</td>
+        <td class="p-3 text-right text-slate-500" colspan="3">Total Jita Buy &amp; Marginal Freight</td>
+        <td class="p-3 text-right text-eveGreen">+${fmtISK(totProf)}</td>
+      </tr>`;
+  }
+}
+
+async function copyImportMultibuy(btn) {
+  const sec = importData?.[currentImportDest];
+  const actionable = (sec?.items || []).filter(r => (Number(r.suggested_qty) || 0) > 0).slice(0, 100);
+  const text = actionable.length
+    ? actionable.map(r => `${r.name} ${Number(r.suggested_qty)}`).join('\n')
+    : (sec?.multibuy_text || '');
+  if (!text) {
+    alert('No MultiBuy items available to copy.');
+    return;
+  }
+  const ok = await copyToClipboard(text);
+  const orig = btn.innerText;
+  btn.innerText = ok ? `Copied Top-${actionable.length || 100} MultiBuy!` : 'Copy Failed';
+  setTimeout(() => { btn.innerText = orig; }, 2000);
+}
+
+let lastBundleData = null;
+
+function toggleImportBundler() {
+  const drawer = document.getElementById('import-bundler-drawer');
+  if (drawer) drawer.classList.toggle('hidden');
+}
+
+async function runImportBundler(fromHangar = false) {
+  const box = document.getElementById('imp-bundle-results');
+  if (!box) return;
+  box.innerHTML = '<div class="text-xs text-slate-400 p-4 text-center">Packing items into minimum-cost courier contracts...</div>';
+
+  const rawText = fromHangar ? null : (document.getElementById('imp-bundle-paste')?.value || '');
+  const rateOverride = currentImportDest === 'amarr'
+    ? (parseInt(document.getElementById('imp-amarr-warps')?.value || '35', 10))
+    : (parseFloat(document.getElementById('imp-cj6mt-rate')?.value || '800'));
+
+  try {
+    const res = await fetch('/api/import/bundles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dest_key: currentImportDest,
+        raw_text: rawText,
+        from_jita_hangar: fromHangar,
+        rate_override: rateOverride
+      })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    lastBundleData = data;
+
+    if (!data.bundles || !data.bundles.length) {
+      box.innerHTML = '<div class="text-xs text-slate-500 p-4 border border-dashed border-slate-800 rounded text-center">No matching purchased items found to bundle.</div>';
+      return;
+    }
+
+    const headerHtml = `
+      <div class="flex flex-wrap justify-between items-center bg-slate-900 border border-slate-700 px-3 py-2 rounded text-xs">
+        <span class="font-bold text-white">${data.destination}: ${data.contract_count} Optimal Contract${data.contract_count > 1 ? 's' : ''}</span>
+        <span class="text-slate-300">Total Vol: <strong>${Math.round(data.total_m3).toLocaleString()} m³</strong> | Collateral: <strong>${fmtISK(data.total_collateral)}</strong> | Total Reward: <strong class="text-eveAmber">${fmtISK(data.total_reward)}</strong></span>
+      </div>`;
+
+    const cardsHtml = data.bundles.map((b, idx) => `
+      <div class="bg-slate-900/70 border border-slate-800 rounded p-2.5 space-y-1.5 text-xs">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div class="flex items-center gap-2">
+            <span class="bg-indigo-950 text-indigo-300 border border-indigo-700 px-2 py-0.5 rounded font-bold">Contract #${b.bundle_num}</span>
+            <span class="text-eveCyan font-bold">${b.tier}</span>
+            <span class="text-slate-400">${Math.round(b.total_m3).toLocaleString()} m³ | Col: ${fmtISK(b.collateral)} | Reward: <strong class="text-eveAmber">${fmtISK(b.reward)}</strong></span>
+          </div>
+          <button onclick="copySingleBundle(${idx}, this)" class="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 px-2 py-0.5 rounded text-[11px] transition">
+            Copy Items
+          </button>
+        </div>
+        <div class="text-[11px] text-slate-300 pl-1">
+          ${b.items.map(it => `<span class="inline-block mr-3">${it.qty.toLocaleString()}x <strong class="text-white">${it.name}</strong> <span class="text-slate-500">(${fmtISK(it.collateral)})</span></span>`).join('')}
+        </div>
+      </div>`).join('');
+
+    box.innerHTML = headerHtml + cardsHtml;
+  } catch (err) {
+    box.innerHTML = `<div class="text-xs text-rose-400 p-4 text-center">Bundler error: ${err.message}</div>`;
+  }
+}
+
+async function copySingleBundle(idx, btn) {
+  const b = lastBundleData?.bundles?.[idx];
+  if (!b || !b.copy_text) return;
+  const ok = await copyToClipboard(b.copy_text);
+  const orig = btn.innerText;
+  btn.innerText = ok ? 'Copied!' : 'Failed';
+  setTimeout(() => { btn.innerText = orig; }, 1500);
+}
+
+async function checkCj6mtSellerStock() {
+  const drawer = document.getElementById('cj6mt-stock-drawer');
+  const tbody = document.getElementById('cj6mt-stock-body');
+  const summary = document.getElementById('cj6mt-stock-summary');
+  const title = document.getElementById('cj6mt-stock-title');
+  if (!drawer || !tbody) return;
+
+  drawer.classList.remove('hidden');
+  tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-slate-400">Querying C-J6MT Keepstar hangar & active sell orders...</td></tr>';
+
+  try {
+    const res = await fetch('/api/import/cj6mt-stock');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    title.innerText = `C-J6MT Seller Stock Audit — ${data.character_name} (1st Taj Mahgoon)`;
+    const warnTxt = data.structure_warning ? ` | Warning: ${data.structure_warning}` : '';
+    summary.innerText = `Hangar Units: ${data.total_hangar_units.toLocaleString()} (${fmtISK(data.est_hangar_value)}) | Active Sell Units: ${data.total_listed_units.toLocaleString()} (${fmtISK(data.est_shelf_value)})${warnTxt}`;
+
+    const items = data.items || [];
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="p-4 text-center text-slate-500">No hangar stock or active sell orders found in C-J6MT for this character.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = items.map(r => {
+      let badge = 'bg-slate-800 text-slate-300 border-slate-700';
+      if (r.status === 'UNLISTED_HANGAR') badge = 'bg-amber-950/80 text-amber-300 border-amber-600/80';
+      else if (r.status === 'UNDERCUT') badge = 'bg-rose-950/80 text-rose-300 border-rose-600/80';
+      else if (r.status === 'TOP_ASK' || r.status === 'ACTIVE + RESERVE') badge = 'bg-emerald-950/80 text-emerald-300 border-emerald-700/80';
+
+      return `
+        <tr class="hover:bg-slate-800/40">
+          <td class="p-2"><span class="border px-1.5 py-0.5 rounded text-[10px] font-bold ${badge}">${r.status}</span></td>
+          <td class="p-2 font-semibold text-white">${r.name} <span class="text-[10px] text-slate-500">(${r.group})</span></td>
+          <td class="p-2 text-right text-amber-300 font-semibold">${r.hangar_qty.toLocaleString()}</td>
+          <td class="p-2 text-right text-emerald-300 font-semibold">${r.sell_qty.toLocaleString()}</td>
+          <td class="p-2 text-right text-slate-300">${r.my_sell_price ? fmtISK(r.my_sell_price) : '--'}</td>
+          <td class="p-2 text-right text-slate-300">${r.structure_lowest_ask ? fmtISK(r.structure_lowest_ask) : 'NONE'}</td>
+          <td class="p-2 text-right text-white font-semibold">${r.recommended_sell ? fmtISK(r.recommended_sell) : '--'}</td>
+          <td class="p-2 text-right text-eveCyan font-bold">${fmtISK(r.est_total_value)}</td>
+        </tr>`;
+    }).join('');
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-rose-400">Stock audit failed: ${err.message}</td></tr>`;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('tab') === 'imports' && typeof switchTab === 'function') {
+    switchTab('imports');
+  }
+});

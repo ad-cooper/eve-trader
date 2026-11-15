@@ -109,7 +109,10 @@ def evaluate_order_action(desk_type: str, my_price: float, top_buy: float, t_sel
     if desk_type == "hold" and proximity_pct is not None and proximity_pct > 92.0:
         return "CANCEL_RECOVERED", "DIP RECOVERED (CANCEL)"
 
-    if top_buy > 0 and my_price >= (top_buy - 0.01):
+    if not top_buy or top_buy <= 0:
+        return "PATIENT", "AWAITING QUOTE"
+
+    if my_price >= (top_buy - 0.01):
         return "TOP_BOOK", "TOP BID (WINNING)"
 
     next_bid = top_buy + 0.01
@@ -131,6 +134,7 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
         live_ask = p_info.get("lowest_ask")
         live_top_buy = p_info.get("top_buy")
         item["live_ask"] = live_ask
+        item["ask_polled"] = tid in market_prices
 
         t_buy, t_sell, qty = resolve_target_prices(item, desk_type, live_ask, live_top_buy, sells)
         item["target_buy"] = t_buy
@@ -145,7 +149,7 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             item["proximity_pct"] = round((live_ask / t_sell) * 100.0, 1)
             item["diff_pct"] = round(((live_ask - t_sell) / t_sell) * 100.0, 1)
         else:
-            item["proximity_pct"] = round((item.get("target_sell", 0) / t_sell) * 100.0, 1) if t_sell > 0 else None
+            item["proximity_pct"] = None
             item["diff_pct"] = 0.0
 
         if tid in buys:
@@ -297,10 +301,15 @@ def _inject_orphaned_buys(eg: list, tac: list, hld: list, buys: dict, market_pri
         desk_key, last_sell = desk_lookup.get(tid_int, ("evergreen", 0.0))
         target_list = buckets.get(desk_key, eg)
         p_info = market_prices.get(tid_str) or {}
+        live_ask = p_info.get("lowest_ask")
         my_p = float(b.get("price", 0.0))
         qty = int(b.get("volume_remain", 1))
         escrow = float(b.get("escrow", my_p * qty))
-        fin = calc_line_financials(my_p, last_sell, qty) if last_sell > 0 else {
+        if live_ask and live_ask > 0:
+            eff_sell = float(live_ask) * (0.985 if desk_key == "evergreen" else 1.0)
+        else:
+            eff_sell = last_sell
+        fin = calc_line_financials(my_p, eff_sell, qty) if eff_sell > 0 else {
             "cost_unit": round(calc_unit_cost(my_p), 2),
             "net_proceeds_unit": 0.0,
             "profit_unit": 0.0,
@@ -308,23 +317,35 @@ def _inject_orphaned_buys(eg: list, tac: list, hld: list, buys: dict, market_pri
             "profit": 0.0,
             "net_margin": 0.0
         }
+        prox_pct = round((float(live_ask) / last_sell) * 100.0, 1) if (live_ask and last_sell > 0) else None
+        diff_pct = round(((float(live_ask) - last_sell) / last_sell) * 100.0, 1) if (live_ask and last_sell > 0) else 0.0
+        from services.blacklist import load_active_blacklist
+        bl_items, _, _ = load_active_blacklist()
+        item_name = name_map.get(tid_int, f"Type {tid_int}")
+        cancel_floor = 2.5 if desk_key == "evergreen" else (10.0 if desk_key == "hold" else 5.0)
+        is_seasonal = any(k in item_name.lower() for k in ("tetrimon", "chemal tech", "keypass", "cipher", "shortcut", "gauntlet"))
+        if is_seasonal:
+            continue
+        should_cancel = (item_name in bl_items) or eff_sell <= 0 or fin["net_margin"] < cancel_floor
+
         row = {
             "type_id": tid_int,
-            "name": name_map.get(tid_int, f"Type {tid_int}"),
+            "name": item_name,
             "qty": qty,
             "dump_freq": 0.0,
-            "target_buy": 0.0,
-            "target_sell": round(last_sell, 2),
+            "target_buy": round(my_p, 2),
+            "target_sell": round(eff_sell, 2),
             "live_ask": p_info.get("lowest_ask"),
-            "proximity_pct": None,
-            "diff_pct": 0.0,
+            "ask_polled": tid_str in market_prices,
+            "proximity_pct": prox_pct,
+            "diff_pct": diff_pct,
             "char_status": "BUY_ACTIVE",
             "my_price": my_p,
             "my_qty": qty,
             "escrow": round(escrow, 2),
-            "price_synced": False,
-            "action_code": "CANCEL_DROPPED",
-            "action_text": "DROPPED FROM LEDGER (CANCEL)"
+            "price_synced": True,
+            "action_code": "CANCEL_DROPPED" if should_cancel else "PATIENT",
+            "action_text": "DROPPED & LOW MARGIN (CANCEL)" if should_cancel else f"ROTATED OUT (HOLD +{fin['net_margin']:.1f}%)"
         }
         row.update(fin)
         target_list.insert(0, row)

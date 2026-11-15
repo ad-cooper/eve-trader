@@ -16,7 +16,6 @@ CALLBACK_URL = os.getenv("EVE_CALLBACK_URL", "http://localhost:8000/sso/callback
 SCOPES = "esi-markets.read_character_orders.v1 esi-wallet.read_character_wallet.v1 esi-assets.read_assets.v1"
 
 SSO_TOKEN_FILE = "ledgers/sso_token.json"
-SKIE_TOKEN_FILE = "token_skie_ankora.json"
 ORDERS_CACHE_FILE = "ledgers/character_orders.json"
 ASSETS_CACHE_FILE = "ledgers/character_assets.json"
 
@@ -43,21 +42,113 @@ def decode_jwt_payload(token: str) -> dict:
     payload = parts[1] + "=" * (-len(parts[1]) % 4)
     return json.loads(base64.urlsafe_b64decode(payload))
 
-def load_sso_tokens(token_file: str = SSO_TOKEN_FILE):
-    if os.path.exists(token_file):
-        try:
-            with open(token_file, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
+def _read_sso_array() -> list[dict]:
+    if not os.path.exists(SSO_TOKEN_FILE):
+        return []
+    try:
+        with open(SSO_TOKEN_FILE, "r") as f:
+            raw = json.load(f)
+        if isinstance(raw, list):
+            return [x for x in raw if isinstance(x, dict)]
+        if isinstance(raw, dict):
+            nested = raw.pop("characters", None)
+            arr = [raw] if raw.get("refresh_token") else []
+            if isinstance(nested, dict):
+                arr.extend(v for v in nested.values() if isinstance(v, dict))
+            return arr
+    except Exception:
+        pass
+    return []
+
+def load_sso_tokens(character_name: str = None):
+    arr = _read_sso_array()
+    if not arr:
+        return None
+    if not character_name:
+        return arr[0]
+    target = character_name.strip().lower()
+    for entry in arr:
+        if str(entry.get("character_name", "")).strip().lower() == target:
+            return entry
     return None
 
-def save_sso_tokens(tokens: dict, token_file: str = SSO_TOKEN_FILE):
-    parent = os.path.dirname(token_file)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(token_file, "w") as f:
-        json.dump(tokens, f, indent=2)
+def save_sso_tokens(tokens: dict, character_name: str = None):
+    os.makedirs("ledgers", exist_ok=True)
+    arr = _read_sso_array()
+    target_id = tokens.get("character_id")
+    target_name = (character_name or tokens.get("character_name") or "").strip().lower()
+
+    updated = False
+    for idx, entry in enumerate(arr):
+        same_id = target_id and entry.get("character_id") == target_id
+        same_name = target_name and str(entry.get("character_name", "")).strip().lower() == target_name
+        if same_id or same_name:
+            arr[idx] = {**entry, **tokens}
+            updated = True
+            break
+
+    if not updated:
+        arr.append(dict(tokens))
+
+    with open(SSO_TOKEN_FILE, "w") as f:
+        json.dump(arr, f, indent=2)
+
+def get_valid_access_token(character_name: str = None):
+    tokens = load_sso_tokens(character_name)
+    if not tokens or "refresh_token" not in tokens:
+        return None
+
+    # Check if existing access token is still valid (with 90s safety margin)
+    existing_acc = tokens.get("access_token")
+    if existing_acc:
+        try:
+            claims = decode_jwt_payload(existing_acc)
+            exp = claims.get("exp", 0)
+            if exp > (time.time() + 90):
+                return existing_acc
+        except Exception:
+            pass
+    headers = {
+        **get_basic_auth_header(),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Host": "login.eveonline.com"
+    }
+    data = {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}
+    label = character_name or tokens.get("character_name") or "primary"
+    try:
+        res = requests.post(EVE_TOKEN_URL, data=data, headers=headers, timeout=10)
+        if res.status_code == 200:
+            new_data = res.json()
+            tokens["access_token"] = new_data["access_token"]
+            tokens["refresh_token"] = new_data.get("refresh_token", tokens["refresh_token"])
+            save_sso_tokens(tokens, character_name)
+            return tokens["access_token"]
+        else:
+            print(f"[!] Token Refresh Rejected ({label}): HTTP {res.status_code} - {res.text}")
+    except Exception as e:
+        print(f"[!] Token refresh failed ({label}): {str(e)}")
+    return None
+
+def get_character_auth(character_name: str = None) -> tuple[str | None, int | None]:
+    """Returns (valid_access_token, character_id) for a pilot in the ledgers/sso_token.json array."""
+    tokens = load_sso_tokens(character_name)
+    if not tokens:
+        return None, None
+    access_token = get_valid_access_token(character_name)
+    char_id = tokens.get("character_id") or tokens.get("CharacterID")
+    if not char_id and access_token:
+        claims = decode_jwt_payload(access_token)
+        sub = claims.get("sub", "")
+        if ":" in sub:
+            char_id = int(sub.split(":")[-1])
+            tokens["character_id"] = char_id
+            if not tokens.get("character_name") and claims.get("name"):
+                tokens["character_name"] = claims["name"]
+            save_sso_tokens(tokens, character_name)
+    return access_token, int(char_id) if char_id else None
+
+
+
 
 def exchange_auth_code(code: str) -> dict:
     if not CLIENT_SECRET or CLIENT_SECRET == "YOUR_CLIENT_SECRET_HERE":
@@ -95,56 +186,7 @@ def exchange_auth_code(code: str) -> dict:
         print(f"[!] Exception during token exchange: {str(e)}")
     return {}
 
-def get_valid_access_token(token_file: str = SSO_TOKEN_FILE):
-    tokens = load_sso_tokens(token_file)
-    if not tokens or "refresh_token" not in tokens:
-        return None
 
-    # Check if existing access token is still valid (with 90s safety margin)
-    existing_acc = tokens.get("access_token")
-    if existing_acc:
-        try:
-            claims = decode_jwt_payload(existing_acc)
-            exp = claims.get("exp", 0)
-            if exp > (time.time() + 90):
-                return existing_acc
-        except Exception:
-            pass
-    headers = {
-        **get_basic_auth_header(),
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Host": "login.eveonline.com"
-    }
-    data = {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}
-    try:
-        res = requests.post(EVE_TOKEN_URL, data=data, headers=headers, timeout=10)
-        if res.status_code == 200:
-            new_data = res.json()
-            tokens["access_token"] = new_data["access_token"]
-            tokens["refresh_token"] = new_data.get("refresh_token", tokens["refresh_token"])
-            save_sso_tokens(tokens, token_file)
-            return tokens["access_token"]
-        else:
-            print(f"[!] Token Refresh Rejected ({token_file}): HTTP {res.status_code} - {res.text}")
-    except Exception as e:
-        print(f"[!] Token refresh failed ({token_file}): {str(e)}")
-    return None
-
-def get_character_auth(token_file: str = SSO_TOKEN_FILE) -> tuple[str | None, int | None]:
-    """Returns (valid_access_token, character_id) for any SSO token file."""
-    tokens = load_sso_tokens(token_file)
-    if not tokens:
-        return None, None
-    access_token = get_valid_access_token(token_file)
-    char_id = tokens.get("character_id") or tokens.get("CharacterID")
-    if not char_id and access_token:
-        claims = decode_jwt_payload(access_token)
-        sub = claims.get("sub", "")
-        if ":" in sub:
-            char_id = int(sub.split(":")[-1])
-            tokens["character_id"] = char_id
-            save_sso_tokens(tokens, token_file)
-    return access_token, int(char_id) if char_id else None
 
 def fetch_character_orders():
     tokens = load_sso_tokens()
