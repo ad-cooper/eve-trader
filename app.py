@@ -10,6 +10,7 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.staticfiles import StaticFiles
@@ -22,9 +23,6 @@ from services.accounting import calculate_performance, load_performance
 from services.ledgers import get_annotated_desks, load_sniper_deals, load_cached_orders
 from services.market import update_ledger_market_prices
 
-app = FastAPI(title="EVE Trading Desk")
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
 scheduler = AsyncIOScheduler(timezone="UTC")
 
 STATE = {
@@ -99,21 +97,32 @@ def _initial_startup_warmup():
         except Exception as e:
             print(f"[!] Startup warmup error in {fn.__name__}: {e}")
 
-@app.on_event("startup")
-async def startup_event():
-    threading.Thread(target=_initial_startup_warmup, daemon=True).start()
-    scheduler.add_job(run_ledger_subprocess, trigger="cron", hour=11, minute=30, id="daily_ledgers")
-    scheduler.add_job(fetch_character_orders, trigger="interval", minutes=5, id="poll_orders")
-    scheduler.add_job(calculate_performance, trigger="interval", minutes=15, id="calc_perf")
-    scheduler.add_job(update_ledger_market_prices, trigger="interval", minutes=3, id="poll_market_prices")
-    scheduler.add_job(refresh_import_opportunities_job, trigger="interval", minutes=30, id="poll_import_opportunities", max_instances=1, coalesce=True)
-    scheduler.start()
-    def _warmup_imports_if_stale():
-        import time
-        cache_path = "ledgers/import_suggestions_cache.json"
-        if not os.path.exists(cache_path) or (time.time() - os.path.getmtime(cache_path)) > 1800:
-            refresh_import_opportunities_job()
-    threading.Thread(target=_warmup_imports_if_stale, daemon=True).start()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        threading.Thread(target=_initial_startup_warmup, daemon=True).start()
+        scheduler.add_job(run_ledger_subprocess, trigger="cron", hour=11, minute=30, id="daily_ledgers")
+        scheduler.add_job(fetch_character_orders, trigger="interval", minutes=5, id="poll_orders")
+        scheduler.add_job(calculate_performance, trigger="interval", minutes=15, id="calc_perf")
+        scheduler.add_job(update_ledger_market_prices, trigger="interval", minutes=3, id="poll_market_prices")
+        scheduler.add_job(refresh_import_opportunities_job, trigger="interval", minutes=30, id="poll_import_opportunities", max_instances=1, coalesce=True)
+        scheduler.start()
+
+        def _warmup_imports_if_stale():
+            import time
+            cache_path = "ledgers/import_suggestions_cache.json"
+            if not os.path.exists(cache_path) or (time.time() - os.path.getmtime(cache_path)) > 1800:
+                refresh_import_opportunities_job()
+
+        threading.Thread(target=_warmup_imports_if_stale, daemon=True).start()
+    yield
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="EVE Trading Desk", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
 @app.get("/", response_class=HTMLResponse)
