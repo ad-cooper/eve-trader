@@ -32,15 +32,6 @@ from services.esi import (
     fetch_lowest_sell_order,
     fetch_top_buy_order,
     fetch_telemetry_pair,
-    resolve_primary_character,
-    fetch_character_locations_stock,
-)
-
-from services.esi import (
-    create_esi_session as create_session,
-    fetch_lowest_sell_order,
-    fetch_top_buy_order,
-    fetch_telemetry_pair,
     fetch_jita_book_top,
     resolve_primary_character,
     fetch_character_locations_stock,

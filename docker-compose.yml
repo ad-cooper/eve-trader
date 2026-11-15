@@ -28,6 +28,7 @@ services:
       - ./static:/app/static
       - ./services:/app/services
       - ./workflows:/app/workflows
+      - ./routers:/app/routers
       - ./scripts:/app/scripts
       - ./tests:/app/tests
       - ./app.py:/app/app.py

@@ -19,9 +19,13 @@ def test_all_services_import_cleanly():
         "services.sde",
         "services.staging_diff",
         "workflows.daily_pipeline",
+        "workflows.scheduler",
+        "workflows.dashboard",
         "workflows.buy_orders",
         "workflows.sell_advisor",
         "workflows.imports",
+        "routers.auth",
+        "routers.api",
     ]
     for mod_name in service_modules:
         mod = importlib.import_module(mod_name)
