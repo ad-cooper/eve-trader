@@ -358,21 +358,63 @@ def fetch_wallet_balance(force_refresh: bool = False) -> float:
         return cached_val
 
 
-def fetch_wallet_transactions():
+WALLET_TX_CACHE_FILE = "data/wallet_transactions_cache.json"
+_MEM_WALLET_TX_CACHE: dict = {"character_id": None, "timestamp": 0.0, "transactions": []}
+
+
+def fetch_wallet_transactions(force_refresh: bool = False, max_age_seconds: int = 300) -> list:
+    """
+    Fetches character wallet transactions with a 300s memory + disk cache
+    and graceful fallback on ESI 429 / transient network failures.
+    """
     tokens = load_sso_tokens()
     if not tokens or not tokens.get("character_id"):
         return []
+
+    cid = int(tokens["character_id"])
+    now = time.time()
+
+    if (
+        not force_refresh
+        and _MEM_WALLET_TX_CACHE.get("character_id") == cid
+        and (now - _MEM_WALLET_TX_CACHE.get("timestamp", 0.0)) < max_age_seconds
+    ):
+        return _MEM_WALLET_TX_CACHE.get("transactions", [])
+
+    cached_txs = []
+    if os.path.exists(WALLET_TX_CACHE_FILE):
+        try:
+            with open(WALLET_TX_CACHE_FILE, "r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            if cdata.get("character_id") == cid:
+                cached_txs = cdata.get("transactions", [])
+                if not force_refresh and (now - float(cdata.get("timestamp", 0.0))) < max_age_seconds:
+                    _MEM_WALLET_TX_CACHE.update({"character_id": cid, "timestamp": cdata["timestamp"], "transactions": cached_txs})
+                    return cached_txs
+        except Exception:
+            pass
+
     token = get_valid_access_token()
     if not token:
-        return []
-    url = f"{ESI_BASE_URL}/characters/{tokens['character_id']}/wallet/transactions/?datasource=tranquility"
+        return cached_txs
+
+    url = f"{ESI_BASE_URL}/characters/{cid}/wallet/transactions/?datasource=tranquility"
     try:
         res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         if res.status_code == 200:
-            return res.json()
+            txs = res.json()
+            _MEM_WALLET_TX_CACHE.update({"character_id": cid, "timestamp": now, "transactions": txs})
+            try:
+                os.makedirs(os.path.dirname(WALLET_TX_CACHE_FILE), exist_ok=True)
+                with open(WALLET_TX_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"character_id": cid, "timestamp": now, "transactions": txs}, f)
+            except Exception:
+                pass
+            return txs
+        return cached_txs
     except Exception as e:
-        print(f"[!] Wallet fetch failed: {str(e)}")
-    return []
+        print(f"[!] Wallet transactions fetch failed: {str(e)}")
+        return cached_txs
 
 def fetch_character_assets():
     tokens = load_sso_tokens()
@@ -651,31 +693,61 @@ def fetch_lowest_sell_order(session: requests.Session, type_id: int, station_id:
     return type_id, None
 
 
-def fetch_top_buy_order(session: requests.Session, type_id: int, station_id: int = JITA_STATION_ID, region_id: int = REGION_THE_FORGE):
+JITA_SYSTEM_ID = 30000142
+PERIMETER_SYSTEM_ID = 30000144
+JUMP_ORDER_RANGES = {"1", "2", "3", "4", "5", "10", "20", "30", "40"}
+
+
+def extract_top_buy_for_station(
+    orders: list[dict],
+    station_id: int = JITA_STATION_ID,
+    system_id: int = JITA_SYSTEM_ID,
+    neighbor_system_ids: set[int] | None = None,
+) -> float | None:
+    """
+    Returns the highest competing buy order price reachable from `station_id`.
+    Public ESI /markets/{region_id}/orders/ only returns NPC station orders
+    (Upwell structure orders are never returned on regional market endpoints).
+    """
+    if not orders:
+        return None
+    neighbors = neighbor_system_ids if neighbor_system_ids is not None else (
+        {PERIMETER_SYSTEM_ID} if system_id == JITA_SYSTEM_ID else set()
+    )
+    competing: list[float] = []
+    for o in orders:
+        if not o.get("is_buy_order", True):
+            continue
+        loc = o.get("location_id")
+        sys_id = o.get("system_id")
+        rng = str(o.get("range", "")).strip().lower()
+
+        if loc == station_id:
+            competing.append(float(o["price"]))
+        elif rng == "region":
+            competing.append(float(o["price"]))
+        elif sys_id == system_id and rng != "station":
+            competing.append(float(o["price"]))
+        elif sys_id in neighbors and rng in JUMP_ORDER_RANGES:
+            competing.append(float(o["price"]))
+
+    return max(competing) if competing else None
+
+
+def fetch_top_buy_order(
+    session: requests.Session,
+    type_id: int,
+    station_id: int = JITA_STATION_ID,
+    region_id: int = REGION_THE_FORGE,
+):
     url = f"{ESI_BASE_URL}/markets/{region_id}/orders/?datasource=tranquility&order_type=buy&type_id={type_id}"
     try:
         r = session.get(url, timeout=7)
         if r.status_code == 200:
-            orders = r.json()
-            if not orders:
-                return type_id, None
-            competing = []
-            for o in orders:
-                loc = o.get("location_id")
-                rng = str(o.get("range", "")).lower()
-                if loc == station_id:
-                    competing.append(o["price"])
-                elif rng == "region":
-                    competing.append(o["price"])
-                elif loc and loc >= 1_000_000_000_000 and rng in ["1", "2", "3", "4", "5", "region"]:
-                    competing.append(o["price"])
-            if competing:
-                return type_id, max(competing)
-            return type_id, max(o["price"] for o in orders)
+            return type_id, extract_top_buy_for_station(r.json(), station_id=station_id)
     except Exception:
         pass
     return type_id, None
-
 
 def fetch_telemetry_pair(session: requests.Session, type_id: int):
     _, ask = fetch_lowest_sell_order(session, type_id)
@@ -683,10 +755,11 @@ def fetch_telemetry_pair(session: requests.Session, type_id: int):
     return type_id, ask, buy
 
 
-def fetch_jita_book_top(type_id: int) -> tuple[int, float, float]:
+def fetch_jita_book_top(type_id: int, session: requests.Session | None = None) -> tuple[int, float, float]:
     """Fetches (type_id, top_buy, lowest_sell) in Jita 4-4 via a single ESI order_type=all query."""
+    client = session or requests
     try:
-        r = requests.get(
+        r = client.get(
             f"{ESI_BASE_URL}/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=all&type_id={type_id}",
             headers=ESI_HEADERS,
             timeout=8,
@@ -694,12 +767,11 @@ def fetch_jita_book_top(type_id: int) -> tuple[int, float, float]:
         if r.status_code != 200:
             return type_id, 0.0, 0.0
         orders = r.json()
-        jita_buys = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and o.get("is_buy_order")]
+        top_buy = extract_top_buy_for_station(orders, station_id=JITA_STATION_ID) or 0.0
         jita_sells = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and not o.get("is_buy_order")]
-        return type_id, (max(jita_buys) if jita_buys else 0.0), (min(jita_sells) if jita_sells else 0.0)
+        return type_id, top_buy, (min(jita_sells) if jita_sells else 0.0)
     except Exception:
         return type_id, 0.0, 0.0
-
 
 def fetch_universe_names(ids: list[int]) -> dict[int, str]:
     """Resolves EVE universe IDs to names via POST /universe/names/."""

@@ -108,7 +108,7 @@ def scan_orders_for_type(session, tid: int):
 
 def main():
     parser = argparse.ArgumentParser(description="Live Deal Sniper")
-    parser.add_argument("--limit", type=int, default=1200, help="Number of liquid items to scan (default: 1200)")
+    parser.add_argument("--limit", type=int, default=600, help="Number of liquid items to scan (default: 600)")
     parser.add_argument("--mode", type=str, default="all", help="Scan mode compatibility flag")
     args = parser.parse_args()
 

@@ -27,55 +27,24 @@ from services.accounting import (
     calc_line_financials,
 )
 
-def create_session():
-    session = requests.Session()
-    retries = Retry(total=2, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
-    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=retries)
-    session.mount("https://", adapter)
-    session.headers.update({"User-Agent": "EVE-Desk-MarketEngine/2.0"})
-    return session
+from services.esi import (
+    create_esi_session as create_session,
+    fetch_lowest_sell_order,
+    fetch_top_buy_order,
+    fetch_telemetry_pair,
+    resolve_primary_character,
+    fetch_character_locations_stock,
+)
 
-def fetch_lowest_sell_order(session: requests.Session, type_id: int):
-    url = f"https://esi.evetech.net/latest/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=sell&type_id={type_id}"
-    try:
-        r = session.get(url, timeout=7)
-        if r.status_code == 200:
-            orders = [o for o in r.json() if o.get("location_id") == JITA_STATION_ID]
-            if orders:
-                return type_id, min(o["price"] for o in orders)
-    except Exception:
-        pass
-    return type_id, None
-
-def fetch_top_buy_order(session: requests.Session, type_id: int):
-    url = f"https://esi.evetech.net/latest/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=buy&type_id={type_id}"
-    try:
-        r = session.get(url, timeout=7)
-        if r.status_code == 200:
-            orders = r.json()
-            if not orders:
-                return type_id, None
-            competing = []
-            for o in orders:
-                loc = o.get("location_id")
-                rng = str(o.get("range", "")).lower()
-                
-                # 1. Direct Jita 4-4 station order
-                if loc == JITA_STATION_ID:
-                    competing.append(o["price"])
-                # 2. Region-wide order
-                elif rng == "region":
-                    competing.append(o["price"])
-                # 3. Upwell Citadel in Jita/Perimeter hub covering Jita 4-4
-                elif loc and loc >= 1_000_000_000_000 and rng in ["1", "2", "3", "4", "5", "region"]:
-                    competing.append(o["price"])
-
-            if competing:
-                return type_id, max(competing)
-            return type_id, max(o["price"] for o in orders)
-    except Exception:
-        pass
-    return type_id, None
+from services.esi import (
+    create_esi_session as create_session,
+    fetch_lowest_sell_order,
+    fetch_top_buy_order,
+    fetch_telemetry_pair,
+    fetch_jita_book_top,
+    resolve_primary_character,
+    fetch_character_locations_stock,
+)
 
 def fetch_station_asks_bulk(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
     """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""
@@ -125,126 +94,13 @@ def ensure_jita_asks(session: requests.Session, tids: list[int], jita_asks: dict
                 jita_asks[tid] = float(ask) if (ask and ask > 0) else None
 
 
-def resolve_primary_character() -> tuple[str | None, str | None, int | None]:
-    """Resolves (character_name, access_token, character_id) for the primary Jita character."""
-    sso_path = "ledgers/sso_token.json"
-    if not os.path.exists(sso_path):
-        return None, None, None
-    try:
-        from services.esi import get_character_auth
-        with open(sso_path, "r", encoding="utf-8") as f:
-            sso = json.load(f)
-        if isinstance(sso, list) and sso and isinstance(sso[0], dict):
-            cname = sso[0].get("character_name")
-        elif isinstance(sso, dict):
-            cname = sso.get("character_name")
-        else:
-            cname = None
-        if cname:
-            tok, cid = get_character_auth(cname)
-            return cname, tok, int(cid) if cid else None
-    except Exception:
-        pass
-    return None, None, None
-
-
-def fetch_character_locations_stock(
-    character_id: int | None,
-    access_token: str | None,
-    location_ids: list[int],
-) -> dict[int, dict[int, dict]]:
-    """
-    Fetches a character's hangar assets (walking nested container chains) and active sell orders
-    across multiple `location_ids` in a single ESI pass.
-    Returns {location_id: {type_id: {'hangar_qty': int, 'sell_qty': int, 'my_lowest_sell': float|None}}}.
-    """
-    target_locs = {int(loc) for loc in location_ids if loc}
-    result: dict[int, dict[int, dict]] = {loc: {} for loc in target_locs}
-    if not character_id or not access_token or not target_locs:
-        return result
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-    all_assets = []
-    page = 1
-    while True:
-        try:
-            r = requests.get(
-                f"https://esi.evetech.net/latest/characters/{character_id}/assets/?datasource=tranquility&page={page}",
-                headers=headers,
-                timeout=10,
-            )
-            if r.status_code != 200:
-                break
-            rows = r.json()
-            if not rows:
-                break
-            all_assets.extend(rows)
-            total_pages = int(r.headers.get("X-Pages", 1))
-            if page >= total_pages:
-                break
-            page += 1
-        except Exception:
-            break
-
-    parent_map = {
-        int(a["item_id"]): int(a["location_id"])
-        for a in all_assets
-        if "item_id" in a and "location_id" in a
-    }
-
-    def resolve_target_loc(loc_id: int) -> int | None:
-        seen = set()
-        cur = loc_id
-        while cur and cur not in seen:
-            if cur in target_locs:
-                return cur
-            seen.add(cur)
-            cur = parent_map.get(cur)
-        return None
-
-    for a in all_assets:
-        matched_loc = resolve_target_loc(int(a.get("location_id") or 0))
-        if matched_loc is None:
-            continue
-        flag = str(a.get("location_flag") or "")
-        if flag not in ("Hangar", "Unlocked", "AutoFit", "Cargo", "FleetHangar", "ShipHangar"):
-            continue
-        tid = int(a["type_id"])
-        qty = int(a.get("quantity", 1))
-        entry = result[matched_loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
-        entry["hangar_qty"] += qty
-
-    try:
-        r_ord = requests.get(
-            f"https://esi.evetech.net/latest/characters/{character_id}/orders/?datasource=tranquility",
-            headers=headers,
-            timeout=10,
-        )
-        if r_ord.status_code == 200:
-            for o in r_ord.json():
-                loc = int(o.get("location_id") or 0)
-                if loc not in target_locs or o.get("is_buy_order"):
-                    continue
-                tid = int(o["type_id"])
-                vol = int(o.get("volume_remain", 0))
-                price = float(o.get("price", 0.0))
-                entry = result[loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
-                entry["sell_qty"] += vol
-                if price > 0 and (entry["my_lowest_sell"] is None or price < entry["my_lowest_sell"]):
-                    entry["my_lowest_sell"] = price
-    except Exception:
-        pass
-
-    return result
-
-
-def fetch_telemetry_pair(session: requests.Session, type_id: int):
-    _, ask = fetch_lowest_sell_order(session, type_id)
-    _, buy = fetch_top_buy_order(session, type_id)
-    return type_id, ask, buy
-
 def update_ledger_market_prices():
-    from services.ledgers import load_desk_csv, get_desk_profile, load_cached_orders
+    """
+    Updates cached Jita 4-4 ask/buy telemetry using bulk Fuzzwork asks (100 IDs/call)
+    for all ledger items, and targeted ESI order_type=all calls only for active buy orders
+    or items missing from Fuzzwork.
+    """
+    from services.ledgers import load_desk_csv, load_cached_orders
     eg = load_desk_csv("evergreen_ledger.csv")
     tac = load_desk_csv("tactical_ledger.csv")
     hld = load_desk_csv("hold_ledger.csv")
@@ -252,31 +108,43 @@ def update_ledger_market_prices():
 
     tid_set = {int(it["type_id"]) for it in all_items if it.get("type_id")}
 
-    # Include active ESI buy/sell order type_ids so rotated-out incumbent rows stay polled
     orders = load_cached_orders() or {}
-    for bucket in ("buys", "sells"):
-        for k in (orders.get(bucket) or {}).keys():
-            if str(k).isdigit():
-                tid_set.add(int(k))
+    active_buy_tids = {int(k) for k in (orders.get("buys") or {}).keys() if str(k).isdigit()}
+    active_sell_tids = {int(k) for k in (orders.get("sells") or {}).keys() if str(k).isdigit()}
+    tid_set |= active_buy_tids | active_sell_tids
 
     if not tid_set:
         return {}
 
-    unique_tids = list(tid_set)
+    unique_tids = sorted(tid_set)
     session = create_session()
     prev_cache = load_market_prices_cache()
-    prices = {}
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(fetch_telemetry_pair, session, tid): tid for tid in unique_tids}
-        for fut in as_completed(futures):
-            tid, ask, buy = fut.result()
-            prev = prev_cache.get(str(tid)) or {}
-            prices[str(tid)] = {
-                "lowest_ask": ask if (ask and ask > 0) else prev.get("lowest_ask"),
-                "top_buy": buy if (buy and buy > 0) else prev.get("top_buy"),
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            }
+    # 1. Bulk-fetch lowest asks across all ledger + active items in ~2 Fuzzwork requests
+    bulk_asks = fetch_station_asks_bulk(session, JITA_STATION_ID, unique_tids)
+
+    # 2. Only hit ESI order_type=all for active buy orders (need top_buy) or uncached asks
+    esi_target_tids = sorted(active_buy_tids | {tid for tid in unique_tids if tid not in bulk_asks})
+    esi_books: dict[int, tuple[float, float]] = {}
+    if esi_target_tids:
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            futures = {executor.submit(fetch_jita_book_top, tid, session): tid for tid in esi_target_tids}
+            for fut in as_completed(futures):
+                tid, top_b, low_s = fut.result()
+                esi_books[tid] = (top_b, low_s)
+
+    prices = {}
+    for tid in unique_tids:
+        prev = prev_cache.get(str(tid)) or {}
+        top_b, low_s = esi_books.get(tid, (0.0, 0.0))
+        ask = low_s if low_s > 0 else bulk_asks.get(tid)
+        buy = top_b if top_b > 0 else None
+        prices[str(tid)] = {
+            "lowest_ask": ask if (ask and ask > 0) else prev.get("lowest_ask"),
+            "top_buy": buy if (buy and buy > 0) else prev.get("top_buy"),
+            "timestamp": now_str,
+        }
 
     os.makedirs("ledgers", exist_ok=True)
     with open(MARKET_CACHE_FILE, "w") as f:
@@ -880,12 +748,8 @@ def get_live_multisell_prices(raw_text: str = None, force_refresh: bool = False)
 
     session = create_session()
     type_ids = [t["type_id"] for t in targets]
-    lowest_asks = {}
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        futures = {executor.submit(fetch_lowest_sell_order, session, tid): tid for tid in type_ids}
-        for fut in as_completed(futures):
-            tid, lowest_ask = fut.result()
-            lowest_asks[tid] = lowest_ask
+    lowest_asks: dict[int, float | None] = {}
+    ensure_jita_asks(session, type_ids, lowest_asks)
 
     history_map = get_historical_ledger_targets(type_ids)
     ctx = {
