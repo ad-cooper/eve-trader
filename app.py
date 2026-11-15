@@ -22,6 +22,10 @@ from services.esi import fetch_wallet_balance, get_auth_url, exchange_auth_code,
 from services.accounting import calculate_performance, load_performance
 from services.ledgers import get_annotated_desks, load_sniper_deals, load_cached_orders
 from services.market import update_ledger_market_prices
+from workflows.daily_pipeline import run_daily_ledger_rebuild
+from workflows.buy_orders import audit_missing_buys
+from workflows.sell_advisor import evaluate_hangar_inventory
+from workflows.imports import scan_import_opportunities, check_cj6mt_seller_stock, bundle_courier_contracts
 
 scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -59,9 +63,9 @@ def get_last_ledger_run_time():
 def run_ledger_subprocess():
     STATE["ledger_running"] = True
     try:
-        subprocess.run(["python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto"], check=True)
-        STATE["last_ledger_run"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        update_ledger_market_prices()
+        success, ts = run_daily_ledger_rebuild()
+        if success:
+            STATE["last_ledger_run"] = ts
     finally:
         STATE["ledger_running"] = False
 
@@ -85,8 +89,7 @@ def run_sniper_subprocess():
 
 def refresh_import_opportunities_job():
     try:
-        from services.importer import get_import_suggestions
-        get_import_suggestions()
+        scan_import_opportunities()
     except Exception as e:
         print(f"[!] Background import scan error: {e}")
 
@@ -244,13 +247,12 @@ async def refresh_market_prices(bg: BackgroundTasks):
 
 @app.get("/api/orders/missing-buys")
 def api_missing_buys(desk: str = "all"):
-    from services.ledgers import get_missing_buy_orders
-    return get_missing_buy_orders(desk=desk)
+    return audit_missing_buys(desk=desk)
 
 
 @app.api_route("/api/inventory/advisor", methods=["GET", "POST"])
 async def api_inventory_advisor(request: Request):
-    from services.market import get_live_multisell_prices
+    
     raw_text = None
     force_refresh = request.query_params.get("force") == "true"
     if request.method == "POST":
@@ -261,7 +263,7 @@ async def api_inventory_advisor(request: Request):
                 force_refresh = True
         except Exception:
             pass
-    return get_live_multisell_prices(raw_text=raw_text, force_refresh=force_refresh)
+    return evaluate_hangar_inventory(raw_text=raw_text, force_refresh=force_refresh)
 
 
 @app.get("/api/import/opportunities")
@@ -271,24 +273,22 @@ def api_import_opportunities(
     limit: int = 100,
     force: bool = False,
 ):
-    from services.importer import get_import_suggestions, load_cached_import_suggestions
+    from workflows.imports import load_cached_import_suggestions
     if not force:
         cached = load_cached_import_suggestions()
         if cached and cached.get("amarr", {}).get("pricing_model") == "hisec_tiered" and cached.get("cj6mt"):
             return cached
-    return get_import_suggestions(amarr_warps=amarr_warps, cj6mt_rate=cj6mt_rate, limit=limit)
+    return scan_import_opportunities(amarr_warps=amarr_warps, cj6mt_rate=cj6mt_rate, limit=limit)
 
 
 
 @app.get("/api/import/cj6mt-stock")
 def api_import_cj6mt_stock():
-    from services.importer import check_cj6mt_seller_stock
     return check_cj6mt_seller_stock()
 
 @app.post("/api/import/bundles")
 def api_import_bundles(payload: dict):
-    from services.importer import suggest_courier_bundles
-    return suggest_courier_bundles(
+    return bundle_courier_contracts(
         dest_key=payload.get("dest_key", "amarr"),
         items=payload.get("items"),
         raw_text=payload.get("raw_text"),

@@ -5,19 +5,26 @@ import re
 import duckdb
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from services.esi import get_character_auth
+from services.esi import (
+    JITA_STATION_ID,
+    create_esi_session as create_session,
+    fetch_lowest_sell_order,
+    fetch_structure_order_book,
+    fetch_character_locations_stock,
+    resolve_primary_character,
+    resolve_role_character,
+    get_30d_average_volume,
+)
 from services.blacklist import load_active_blacklist
 from services.staging_diff import process_snapshot_diff, get_observed_staging_velocity
 from services.ledgers import get_desk_claimed_type_ids, is_item_blacklisted
-from services.market import (
+from services.market import fetch_station_asks_bulk, ensure_jita_asks
+from services.sde import (
     DUCKDB_PATH,
     SQLITE_PATH,
-    JITA_STATION_ID,
-    create_session,
-    fetch_station_asks_bulk,
-    ensure_jita_asks,
-    resolve_primary_character,
-    fetch_character_locations_stock,
+    PACKAGED_SHIP_M3,
+    resolve_sde_items,
+    parse_eve_item_lines as _parse_eve_item_lines,
 )
 
 IMPORT_CACHE_FILE = "ledgers/import_suggestions_cache.json"
@@ -622,7 +629,112 @@ def _build_destination_section(
     return section
 
 
-def get_import_suggestions(
+def check_cj6mt_seller_stock(structure_id: int = 1049588174021) -> dict:
+    """
+    Audits the C-J6MT seller character's current hangar inventory and active sell orders
+    in 1st Taj Mahgoon against live structure asks and Jita 4-4 replacement prices.
+    """
+    char_name, token, char_id = resolve_role_character("cj6mt")
+    structure_warning = None
+    try:
+        dest_book, _ = fetch_structure_order_book(structure_id, token)
+    except Exception as e:
+        resp = getattr(e, "response", None)
+        code = getattr(resp, "status_code", 0)
+        dest_book = {}
+        structure_warning = (
+            f"Structure market returned HTTP {code} for {char_name}. "
+            f"Click 'C-J6MT Seller (Switch)' to re-authorize with esi-markets.structure_markets.v1, "
+            f"and confirm {char_name} has docking/market access to 1st Taj Mahgoon."
+        )
+    my_stock = fetch_character_locations_stock(char_id, token, [structure_id]).get(structure_id, {})
+
+    tids = sorted(my_stock.keys())
+    if not tids:
+        return {
+            "character_name": char_name,
+            "character_id": char_id,
+            "structure_id": structure_id,
+            "total_lines": 0,
+            "total_hangar_units": 0,
+            "total_listed_units": 0,
+            "est_shelf_value": 0.0,
+            "est_hangar_value": 0.0,
+            "structure_warning": structure_warning,
+            "items": [],
+        }
+
+    sde_meta, _ = resolve_sde_items(type_ids=tids)
+
+    session = create_session()
+    jita_asks: dict[int, float | None] = {}
+    ensure_jita_asks(session, tids, jita_asks)
+
+    audit_rows = []
+    tot_hangar_val = 0.0
+    tot_shelf_val = 0.0
+
+    for tid in tids:
+        st = my_stock[tid]
+        info = sde_meta.get(tid, {"name": f"Type {tid}", "unit_m3": 1.0, "group_name": "Unknown"})
+        book_entry = dest_book.get(tid) or {}
+        lowest_ask = book_entry.get("lowest_ask")
+        jita_ask = jita_asks.get(tid) or 0.0
+
+        rec_sell = (
+            round(lowest_ask - 0.01, 2)
+            if (lowest_ask and lowest_ask > 0)
+            else (round(jita_ask * 1.25, 2) if jita_ask > 0 else 0.0)
+        )
+        hangar_qty = st["hangar_qty"]
+        sell_qty = st["sell_qty"]
+        my_sell = st["my_lowest_sell"]
+
+        hangar_val = hangar_qty * (rec_sell or jita_ask)
+        shelf_val = sell_qty * (my_sell or rec_sell or jita_ask)
+        tot_hangar_val += hangar_val
+        tot_shelf_val += shelf_val
+
+        if hangar_qty > 0 and sell_qty == 0:
+            status = "UNLISTED_HANGAR"
+        elif my_sell and lowest_ask and my_sell > lowest_ask + 0.01:
+            status = "UNDERCUT"
+        elif hangar_qty > 0 and sell_qty > 0:
+            status = "ACTIVE + RESERVE"
+        else:
+            status = "TOP_ASK"
+
+        audit_rows.append({
+            "type_id": tid,
+            "name": info["name"],
+            "group": info.get("group_name", "Unknown"),
+            "hangar_qty": hangar_qty,
+            "sell_qty": sell_qty,
+            "total_qty": hangar_qty + sell_qty,
+            "my_sell_price": round(my_sell, 2) if my_sell else None,
+            "structure_lowest_ask": round(lowest_ask, 2) if lowest_ask else None,
+            "recommended_sell": rec_sell,
+            "jita_ask": round(jita_ask, 2) if jita_ask else None,
+            "est_total_value": round(hangar_val + shelf_val, 2),
+            "status": status,
+        })
+
+    audit_rows.sort(key=lambda x: x["est_total_value"], reverse=True)
+    return {
+        "character_name": char_name,
+        "character_id": char_id,
+        "structure_id": structure_id,
+        "total_lines": len(audit_rows),
+        "total_hangar_units": sum(x["hangar_qty"] for x in audit_rows),
+        "total_listed_units": sum(x["sell_qty"] for x in audit_rows),
+        "est_shelf_value": round(tot_shelf_val, 2),
+        "est_hangar_value": round(tot_hangar_val, 2),
+        "structure_warning": structure_warning,
+        "items": audit_rows,
+    }
+
+
+def scan_import_opportunities(
     amarr_warps: int | None = None,
     cj6mt_rate: float | None = None,
     limit: int = 100,
@@ -906,7 +1018,7 @@ def _finalize_bundle_list(bins: list[dict]) -> list[dict]:
     return bundles
 
 
-def suggest_courier_bundles(
+def bundle_courier_contracts(
     dest_key: str = "amarr",
     items: list[dict] | None = None,
     raw_text: str | None = None,
@@ -1057,7 +1169,7 @@ def suggest_courier_bundles(
 
 
 if __name__ == "__main__":
-    data = get_import_suggestions()
+    data = scan_import_opportunities()
     for dest in IMPORT_DESTINATIONS:
         sec = data[dest["key"]]
         extra = ""

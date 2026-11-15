@@ -1,5 +1,19 @@
-import { html, useState, useMemo } from '../lib.js';
+import { html, useState, useEffect, useMemo } from '../lib.js';
 import { fmtISK } from '../utils.js';
+
+function DeskTagBadge({ desk }) {
+  const d = String(desk || '').toUpperCase();
+  if (d === 'EVERGREEN') {
+    return html`<span class="bg-cyan-950/70 text-cyan-300 border border-cyan-800 px-1.5 py-0.5 rounded text-[10px] font-bold">EVERGREEN</span>`;
+  }
+  if (d === 'TACTICAL') {
+    return html`<span class="bg-purple-950/70 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded text-[10px] font-bold">TACTICAL</span>`;
+  }
+  if (d === 'HOLD') {
+    return html`<span class="bg-amber-950/70 text-amber-300 border border-amber-800 px-1.5 py-0.5 rounded text-[10px] font-bold">HOLD</span>`;
+  }
+  return null;
+}
 
 function OrderStatusBadge({ status }) {
   if (status === 'BUY_ACTIVE') {
@@ -81,34 +95,87 @@ function ProximityBadge({ proximityPct, diffPct }) {
     </span>`;
 }
 
-export function DeskTab({ deskKey, rows = [], askPolling, onPollAsks }) {
+export function DeskTab({ desks = {}, deskMetrics = {}, initialDesk = 'all', askPolling, onPollAsks }) {
+  const [selectedDesk, setSelectedDesk] = useState(initialDesk);
   const [unplacedOnly, setUnplacedOnly] = useState(false);
   const [cancelOnly, setCancelOnly] = useState(false);
 
+  useEffect(() => {
+    if (initialDesk) setSelectedDesk(initialDesk);
+  }, [initialDesk]);
+
+  const activeRows = useMemo(() => {
+    const eg = (desks.evergreen || []).map(r => ({ ...r, desk_type: r.desk_type || 'evergreen' }));
+    const tac = (desks.tactical || []).map(r => ({ ...r, desk_type: r.desk_type || 'tactical' }));
+    const hld = (desks.hold || []).map(r => ({ ...r, desk_type: r.desk_type || 'hold' }));
+    if (selectedDesk === 'evergreen') return eg;
+    if (selectedDesk === 'tactical') return tac;
+    if (selectedDesk === 'hold') return hld;
+    return [...eg, ...tac, ...hld];
+  }, [desks, selectedDesk]);
+
   const stats = useMemo(() => {
-    const deskCap = rows.reduce((s, r) => s + (parseFloat(r.capital) || 0), 0);
-    const deskProf = rows.reduce((s, r) => s + (parseFloat(r.profit) || 0), 0);
+    const deskCap = activeRows.reduce((s, r) => s + (parseFloat(r.capital) || 0), 0);
+    const deskProf = activeRows.reduce((s, r) => s + (parseFloat(r.profit) || 0), 0);
     const deskRoi = deskCap > 0 ? (deskProf / deskCap) * 100 : 0;
-    const unplaced = rows.filter(r => r.char_status === 'UNPLACED');
-    const buyActive = rows.filter(r => r.char_status === 'BUY_ACTIVE');
+    const unplaced = activeRows.filter(r => r.char_status === 'UNPLACED');
+    const buyActive = activeRows.filter(r => r.char_status === 'BUY_ACTIVE');
     const deskNeeded = unplaced.reduce((s, r) => s + (parseFloat(r.capital) || 0), 0);
     const deskEscrow = buyActive.reduce((s, r) => s + (parseFloat(r.escrow) || parseFloat(r.capital) || 0), 0);
     return { deskCap, deskProf, deskRoi, unplacedCount: unplaced.length, deskNeeded, deskEscrow };
-  }, [rows]);
+  }, [activeRows]);
 
   const visibleRows = useMemo(() => {
-    let out = rows;
+    let out = activeRows;
     if (unplacedOnly) out = out.filter(r => r.char_status === 'UNPLACED');
     if (cancelOnly) out = out.filter(r => (r.action_code || '').startsWith('CANCEL_'));
     return out;
-  }, [rows, unplacedOnly, cancelOnly]);
+  }, [activeRows, unplacedOnly, cancelOnly]);
+
+  const deskFilters = [
+    { key: 'all', label: 'All Desks' },
+    { key: 'evergreen', label: deskMetrics.evergreen?.cap !== undefined ? `Evergreen (${fmtISK(deskMetrics.evergreen.cap)})` : 'Evergreen' },
+    { key: 'tactical', label: deskMetrics.tactical?.cap !== undefined ? `Tactical (${fmtISK(deskMetrics.tactical.cap)})` : 'Tactical' },
+    { key: 'hold', label: deskMetrics.hold?.cap !== undefined ? `Hold (${fmtISK(deskMetrics.hold.cap)})` : 'Hold' },
+  ];
 
   return html`
     <div class="font-mono space-y-3">
-      <div class="flex flex-wrap items-center justify-between bg-slate-900/80 border border-eveBorder p-3.5 rounded-lg text-xs gap-3">
+      <div class="flex flex-wrap items-center justify-between bg-eveCard border border-eveBorder p-3.5 rounded-lg text-xs gap-3">
+        <div class="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800">
+          ${deskFilters.map(df => html`
+            <button
+              key=${df.key}
+              onClick=${() => setSelectedDesk(df.key)}
+              class=${selectedDesk === df.key
+                ? 'px-3 py-1.5 rounded font-bold bg-eveCyan/20 text-eveCyan border border-eveCyan/40 transition'
+                : 'px-3 py-1.5 rounded font-semibold text-slate-400 hover:text-slate-200 transition'}
+            >
+              ${df.label}
+            </button>
+          `)}
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="text-xs text-slate-400 flex items-center gap-1.5 cursor-pointer bg-slate-900 border border-slate-700 px-2.5 py-1.5 rounded">
+            <input type="checkbox" checked=${unplacedOnly} onChange=${e => setUnplacedOnly(e.target.checked)} class="rounded bg-slate-800 border-slate-600 text-eveCyan focus:ring-0" />
+            <span>Unplaced Only</span>
+          </label>
+          <label class="text-xs text-rose-300 font-semibold flex items-center gap-1.5 cursor-pointer bg-slate-900 border border-slate-700 px-2.5 py-1.5 rounded">
+            <input type="checkbox" checked=${cancelOnly} onChange=${e => setCancelOnly(e.target.checked)} class="rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-0" />
+            <span>Cancel / Drop Only</span>
+          </label>
+          <button onClick=${onPollAsks} title="Poll live Jita 4-4 sell orders" class="text-xs bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 px-3 py-1.5 rounded transition flex items-center gap-1.5">
+            ${askPolling && html`<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>`}
+            <span>${askPolling ? 'Polling Books...' : 'Poll Live Asks'}</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center justify-between bg-slate-900/80 border border-eveBorder px-4 py-2.5 rounded-lg text-xs gap-4">
         <div class="flex flex-wrap items-center gap-5">
           <div class="flex items-center gap-2">
-            <span class="text-slate-500 uppercase font-semibold">Active Desk Capital:</span>
+            <span class="text-slate-500 uppercase font-semibold">Desk Capital:</span>
             <span class="font-bold text-white text-sm">${fmtISK(stats.deskCap)}</span>
           </div>
           <div class="h-4 w-px bg-slate-700"></div>
@@ -133,24 +200,7 @@ export function DeskTab({ deskKey, rows = [], askPolling, onPollAsks }) {
             <span class="font-bold text-eveCyan text-sm">${stats.deskRoi.toFixed(1)}%</span>
           </div>
         </div>
-
-        <div class="flex flex-wrap items-center gap-2">
-          <label class="text-xs text-slate-400 flex items-center gap-1.5 cursor-pointer bg-slate-900 border border-slate-700 px-2.5 py-1 rounded">
-            <input type="checkbox" checked=${unplacedOnly} onChange=${e => setUnplacedOnly(e.target.checked)} class="rounded bg-slate-800 border-slate-600 text-eveCyan focus:ring-0" />
-            <span>Unplaced Only</span>
-          </label>
-          <label class="text-xs text-rose-300 font-semibold flex items-center gap-1.5 cursor-pointer bg-slate-900 border border-slate-700 px-2.5 py-1 rounded">
-            <input type="checkbox" checked=${cancelOnly} onChange=${e => setCancelOnly(e.target.checked)} class="rounded border-slate-700 bg-slate-900 text-rose-500 focus:ring-0" />
-            <span>Cancel / Drop Only</span>
-          </label>
-          <button onClick=${onPollAsks} title="Poll live Jita 4-4 sell orders" class="text-xs bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 px-2.5 py-1 rounded transition flex items-center gap-1.5">
-            ${askPolling && html`<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>`}
-            <span>${askPolling ? 'Polling Books...' : 'Poll Asks'}</span>
-          </button>
-          <span class="text-xs uppercase font-bold text-slate-300 bg-slate-800 px-2.5 py-1 rounded border border-slate-700">
-            ${deskKey.toUpperCase()} DESK
-          </span>
-        </div>
+        <span class="text-[11px] text-slate-400">${visibleRows.length} lines</span>
       </div>
 
       <div class="bg-eveCard border border-eveBorder rounded-lg overflow-hidden">
@@ -159,6 +209,7 @@ export function DeskTab({ deskKey, rows = [], askPolling, onPollAsks }) {
             <thead class="bg-slate-900 border-b border-eveBorder text-slate-400 uppercase">
               <tr>
                 <th class="p-3">#</th>
+                ${selectedDesk === 'all' && html`<th class="p-3">Desk</th>`}
                 <th class="p-3">Order Status</th>
                 <th class="p-3 text-center text-slate-300">Action Guidance</th>
                 <th class="p-3">Item Name</th>
@@ -175,12 +226,13 @@ export function DeskTab({ deskKey, rows = [], askPolling, onPollAsks }) {
             </thead>
             <tbody class="divide-y divide-slate-800">
               ${!visibleRows.length
-                ? html`<tr><td colspan="13" class="p-4 text-center text-slate-500">No matching items.</td></tr>`
+                ? html`<tr><td colspan=${selectedDesk === 'all' ? 14 : 13} class="p-6 text-center text-slate-500">No matching items.</td></tr>`
                 : visibleRows.map((r, i) => {
                     const isProf = (r.profit || 0) >= 0;
                     return html`
-                      <tr key=${r.type_id || i} class="hover:bg-slate-800/40 transition">
+                      <tr key=${`${r.desk_type}-${r.type_id || i}`} class="hover:bg-slate-800/40 transition">
                         <td class="p-3 text-slate-500">${i + 1}</td>
+                        ${selectedDesk === 'all' && html`<td class="p-3"><${DeskTagBadge} desk=${r.desk_type} /></td>`}
                         <td class="p-3"><${OrderStatusBadge} status=${r.char_status} /></td>
                         <td class="p-3 text-center"><${ActionGuidanceBadge} code=${r.action_code} text=${r.action_text} /></td>
                         <td class="p-3 font-semibold text-white">

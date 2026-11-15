@@ -14,11 +14,14 @@ def test_all_services_import_cleanly():
         "services.accounting",
         "services.blacklist",
         "services.esi",
-        "services.importer",
         "services.ledgers",
         "services.market",
         "services.sde",
         "services.staging_diff",
+        "workflows.daily_pipeline",
+        "workflows.buy_orders",
+        "workflows.sell_advisor",
+        "workflows.imports",
     ]
     for mod_name in service_modules:
         mod = importlib.import_module(mod_name)

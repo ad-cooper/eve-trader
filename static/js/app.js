@@ -1,21 +1,36 @@
-import { html, render, useState, useEffect, useCallback, useRef } from './lib.js';
-import { fmtISK } from './utils.js';
+import { html, render, useState, useEffect, useCallback, useRef, useMemo } from './lib.js';
 import { Header } from './components/Header.js';
-import { PerformanceTab } from './components/PerformanceTab.js';
-import { SniperTab } from './components/SniperTab.js';
 import { DeskTab } from './components/DeskTab.js';
+import { BuyOrdersTab } from './components/BuyOrdersTab.js';
+import { SellAdvisorTab } from './components/SellAdvisorTab.js';
 import { ImportsTab } from './components/ImportsTab.js';
-import { GuideTab } from './components/GuideTab.js';
-import { MissingBuysModal } from './components/MissingBuysModal.js';
-import { AdvisorModal } from './components/AdvisorModal.js';
+import { AnalyticsTab } from './components/AnalyticsTab.js';
+
+function normalizeInitialRoute(rawTab) {
+  const t = String(rawTab || '').toLowerCase();
+  if (['evergreen', 'tactical', 'hold'].includes(t)) {
+    return { tab: 'desks', deskFilter: t, analyticsSub: 'performance' };
+  }
+  if (['performance', 'sniper', 'guide'].includes(t)) {
+    return { tab: 'analytics', deskFilter: 'all', analyticsSub: t };
+  }
+  if (['desks', 'buys', 'sells', 'imports', 'analytics'].includes(t)) {
+    return { tab: t, deskFilter: 'all', analyticsSub: 'performance' };
+  }
+  return { tab: 'desks', deskFilter: 'all', analyticsSub: 'performance' };
+}
 
 function App() {
-  const initialTab = new URLSearchParams(window.location.search).get('tab') || 'performance';
-  const [currentTab, setCurrentTab] = useState(initialTab);
+  const initialRoute = useMemo(() => {
+    const param = new URLSearchParams(window.location.search).get('tab');
+    return normalizeInitialRoute(param);
+  }, []);
+
+  const [currentTab, setCurrentTab] = useState(initialRoute.tab);
+  const [deskFilter, setDeskFilter] = useState(initialRoute.deskFilter);
+  const [analyticsSubTab, setAnalyticsSubTab] = useState(initialRoute.analyticsSub);
   const [globalData, setGlobalData] = useState(null);
   const [askPolling, setAskPolling] = useState(false);
-  const [missingModalOpen, setMissingModalOpen] = useState(false);
-  const [advisorModalOpen, setAdvisorModalOpen] = useState(false);
 
   const fetchingRef = useRef(false);
 
@@ -63,7 +78,8 @@ function App() {
   }
 
   async function handleRunSniper() {
-    handleSwitchTab('sniper');
+    setAnalyticsSubTab('sniper');
+    handleSwitchTab('analytics');
     try {
       await fetch('/api/sniper/run', { method: 'POST' });
       fetchState();
@@ -101,15 +117,18 @@ function App() {
     }
   }
 
-  const dm = globalData?.desk_metrics || {};
+  const unplacedCount = useMemo(() => {
+    const d = globalData?.desks || {};
+    const all = [...(d.evergreen || []), ...(d.tactical || []), ...(d.hold || [])];
+    return all.filter(r => r.char_status === 'UNPLACED').length;
+  }, [globalData]);
+
   const tabs = [
-    { key: 'performance', label: 'Trade Profits (30d)', pink: true },
-    { key: 'sniper', label: 'Deal Sniper' },
-    { key: 'evergreen', label: dm.evergreen?.cap !== undefined ? `Evergreen (${fmtISK(dm.evergreen.cap)})` : 'Evergreen' },
-    { key: 'tactical', label: dm.tactical?.cap !== undefined ? `Tactical (${fmtISK(dm.tactical.cap)})` : 'Tactical' },
-    { key: 'hold', label: dm.hold?.cap !== undefined ? `Hold (${fmtISK(dm.hold.cap)})` : 'Hold' },
-    { key: 'imports', label: 'Imports (Amarr / C-J6MT)' },
-    { key: 'guide', label: 'Strategy Playbook' },
+    { key: 'desks', label: '1. Active Desks', accent: 'cyan' },
+    { key: 'buys', label: '2. Buy Orders (MultiBuy)', badge: unplacedCount > 0 ? unplacedCount : null, accent: 'blue' },
+    { key: 'sells', label: '3. Hangar Sell (MultiSell)', accent: 'indigo' },
+    { key: 'imports', label: '4. Imports (C-J6MT / Amarr)', accent: 'amber' },
+    { key: 'analytics', label: 'Analytics & Tools', accent: 'pink' },
   ];
 
   return html`
@@ -119,54 +138,63 @@ function App() {
         onRunSniper=${handleRunSniper}
         onRunLedgers=${handleRunLedgers}
         onSyncEsi=${handleSyncEsi}
-        onOpenMissingBuys=${() => setMissingModalOpen(true)}
-        onOpenAdvisor=${() => setAdvisorModalOpen(true)}
       />
 
-      <div class="flex flex-wrap gap-2 border-b border-eveBorder pb-2">
+      <nav class="flex flex-wrap gap-2 border-b border-eveBorder pb-2">
         ${tabs.map(t => {
           const active = currentTab === t.key;
-          const activeCls = t.pink ? 'border-evePink text-evePink' : 'border-eveCyan text-eveCyan';
+          const activeCls =
+            t.accent === 'blue'
+              ? 'border-blue-400 text-blue-300'
+              : t.accent === 'indigo'
+                ? 'border-indigo-400 text-indigo-300'
+                : t.accent === 'amber'
+                  ? 'border-eveAmber text-eveAmber'
+                  : t.accent === 'pink'
+                    ? 'border-evePink text-evePink'
+                    : 'border-eveCyan text-eveCyan';
           return html`
             <button
               key=${t.key}
               onClick=${() => handleSwitchTab(t.key)}
-              class=${`px-4 py-2 border-b-2 font-semibold text-sm transition ${active ? activeCls : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+              class=${`px-4 py-2 border-b-2 font-semibold text-sm transition inline-flex items-center gap-2 ${active ? activeCls : 'border-transparent text-slate-400 hover:text-slate-200'}`}
             >
-              ${t.label}
+              <span>${t.label}</span>
+              ${t.badge !== null && t.badge !== undefined && html`
+                <span class="px-1.5 py-0.2 rounded-full text-[11px] font-mono bg-blue-950 text-blue-300 border border-blue-700">
+                  ${t.badge}
+                </span>
+              `}
             </button>
           `;
         })}
-      </div>
+      </nav>
 
-      ${currentTab === 'performance' && html`<${PerformanceTab} performance=${globalData?.performance} />`}
-      ${currentTab === 'sniper' && html`<${SniperTab} sniper=${globalData?.sniper} />`}
-      ${['evergreen', 'tactical', 'hold'].includes(currentTab) && html`
+      ${currentTab === 'desks' && html`
         <${DeskTab}
-          deskKey=${currentTab}
-          rows=${globalData?.desks?.[currentTab] || []}
+          desks=${globalData?.desks || {}}
+          deskMetrics=${globalData?.desk_metrics || {}}
+          initialDesk=${deskFilter}
           askPolling=${askPolling}
           onPollAsks=${handlePollAsks}
         />
       `}
+      ${currentTab === 'buys' && html`<${BuyOrdersTab} />`}
+      ${currentTab === 'sells' && html`<${SellAdvisorTab} />`}
       ${currentTab === 'imports' && html`<${ImportsTab} />`}
-      ${currentTab === 'guide' && html`<${GuideTab} deskMetrics=${globalData?.desk_metrics} />`}
+      ${currentTab === 'analytics' && html`
+        <${AnalyticsTab}
+          performance=${globalData?.performance}
+          sniper=${globalData?.sniper}
+          deskMetrics=${globalData?.desk_metrics}
+          initialSubTab=${analyticsSubTab}
+        />
+      `}
 
       <footer class="flex flex-wrap justify-between items-center text-xs text-slate-500 font-mono border-t border-eveBorder pt-4 gap-2">
         <div>Daily Auto-Run: <span class="text-slate-400">11:30 UTC</span> | ESI Polling: <span class="text-slate-400">Every 5 mins</span> | Market Asks: <span class="text-slate-400">Every 3 mins</span></div>
         <div>Last Ledger: ${globalData?.status?.last_ledger_run || 'Never'}</div>
       </footer>
-
-      <${MissingBuysModal}
-        isOpen=${missingModalOpen}
-        onClose=${() => setMissingModalOpen(false)}
-        currentDesk=${currentTab}
-      />
-
-      <${AdvisorModal}
-        isOpen=${advisorModalOpen}
-        onClose=${() => setAdvisorModalOpen(false)}
-      />
     </div>
   `;
 }

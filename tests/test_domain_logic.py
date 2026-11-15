@@ -156,3 +156,34 @@ def test_update_ledger_market_prices_uses_bulk_asks_and_targeted_esi(monkeypatch
     assert result["10"]["lowest_ask"] == 99.5
     assert result["20"]["lowest_ask"] == 112.0
     assert result["30"]["lowest_ask"] == 50.0
+
+
+def test_daily_pipeline_orchestrates_all_steps(monkeypatch):
+    import workflows.daily_pipeline as dp
+
+    calls = []
+
+    class DummyCompleted:
+        returncode = 0
+
+    def fake_subproc(cmd, check=False):
+        calls.append(("subprocess", tuple(cmd), check))
+        return DummyCompleted()
+
+    monkeypatch.setattr(dp.subprocess, "run", fake_subproc)
+    monkeypatch.setattr(dp, "fetch_character_orders", lambda: calls.append(("fetch_character_orders",)))
+    monkeypatch.setattr(dp, "update_ledger_market_prices", lambda: calls.append(("update_ledger_market_prices",)))
+    monkeypatch.setattr(dp, "calculate_performance", lambda: calls.append(("calculate_performance",)))
+    monkeypatch.setattr(dp, "scan_import_opportunities", lambda: calls.append(("scan_import_opportunities",)))
+
+    ok, ts = dp.run_daily_ledger_rebuild(include_imports=True)
+    assert ok is True
+    assert ts and ts.endswith("UTC")
+    assert calls == [
+        ("subprocess", ("python3", "scripts/sync_market_data.py"), False),
+        ("subprocess", ("python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto"), True),
+        ("fetch_character_orders",),
+        ("update_ledger_market_prices",),
+        ("calculate_performance",),
+        ("scan_import_opportunities",),
+    ]

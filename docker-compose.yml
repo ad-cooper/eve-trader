@@ -27,6 +27,7 @@ services:
       - ./templates:/app/templates
       - ./static:/app/static
       - ./services:/app/services
+      - ./workflows:/app/workflows
       - ./scripts:/app/scripts
       - ./tests:/app/tests
       - ./app.py:/app/app.py

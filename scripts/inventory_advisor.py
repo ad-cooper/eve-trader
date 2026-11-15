@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from services.market import get_live_multisell_prices
+from workflows.sell_advisor import evaluate_hangar_inventory as get_live_multisell_prices
 
 
 def fmt_m(val: float | None) -> str:
