@@ -4,6 +4,7 @@ from services.esi import fetch_wallet_balance, load_sso_tokens
 from services.accounting import load_performance
 from services.ledgers import get_annotated_desks, load_sniper_deals, load_cached_orders
 from workflows.scheduler import STATE, get_last_ledger_run_time, get_last_sniper_run_time
+from workflows.order_actions import get_order_actions
 
 
 def _desk_summary(desk_rows: list[dict]) -> dict:
@@ -38,6 +39,8 @@ def build_dashboard_state() -> dict:
     wallet_balance = fetch_wallet_balance()
     active_escrow = orders.get("total_escrow", 0.0)
 
+    actions_summary = get_order_actions(desk="all", refresh_live=False)
+
     return {
         "status": {**STATE, "last_ledger_run": get_last_ledger_run_time()},
         "character": {
@@ -55,6 +58,11 @@ def build_dashboard_state() -> dict:
             "liquid_reserve": wallet_balance,
             "portfolio_budget": (wallet_balance + active_escrow) if wallet_balance > 0 else total_cap,
             "order_slots": len(all_rows),
+        },
+        "action_counts": {
+            "bumps": actions_summary["bump_count"],
+            "cancels": actions_summary["cancel_count"],
+            "total": actions_summary["total_actions"],
         },
         "desks": {"evergreen": eg, "tactical": tac, "hold": hld},
         "desk_metrics": {"evergreen": metrics_eg, "tactical": metrics_tac, "hold": metrics_hld},

@@ -1,6 +1,7 @@
 import { html, render, useState, useEffect, useCallback, useRef, useMemo } from './lib.js';
 import { Header } from './components/Header.js';
 import { DeskTab } from './components/DeskTab.js';
+import { OrderActionsTab } from './components/OrderActionsTab.js';
 import { BuyOrdersTab } from './components/BuyOrdersTab.js';
 import { SellAdvisorTab } from './components/SellAdvisorTab.js';
 import { ImportsTab } from './components/ImportsTab.js';
@@ -14,7 +15,7 @@ function normalizeInitialRoute(rawTab) {
   if (['performance', 'sniper', 'guide'].includes(t)) {
     return { tab: 'analytics', deskFilter: 'all', analyticsSub: t };
   }
-  if (['desks', 'buys', 'sells', 'imports', 'analytics'].includes(t)) {
+  if (['desks', 'actions', 'buys', 'sells', 'imports', 'analytics'].includes(t)) {
     return { tab: t, deskFilter: 'all', analyticsSub: 'performance' };
   }
   return { tab: 'desks', deskFilter: 'all', analyticsSub: 'performance' };
@@ -123,11 +124,14 @@ function App() {
     return all.filter(r => r.char_status === 'UNPLACED').length;
   }, [globalData]);
 
+  const actionBadgeCount = globalData?.action_counts?.total ?? 0;
+
   const tabs = [
     { key: 'desks', label: '1. Active Desks', accent: 'cyan' },
-    { key: 'buys', label: '2. Buy Orders (MultiBuy)', badge: unplacedCount > 0 ? unplacedCount : null, accent: 'blue' },
-    { key: 'sells', label: '3. Hangar Sell (MultiSell)', accent: 'indigo' },
-    { key: 'imports', label: '4. Imports (C-J6MT / Amarr)', accent: 'amber' },
+    { key: 'actions', label: '2. Order Actions (Bump / Cancel)', badge: actionBadgeCount > 0 ? actionBadgeCount : null, accent: 'rose' },
+    { key: 'buys', label: '3. Buy Orders (MultiBuy)', badge: unplacedCount > 0 ? unplacedCount : null, accent: 'blue' },
+    { key: 'sells', label: '4. Hangar Sell (MultiSell)', accent: 'indigo' },
+    { key: 'imports', label: '5. Imports (C-J6MT / Amarr)', accent: 'amber' },
     { key: 'analytics', label: 'Analytics & Tools', accent: 'pink' },
   ];
 
@@ -144,8 +148,10 @@ function App() {
         ${tabs.map(t => {
           const active = currentTab === t.key;
           const activeCls =
-            t.accent === 'blue'
-              ? 'border-blue-400 text-blue-300'
+            t.accent === 'rose'
+              ? 'border-rose-400 text-rose-300'
+              : t.accent === 'blue'
+                ? 'border-blue-400 text-blue-300'
               : t.accent === 'indigo'
                 ? 'border-indigo-400 text-indigo-300'
                 : t.accent === 'amber'
@@ -179,6 +185,7 @@ function App() {
           onPollAsks=${handlePollAsks}
         />
       `}
+      ${currentTab === 'actions' && html`<${OrderActionsTab} />`}
       ${currentTab === 'buys' && html`<${BuyOrdersTab} />`}
       ${currentTab === 'sells' && html`<${SellAdvisorTab} />`}
       ${currentTab === 'imports' && html`<${ImportsTab} />`}

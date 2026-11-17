@@ -194,3 +194,150 @@ def test_daily_pipeline_orchestrates_all_steps(monkeypatch):
         ("calculate_performance",),
         ("scan_import_opportunities",),
     ]
+
+
+def test_order_actions_bumps_and_cancels(monkeypatch):
+    import workflows.order_actions as oa
+
+    eg_rows = [
+        {
+            "type_id": 1001,
+            "name": "Viable Buy Bump Item",
+            "desk_type": "evergreen",
+            "char_status": "BUY_ACTIVE",
+            "action_code": "BUMP_VIABLE",
+            "action_text": "BUMP VIABLE (+8.2%)",
+            "my_price": 90_000_000.0,
+            "my_qty": 2,
+            "escrow": 180_000_000.0,
+            "target_buy": 91_000_000.0,
+            "target_sell": 105_000_000.0,
+        },
+        {
+            "type_id": 1002,
+            "name": "Overpriced Buy Cancel Item",
+            "desk_type": "evergreen",
+            "char_status": "BUY_ACTIVE",
+            "action_code": "CANCEL_OVERPRICED",
+            "action_text": "OVERBID (0.4% MARGIN - CANCEL)",
+            "my_price": 99_000_000.0,
+            "my_qty": 3,
+            "escrow": 297_000_000.0,
+            "target_buy": 95_000_000.0,
+            "target_sell": 105_000_000.0,
+        },
+        {
+            "type_id": 1003,
+            "name": "Undercut Sell Item",
+            "desk_type": "evergreen",
+            "char_status": "SELL_ACTIVE",
+            "action_code": "SELL_ACTIVE",
+            "my_price": 115_000_000.0,
+            "my_qty": 4,
+            "target_buy": 95_000_000.0,
+            "target_sell": 115_000_000.0,
+        },
+    ]
+
+    monkeypatch.setattr(oa, "get_annotated_desks", lambda: (eg_rows, [], []))
+    monkeypatch.setattr(
+        oa,
+        "load_cached_orders",
+        lambda: {
+            "buys": {"1001": {"price": 90_000_000.0, "volume_remain": 2}, "1002": {"price": 99_000_000.0, "volume_remain": 3}},
+            "sells": {"1003": {"price": 115_000_000.0, "volume_remain": 4}},
+        },
+    )
+    monkeypatch.setattr(
+        oa,
+        "load_market_prices_cache",
+        lambda: {
+            "1001": {"top_buy": 91_000_000.0, "lowest_ask": 105_000_000.0},
+            "1002": {"top_buy": 99_500_000.0, "lowest_ask": 105_000_000.0},
+            "1003": {"top_buy": 95_000_000.0, "lowest_ask": 112_000_000.0},
+        },
+    )
+    monkeypatch.setattr(oa, "load_active_blacklist", lambda: (set(), set(), {}))
+    monkeypatch.setattr(oa, "get_cost_basis_map", lambda tids, _: {1003: {"unit_cost": 95_000_000.0, "source": "WALLET"}})
+
+    res = oa.get_order_actions(desk="all", refresh_live=False)
+    assert res["bump_count"] == 2
+    assert res["cancel_count"] == 1
+    assert res["total_escrow_freed"] == 297_000_000.0
+    assert res["total_bump_escrow_delta"] > 0
+    sides = {b["type_id"]: b["side"] for b in res["bumps"]}
+    assert sides == {1001: "BUY", 1003: "SELL"}
+    assert res["cancels"][0]["type_id"] == 1002
+
+
+def test_profitable_hold_and_weekend_dip_orders_are_not_cancelled():
+    # Hold buy order at +23.9% margin stays PATIENT even when live ask recovers >92% of 180d target
+    code_hold, label_hold = evaluate_order_action(
+        desk_type="hold",
+        my_price=71_070_000.0,
+        top_buy=72_850_000.0,
+        t_sell=92_770_000.0,
+        dump_freq=20.0,
+        proximity_pct=96.0,
+        csv_sell=92_770_000.0,
+        live_ask=89_000_000.0,
+    )
+    assert code_hold == "PATIENT"
+    assert "HOLD FIRM" in label_hold
+
+    # Evergreen buy order during a 15% Sunday dip stays PATIENT when 30d VWAP baseline clears margin
+    code_eg, label_eg = evaluate_order_action(
+        desk_type="evergreen",
+        my_price=50_130_000.0,
+        top_buy=50_400_000.0,
+        t_sell=52_970_000.0,
+        dump_freq=65.0,
+        proximity_pct=90.6,
+        csv_sell=56_500_000.0,
+        live_ask=48_000_000.0,
+    )
+    assert code_eg == "PATIENT"
+    assert "WEEKEND DIP" in label_eg
+
+
+def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
+    import workflows.buy_orders as bo
+
+    unplaced_rows = [
+        {
+            "type_id": 2001,
+            "name": "Pith X-Type EM Shield Hardener",
+            "desk_type": "evergreen",
+            "char_status": "UNPLACED",
+            "qty": 10,
+            "target_buy": 87_000_000.0,   # Stale higher CSV target
+            "target_sell": 97_000_000.0,
+        },
+        {
+            "type_id": 2002,
+            "name": "Margin Capped Module",
+            "desk_type": "evergreen",
+            "char_status": "UNPLACED",
+            "qty": 5,
+            "target_buy": 95_000_000.0,
+            "target_sell": 100_000_000.0,
+        },
+    ]
+
+    monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows, [], []))
+    monkeypatch.setattr(
+        bo,
+        "fetch_jita_book_top",
+        lambda tid: (tid, 84_900_000.0, 97_000_000.0) if tid == 2001 else (tid, 96_000_000.0, 100_000_000.0),
+    )
+
+    res = bo.audit_missing_buys(desk="all")
+    by_id = {it["type_id"]: it for it in res["items"]}
+
+    # Must bid exactly 1 EVE tick above 84.90M (84.91M), NOT the stale 87.0M CSV target
+    assert by_id[2001]["recommended_buy"] == 84_910_000.0
+    assert by_id[2001]["squeezed"] is False
+
+    # When top_buy exceeds margin floor, must cap at max_buy_floor and flag squeezed=True
+    assert by_id[2002]["recommended_buy"] < 96_000_000.0
+    assert by_id[2002]["squeezed"] is True

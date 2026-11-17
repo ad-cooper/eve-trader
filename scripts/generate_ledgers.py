@@ -10,12 +10,13 @@ Order of Priority:
 
 import os
 import sys
-from services.storage import read_json
 import argparse
 import duckdb
 import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from services.storage import read_json
 
 from services.blacklist import load_active_blacklist
 from services.ledgers import (

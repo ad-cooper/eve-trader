@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 import json
+import math
 import pandas as pd
 from services.storage import read_json, read_csv_records
 from services.esi import get_14d_average_volume
@@ -148,16 +149,22 @@ def select_desk_candidates(
     candidates["passes_desk"] = desk_mask.loc[candidates.index]
     candidates["is_sticky"] = candidates["type_id"].isin(desk_sticky_ids)
 
+    max_cap_m = (cfg.max_line_cap * scale_factor) / 1e6
+    deployable_m = (candidates["daily_turnover_m"] * cfg.vol_pct).clip(upper=max_cap_m)
+    net_spread = (candidates["avg_spread_30d"] - 5.35).clip(lower=0.0)
+
     if desk_type == "hold":
-        candidates["upside_pct"] = (
+        raw_upside = (
             ((candidates["price_m_180d"] * 0.96) - candidates["price_m_30d"])
             / candidates["price_m_30d"]
             * 100.0
         )
+        momentum_guard = (candidates["price_m_7d"] / candidates["price_m_30d"]).clip(lower=0.75, upper=1.05)
+        candidates["upside_pct"] = raw_upside * momentum_guard * (1.0 + candidates["daily_turnover_m"].clip(lower=0.0).map(math.log1p))
     elif desk_type == "tactical":
-        candidates["swing_score"] = candidates["dump_freq_pct"] * (candidates["avg_spread_30d"] - 5.0)
+        candidates["swing_score"] = candidates["dump_freq_pct"] * net_spread * (1.0 + deployable_m.clip(lower=0.0).map(math.log1p))
     else:
-        candidates["profit_velocity"] = candidates["daily_turnover_m"] * (candidates["avg_spread_30d"] - 5.1)
+        candidates["profit_velocity"] = deployable_m * net_spread
 
     candidates = candidates.sort_values(by=["is_sticky", cfg.sort_col], ascending=[False, False])
 
@@ -405,8 +412,8 @@ def compute_line_sizing(
             qty = existing_qty
         else:
             qty = int(remaining_budget / cost_unit)
-        if qty < 1:
-            return None
+            if qty < 1 or (cost_unit * qty) < effective_min_cap:
+                return None
         capital_line = cost_unit * qty
 
     return {
@@ -532,17 +539,17 @@ def evaluate_order_action(
     cancel_floor = cfg.cancel_floor
     max_buy = calc_max_profitable_buy(t_sell, min_margin)
     max_hold_buy = calc_max_profitable_buy(t_sell, cancel_floor)
+    cur_margin = calc_projected_margin(my_price, t_sell)
 
     if max_hold_buy > 0 and my_price > (max_hold_buy * 1.005):
-        cur_margin = calc_projected_margin(my_price, t_sell)
         baseline_margin = calc_projected_margin(my_price, csv_sell) if csv_sell > 0 else cur_margin
-        spot_not_crashed = (not live_ask) or (csv_sell <= 0) or (live_ask >= csv_sell * 0.88)
-        if desk_type in ("evergreen", "tactical") and baseline_margin >= min_margin and spot_not_crashed:
+        spot_not_crashed = (not live_ask) or (csv_sell <= 0) or (live_ask >= csv_sell * 0.78)
+        if desk_type in ("evergreen", "tactical") and baseline_margin >= cfg.sticky_margin_floor and spot_not_crashed:
             return "PATIENT", f"WEEKEND DIP (HOLD +{baseline_margin:.1f}% BASE)"
         return "CANCEL_OVERPRICED", f"OVERBID ({cur_margin:.1f}% MARGIN - CANCEL)"
 
-    if desk_type == "hold" and proximity_pct is not None and proximity_pct > 92.0:
-        return "CANCEL_RECOVERED", "DIP RECOVERED (CANCEL)"
+    if desk_type == "hold" and proximity_pct is not None and proximity_pct > 92.0 and cur_margin < min_margin:
+        return "CANCEL_RECOVERED", f"DIP RECOVERED ({cur_margin:.1f}% MARGIN - CANCEL)"
 
     if not top_buy or top_buy <= 0:
         return "PATIENT", "AWAITING QUOTE"
@@ -552,14 +559,20 @@ def evaluate_order_action(
 
     next_bid = top_buy + 0.01
     proj_margin = calc_projected_margin(next_bid, t_sell)
+    outbid_pct = ((top_buy - my_price) / my_price * 100.0) if my_price > 0 else 100.0
 
-    if top_buy <= max_buy and proj_margin >= min_margin:
+    if desk_type == "hold":
+        in_active_dip = proximity_pct is not None and proximity_pct <= 82.0
+        if in_active_dip and outbid_pct >= 1.5 and top_buy <= max_buy and proj_margin >= min_margin:
+            return "BUMP_VIABLE", f"BUMP DIP (+{proj_margin:.1f}%)"
+        return "PATIENT", "HOLD FIRM (WAIT DUMP)"
+
+    min_outbid_pct = 1.0 if desk_type == "tactical" else 0.5
+    if outbid_pct >= min_outbid_pct and top_buy <= max_buy and proj_margin >= min_margin:
         return "BUMP_VIABLE", f"BUMP VIABLE (+{proj_margin:.1f}%)"
     if desk_type in ("evergreen", "tactical"):
         my_margin = calc_projected_margin(my_price, t_sell)
         return "PATIENT", f"OUTBID (HOLD +{my_margin:.1f}%)"
-    if desk_type == "hold":
-        return "PATIENT", "HOLD FIRM (WAIT DUMP)"
 
     return "CANCEL_CEILING", "CEILING REACHED (CANCEL)"
 

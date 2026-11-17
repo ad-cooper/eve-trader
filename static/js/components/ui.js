@@ -1,4 +1,5 @@
-import { html } from '../lib.js';
+import { html, useState } from '../lib.js';
+import { copyToClipboard } from '../utils.js';
 
 export function DeskBadge({ desk }) {
   const d = String(desk || '').toUpperCase();
@@ -14,9 +15,32 @@ export function DeskBadge({ desk }) {
   return html`<span class="text-slate-400 font-semibold text-[10px] bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">${d || 'UNMANAGED'}</span>`;
 }
 
-export function MarketLink({ typeId, name, className = 'hover:text-eveCyan hover:underline' }) {
-  if (!typeId) return html`<span>${name}</span>`;
-  return html`<a href=${`https://evetycoon.com/market/${typeId}`} target="_blank" rel="noopener noreferrer" class=${className}>${name}</a>`;
+export function MarketLink({ name, className = 'hover:text-eveCyan hover:underline' }) {
+  const [copied, setCopied] = useState(false);
+
+  if (!name) return null;
+
+  async function handleCopy(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const ok = await copyToClipboard(String(name));
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    }
+  }
+
+  return html`
+    <button
+      type="button"
+      onClick=${handleCopy}
+      title="Click to copy item name to clipboard"
+      class=${`text-left cursor-pointer inline-flex items-center gap-1.5 transition ${className}`}
+    >
+      <span>${name}</span>
+      ${copied && html`<span class="text-[9px] font-mono font-bold bg-emerald-950/90 text-eveGreen border border-emerald-600/80 px-1.5 py-0.2 rounded">✓ Copied</span>`}
+    </button>
+  `;
 }
 
 export function FilterPills({ options, value, onChange, activeClass = 'bg-slate-800 text-slate-100', className = 'text-xs' }) {

@@ -22,6 +22,7 @@ def test_all_services_import_cleanly():
         "workflows.daily_pipeline",
         "workflows.scheduler",
         "workflows.dashboard",
+        "workflows.order_actions",
         "workflows.buy_orders",
         "workflows.sell_advisor",
         "workflows.imports",
@@ -34,11 +35,17 @@ def test_all_services_import_cleanly():
 
 
 def test_all_scripts_compile_cleanly():
-    """Parses and compiles every active CLI script in scripts/ to catch SyntaxError."""
+    """Parses, compiles, and runs --help on active CLI scripts to catch SyntaxError and sys.path issues."""
+    import sys
+    import subprocess
+
     for path in sorted(glob.glob("scripts/*.py")):
         with open(path, "r", encoding="utf-8") as f:
             source = f.read()
         compile(source, path, "exec")
+        if "argparse.ArgumentParser" in source:
+            res = subprocess.run([sys.executable, path, "--help"], capture_output=True, text=True, timeout=10)
+            assert res.returncode == 0, f"CLI --help failed for {path}: {res.stderr}"
 
 
 def _find_unterminated_js_strings(js_code: str) -> list[tuple[int, str]]:
@@ -204,7 +211,7 @@ def test_api_missing_buys_contract():
         res = client.get(f"/api/orders/missing-buys?desk={desk}")
         assert res.status_code == 200
         data = res.json()
-        for key in ("total_items", "total_escrow", "items", "multibuy_text"):
+        for key in ("total_items", "total_escrow", "total_isk_needed", "total_expected_profit", "total_fees", "total_buy_fees", "total_exit_fees", "blended_roi_pct", "items", "multibuy_text"):
             assert key in data
 
 
@@ -218,3 +225,22 @@ def test_api_import_opportunities_contract():
         sec = data[dest_key]
         for key in ("items", "multibuy_text", "multibuy_m3", "multibuy_collateral", "multibuy_freight", "multibuy_profit"):
             assert key in sec
+
+
+def test_api_order_actions_contract():
+    """Verifies /api/orders/actions returns valid bumps & cancels schema across desk filters."""
+    for desk in ("evergreen", "tactical", "hold", "all"):
+        res = client.get(f"/api/orders/actions?desk={desk}")
+        assert res.status_code == 200
+        data = res.json()
+        for key in (
+            "total_actions",
+            "bump_count",
+            "cancel_count",
+            "total_escrow_freed",
+            "total_bump_escrow_delta",
+            "net_isk_impact",
+            "bumps",
+            "cancels",
+        ):
+            assert key in data

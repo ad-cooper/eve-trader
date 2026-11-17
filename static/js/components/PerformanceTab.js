@@ -1,5 +1,6 @@
 import { html, useState, useEffect, useMemo, useRef } from '../lib.js';
 import { fmtISK } from '../utils.js';
+import { MarketLink } from './ui.js';
 
 function DailyProfitsChart({ chartData }) {
   const canvasRef = useRef(null);
@@ -190,10 +191,7 @@ export function PerformanceTab({ performance }) {
                       <tr key=${it.type_id || i} class="hover:bg-slate-800/40 transition">
                         <td class="p-3 text-slate-500">${i + 1}</td>
                         <td class="p-3 font-semibold text-white">
-                          <a href=${`https://evetycoon.com/market/${it.type_id}`} target="_blank" rel="noopener noreferrer" class="hover:text-eveCyan hover:underline inline-flex items-center gap-1.5 transition">
-                            <span>${it.name}</span>
-                            <svg class="w-3 h-3 text-slate-500 inline shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-                          </a>
+                          <${MarketLink} typeId=${it.type_id} name=${it.name} />
                         </td>
                         <td class="p-3 text-right text-slate-300 font-semibold">${Number(it.qty_sold || 0).toLocaleString()}</td>
                         <td class="p-3 text-right text-slate-300">${fmtISK(it.revenue)}</td>

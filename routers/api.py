@@ -44,6 +44,12 @@ async def refresh_market_prices(bg: BackgroundTasks):
 
 # --- Workflow 2: Missing Buy Orders (MultiBuy) ---
 
+@router.get("/orders/actions")
+def api_order_actions(desk: str = "all", refresh: bool = False):
+    from workflows.order_actions import get_order_actions
+    return get_order_actions(desk=desk, refresh_live=refresh)
+
+
 @router.get("/orders/missing-buys")
 def api_missing_buys(desk: str = "all"):
     return audit_missing_buys(desk=desk)

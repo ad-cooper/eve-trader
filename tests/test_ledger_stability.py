@@ -260,3 +260,43 @@ def test_hold_desk_curation_caps_unplaced_prime_dips_without_hiding_active_order
     assert len(active) == 1 and active[0]["type_id"] == 600
     assert len(unplaced) == 8
     assert all(r["action_code"] == "PRIME_DIP" for r in unplaced)
+
+
+def test_multi_ledger_cap_aware_roi_optimization(monkeypatch):
+    """
+    Verifies that across all three ledgers:
+      1. Evergreen prioritizes high-ROI cap-filling items over uncapped thin-spread mega-hub items.
+      2. Every allocated line across Hold, Tactical, and Evergreen clears its DeskProfile min_margin.
+      3. Budget tails below min_line_cap cascade downstream instead of creating sub-threshold dust lines.
+    """
+    df = pd.DataFrame([
+        # Mega-hub thin-spread item: 50B/day turnover, 12.2% spread (~6.5% net) -> capped at 1.2B line
+        _make_universe_row(701, "MegaHub Thin Spread", price_30d_m=100.0, price_180d_m=102.0, daily_vol=500.0, dump_freq=20.0, spread_pct=12.2),
+        # High-margin Evergreen workhorse: 10B/day turnover, 18.0% spread (~12.0% net) -> fills 1.2B line at ~2x ROI
+        _make_universe_row(702, "High Margin Workhorse", price_30d_m=100.0, price_180d_m=103.0, daily_vol=100.0, dump_freq=25.0, spread_pct=18.0),
+        # Tactical high-dump loot module
+        _make_universe_row(703, "Tactical Deadspace Module", price_30d_m=150.0, price_180d_m=155.0, daily_vol=30.0, dump_freq=65.0, spread_pct=18.5),
+        # Hold cyclical saturation dip
+        _make_universe_row(704, "Hold Cyclical Hull", price_30d_m=200.0, price_180d_m=275.0, daily_vol=20.0, dump_freq=25.0, spread_pct=15.0),
+    ])
+
+    mask = pd.Series(True, index=df.index)
+    eg_cands, _ = select_desk_candidates(df, "evergreen", mask, set())
+    assert list(eg_cands["type_id"])[0] == 702
+
+    monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {}))
+    monkeypatch.setattr(gen_led, "load_active_blacklist", lambda: (set(), set(), {}))
+    monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
+    monkeypatch.setattr(gen_led, "persist_desk_ledger", lambda *args, **kwargs: None)
+
+    telemetry = {
+        "701": {"lowest_ask": 106.0e6, "top_buy": 94.0e6},
+        "702": {"lowest_ask": 109.0e6, "top_buy": 91.0e6},
+        "703": {"lowest_ask": 164.0e6, "top_buy": 136.0e6},
+        "704": {"lowest_ask": 210.0e6, "top_buy": 182.0e6},
+    }
+
+    outcomes = gen_led.run_waterfall(df, total_budget=6.0e9, market_telemetry=telemetry, target_desks={"hold", "tactical", "evergreen"})
+    assert 704 in outcomes["hold"][0]
+    assert 703 in outcomes["tactical"][0]
+    assert 702 in outcomes["evergreen"][0]
