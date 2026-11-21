@@ -114,7 +114,9 @@ DESK_PROFILES: dict[str, DeskProfile] = {
 def get_desk_profile(desk_type: str | None) -> DeskProfile:
     """Case-insensitive lookup for a DeskProfile, defaulting to 'evergreen'."""
     key = str(desk_type or "evergreen").strip().lower()
-    return DESK_PROFILES.get(key, DESK_PROFILES["evergreen"])
+    if key not in DESK_PROFILES:
+        return DESK_PROFILES["evergreen"]
+    return DESK_PROFILES[key]
 
 
 def select_desk_candidates(
