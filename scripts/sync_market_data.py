@@ -11,14 +11,33 @@ Bulk Market History Synchronizer (Archive Ingestion Engine)
 import os
 import sys
 import bz2
+import json
 import datetime
 import tempfile
 import duckdb
 import requests
 
 DUCKDB_PATH = "data/eve_analytics.duckdb"
+EMPTY_DUMP_CACHE = "data/.everef_pending_dumps.json"
 REGION_THE_FORGE = 10000002
 BASE_DUMP_URL = "https://data.everef.net/market-history"
+
+
+def _load_pending_cache() -> dict:
+    if os.path.exists(EMPTY_DUMP_CACHE):
+        try:
+            with open(EMPTY_DUMP_CACHE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_pending_cache(cache: dict) -> None:
+    os.makedirs("data", exist_ok=True)
+    with open(EMPTY_DUMP_CACHE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+
 
 def get_db_connection():
     os.makedirs("data", exist_ok=True)
@@ -37,11 +56,12 @@ def get_db_connection():
     """)
     return con
 
+
 def get_missing_dates(con):
     res = con.execute("SELECT MAX(date) FROM forge_market_history;").fetchone()[0]
     today = datetime.date.today()
     yesterday = today - datetime.timedelta(days=1)
-    
+
     if res is None:
         start_date = today - datetime.timedelta(days=90)
         print(f"[*] Database is empty. Bootstrapping trailing 90 days from {start_date}...")
@@ -52,12 +72,12 @@ def get_missing_dates(con):
             last_date = res
         else:
             last_date = res.date()
-            
+
         start_date = last_date + datetime.timedelta(days=1)
-        
+
     if start_date > yesterday:
         return []
-        
+
     missing = []
     curr = start_date
     while curr <= yesterday:
@@ -65,16 +85,28 @@ def get_missing_dates(con):
         curr += datetime.timedelta(days=1)
     return missing
 
+
 def ingest_day(con, day: datetime.date):
     year = day.strftime("%Y")
     date_str = day.strftime("%Y-%m-%d")
     url = f"{BASE_DUMP_URL}/{year}/market-history-{date_str}.csv.bz2"
-    
-    print(f"[*] Fetching dump for {date_str}...")
+
+    pending_cache = _load_pending_cache()
+    cached_meta = pending_cache.get(date_str) or {}
+
     headers = {"User-Agent": "EVE-Market-Sync/2.0"}
-    
+    if cached_meta.get("etag"):
+        headers["If-None-Match"] = cached_meta["etag"]
+    elif cached_meta.get("last_modified"):
+        headers["If-Modified-Since"] = cached_meta["last_modified"]
+
+    print(f"[*] Fetching dump for {date_str}...")
+
     try:
         resp = requests.get(url, headers=headers, stream=True, timeout=60)
+        if resp.status_code == 304:
+            print(f"[-] Dump for {date_str} unchanged on archive (still 0 Forge records; awaiting post-downtime update).")
+            return False
         if resp.status_code == 404:
             print(f"[-] Dump for {date_str} is not yet available on archive (404).")
             return False
@@ -108,19 +140,38 @@ def ingest_day(con, day: datetime.date):
         """
         con.execute(query)
         os.remove(tmp_path)
-        print(f"[+] Successfully ingested {date_str} into DuckDB.")
+
+        inserted_rows = con.execute(
+            "SELECT COUNT(*) FROM forge_market_history WHERE date = ?;", [day]
+        ).fetchone()[0]
+
+        if inserted_rows == 0:
+            pending_cache[date_str] = {
+                "etag": resp.headers.get("ETag", ""),
+                "last_modified": resp.headers.get("Last-Modified", ""),
+            }
+            _save_pending_cache(pending_cache)
+            print(f"[-] Dump for {date_str} contained 0 Forge records yet (archive placeholder; will retry when updated).")
+            return False
+
+        if date_str in pending_cache:
+            del pending_cache[date_str]
+            _save_pending_cache(pending_cache)
+
+        print(f"[+] Successfully ingested {date_str} into DuckDB ({inserted_rows:,} Forge records).")
         return True
-        
+
     except Exception as e:
         if "tmp_path" in locals() and os.path.exists(tmp_path):
             os.remove(tmp_path)
         print(f"[-] Failed to ingest {date_str}: {e}")
         return False
 
+
 def main():
     con = get_db_connection()
     missing_dates = get_missing_dates(con)
-    
+
     if not missing_dates:
         print("[+] Database is already up to date with the latest available market history.")
         con.close()
@@ -129,11 +180,12 @@ def main():
     print(f"[+] Found {len(missing_dates)} missing day(s) to sync ({missing_dates[0]} to {missing_dates[-1]}).")
     for day in missing_dates:
         ingest_day(con, day)
-        
+
     total_rows = con.execute("SELECT COUNT(*) FROM forge_market_history;").fetchone()[0]
     latest = con.execute("SELECT MAX(date) FROM forge_market_history;").fetchone()[0]
     con.close()
     print(f"\n[+] Sync complete! Total records in forge_market_history: {total_rows:,} (Latest Date: {latest})")
+
 
 if __name__ == "__main__":
     main()

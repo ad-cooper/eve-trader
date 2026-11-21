@@ -8,8 +8,7 @@ sso_token.json
 *.sqlite
 *.duckdb
 *.duckdb.wal
-data/latest-sqlite.db
-data/eve_analytics.duckdb
+data/*
 
 # --- Heavy Data Exports & Local CSVs ---
 *.csv

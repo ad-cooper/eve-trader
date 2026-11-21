@@ -473,21 +473,25 @@ def load_cached_assets(max_age_seconds: int = 300, force: bool = False, *args, *
 HISTORY_CACHE_FILE = "data/history_cache.json"
 ESI_HEADERS = {"User-Agent": "eve-trading-desk-app/1.0 (local trading bot)"}
 
+import threading
+
 _MEM_HISTORY_CACHE = None
+_HISTORY_CACHE_LOCK = threading.Lock()
 
 def _load_history_cache():
     global _MEM_HISTORY_CACHE
-    if _MEM_HISTORY_CACHE is not None:
+    with _HISTORY_CACHE_LOCK:
+        if _MEM_HISTORY_CACHE is not None:
+            return _MEM_HISTORY_CACHE
+        if os.path.exists(HISTORY_CACHE_FILE):
+            try:
+                with open(HISTORY_CACHE_FILE, "r") as f:
+                    _MEM_HISTORY_CACHE = json.load(f)
+                    return _MEM_HISTORY_CACHE
+            except Exception:
+                pass
+        _MEM_HISTORY_CACHE = {}
         return _MEM_HISTORY_CACHE
-    if os.path.exists(HISTORY_CACHE_FILE):
-        try:
-            with open(HISTORY_CACHE_FILE, "r") as f:
-                _MEM_HISTORY_CACHE = json.load(f)
-                return _MEM_HISTORY_CACHE
-        except Exception:
-            pass
-    _MEM_HISTORY_CACHE = {}
-    return _MEM_HISTORY_CACHE
 
 def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
     """Fetches Jita daily market history from ESI, cached in-memory and on disk."""
@@ -495,7 +499,8 @@ def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
     now = time.time()
     cache = _load_history_cache()
 
-    entry = cache.get(str(type_id))
+    with _HISTORY_CACHE_LOCK:
+        entry = cache.get(str(type_id))
     if entry and (now - entry.get("timestamp", 0) < 43200):
         return entry.get("history", [])
 
@@ -504,9 +509,13 @@ def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
         res = requests.get(url, headers=ESI_HEADERS, timeout=(3.05, 8.0))
         if res.status_code == 200:
             history = res.json()
-            cache[str(type_id)] = {"timestamp": now, "history": history}
-            with open(HISTORY_CACHE_FILE, "w") as f:
-                json.dump(cache, f)
+            with _HISTORY_CACHE_LOCK:
+                cache[str(type_id)] = {"timestamp": now, "history": history}
+                snapshot = dict(cache)
+            tmp_file = f"{HISTORY_CACHE_FILE}.{threading.get_ident()}.tmp"
+            with open(tmp_file, "w") as f:
+                json.dump(snapshot, f)
+            os.replace(tmp_file, HISTORY_CACHE_FILE)
             return history
         else:
             print(f"[!] ESI history HTTP {res.status_code} for type {type_id}")

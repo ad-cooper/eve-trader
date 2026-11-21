@@ -22,5 +22,31 @@ for i in {1..15}; do
     sleep 3
 done
 
-# 3. Delegate the full daily pipeline to workflows/daily_pipeline.py
+# 3. Create or update data/latest-sqlite.db (retry up to 4 times with byte-range resume)
+MAX_SDE_ATTEMPTS=4
+SDE_SYNCED=false
+
+for attempt in $(seq 1 "$MAX_SDE_ATTEMPTS"); do
+    if ./scripts/sync_sde.sh; then
+        SDE_SYNCED=true
+        break
+    fi
+
+    if [ "$attempt" -lt "$MAX_SDE_ATTEMPTS" ]; then
+        WAIT_SEC=$((attempt * 10))
+        echo "[!] SDE sync attempt ${attempt}/${MAX_SDE_ATTEMPTS} failed. Resuming in ${WAIT_SEC}s..."
+        sleep "$WAIT_SEC"
+    fi
+done
+
+if [ "$SDE_SYNCED" != "true" ]; then
+    if [ -s "data/latest-sqlite.db" ]; then
+        echo "[!] Warning: SDE update failed after ${MAX_SDE_ATTEMPTS} attempts; continuing with existing data/latest-sqlite.db."
+    else
+        echo "[!] Error: Initial EVE SDE download failed after ${MAX_SDE_ATTEMPTS} attempts and no local database exists. Aborting." >&2
+        exit 1
+    fi
+fi
+
+# 4. Delegate the full daily pipeline to workflows/daily_pipeline.py
 docker compose exec -T eve-trading-desk python3 -m workflows.daily_pipeline
