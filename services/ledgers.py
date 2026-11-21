@@ -183,6 +183,7 @@ def select_desk_candidates(
         "max_line_cap": cfg.max_line_cap * scale_factor,
         "min_line_cap": cfg.min_line_cap,
         "min_margin_req": cfg.min_margin,
+        "live_min_margin": cfg.live_min_margin,
         "sticky_margin_floor": cfg.sticky_margin_floor,
     }
     return candidates, params
@@ -350,6 +351,8 @@ def compute_candidate_pricing(
     proceeds_unit = calc_net_proceeds(t_sell)
     net_profit_unit = proceeds_unit - cost_unit
     net_margin = calc_projected_margin(t_buy, t_sell)
+    live_exec_sell = min(t_sell, float(live_ask)) if (live_ask and float(live_ask) > 0) else t_sell
+    live_exec_margin = calc_projected_margin(t_buy, live_exec_sell)
 
     return {
         "target_buy": t_buy,
@@ -357,6 +360,7 @@ def compute_candidate_pricing(
         "cost_unit": cost_unit,
         "net_profit_unit": net_profit_unit,
         "net_margin": net_margin,
+        "live_exec_margin": live_exec_margin,
         "dump_freq": dump_freq,
     }
 
@@ -382,9 +386,11 @@ def compute_line_sizing(
     cost_unit = pricing["cost_unit"]
     net_profit_unit = pricing["net_profit_unit"]
     net_margin = pricing["net_margin"]
+    live_exec_margin = float(pricing.get("live_exec_margin", net_margin))
+    live_min_margin = float(desk_params.get("live_min_margin", desk_params["min_margin_req"]))
 
     req_margin = desk_params["sticky_margin_floor"] if is_sticky else desk_params["min_margin_req"]
-    if not has_sell and held_qty == 0 and net_margin < req_margin:
+    if not has_sell and held_qty == 0 and live_exec_margin < req_margin:
         return None
 
     max_line_cap = desk_params["max_line_cap"]
@@ -411,7 +417,12 @@ def compute_line_sizing(
     existing_qty = max(buy_rem, sell_rem + held_qty)
 
     if is_sticky:
-        qty = max(1, existing_qty) if not passes_desk else max(qty, existing_qty)
+        buy_still_viable = passes_desk and (live_exec_margin >= live_min_margin)
+        if has_sell or held_qty > 0:
+            # Keep row for sell tracking, but drop buy qty to 0 unless live spread still clears full margin
+            qty = max(qty, existing_qty) if buy_still_viable else 0
+        else:
+            qty = max(1, existing_qty) if (live_exec_margin >= desk_params["sticky_margin_floor"]) else 0
 
     capital_line = cost_unit * qty
 
@@ -555,9 +566,10 @@ def evaluate_order_action(
     cfg = get_desk_profile(desk_type)
     min_margin = cfg.live_min_margin
     cancel_floor = cfg.cancel_floor
-    max_buy = calc_max_profitable_buy(t_sell, min_margin)
-    max_hold_buy = calc_max_profitable_buy(t_sell, cancel_floor)
-    cur_margin = calc_projected_margin(my_price, t_sell)
+    effective_sell = min(t_sell, float(live_ask)) if (live_ask and float(live_ask) > 0) else t_sell
+    max_buy = calc_max_profitable_buy(effective_sell, min_margin)
+    max_hold_buy = calc_max_profitable_buy(effective_sell, cancel_floor)
+    cur_margin = calc_projected_margin(my_price, effective_sell)
 
     if max_hold_buy > 0 and my_price > (max_hold_buy * 1.005):
         baseline_margin = calc_projected_margin(my_price, csv_sell) if csv_sell > 0 else cur_margin

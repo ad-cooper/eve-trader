@@ -196,7 +196,8 @@ def _resolve_unlisted_strategy(
         effective_cost_unit = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
         net_proceeds_unit = calc_net_proceeds(lowest_ask - 0.01) if lowest_ask else 0.0
         live_roi_pct = ((net_proceeds_unit - effective_cost_unit) / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
-        is_profitable = (net_proceeds_unit > effective_cost_unit) if effective_cost_unit > 0 else True
+        min_target_roi = desk_cfg.take_profit_roi if desk_cfg.take_profit_roi > 0 else desk_cfg.sticky_margin_floor
+        meets_profit_floor = (live_roi_pct >= min_target_roi) if effective_cost_unit > 0 else True
         take_profit_ready = bool(
             lowest_ask
             and lowest_ask > 0.01
@@ -207,10 +208,12 @@ def _resolve_unlisted_strategy(
         )
 
         if lowest_ask and target_sell and lowest_ask >= target_sell:
-            if is_profitable:
+            if meets_profit_floor:
                 return "TARGET MET", "met", round(lowest_ask - 0.01, 2)
-            breakeven_sell = round((effective_cost_unit * 1.05) / (1.0 - EXIT_FEE_JITA), 2)
-            return "HOLD (MARGIN COMPRESSED)", "hold", max(round(target_sell, 2), breakeven_sell)
+            floor_sell = round((effective_cost_unit * (1.0 + min_target_roi / 100.0)) / (1.0 - EXIT_FEE_JITA), 2)
+            if is_expired:
+                return f"LOW-MARGIN EXIT (+{live_roi_pct:.1f}%)", "time_stop", round(lowest_ask - 0.01, 2)
+            return "HOLD (MARGIN COMPRESSED)", "hold", max(round(target_sell, 2), floor_sell)
         if is_expired:
             rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else (target_sell or 1000000.0)
             return f"TIME STOP ({days_held}d)", "time_stop", rec_sell
