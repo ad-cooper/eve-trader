@@ -38,7 +38,7 @@ eve-trader/
 │   ├── esi.py              # Live Jita 4-4 order book & character order/asset telemetry
 │   ├── ledgers.py          # DeskProfiles, candidate selection, pricing, sizing & order annotation
 │   ├── market.py           # Market price cache & DuckDB/SDE analytics queries
-│   └── retrospective.py    # Walk-forward simulator, spread-compression audit & AI code review
+│   └── retrospective/      # Walk-forward simulator, optimizer & AI autopilot PR pipeline
 ├── workflows/
 │   ├── buy_orders.py       # Missing buy-order audit, margin cap clamping & Multibuy export
 │   ├── order_actions.py    # Live BUY/SELL bump and cancel evaluation

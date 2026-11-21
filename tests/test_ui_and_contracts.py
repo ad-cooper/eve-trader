@@ -16,6 +16,7 @@ def test_all_services_import_cleanly():
         "services.esi",
         "services.ledgers",
         "services.market",
+        "services.retrospective",
         "services.sde",
         "services.staging_diff",
         "services.storage",
