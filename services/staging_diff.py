@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import duckdb
 import pandas as pd
 
-DB_PATH = "data/eve_analytics.duckdb"
+from services.sde import connect_analytics
 
 
 def _utc_now_naive() -> datetime:
@@ -190,125 +190,118 @@ def _persist_snapshot_and_prune(
 
 def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -> dict:
     """Diffs the current structure market scan against the previous scan in DuckDB."""
-    con = duckdb.connect(DB_PATH)
-    init_diff_schema(con)
+    with connect_analytics(read_only=False, attach_sde=False) as con:
+        init_diff_schema(con)
 
-    now = _utc_now_naive()
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        now = _utc_now_naive()
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    current_sells = [
-        {
-            "order_id": int(o["order_id"]),
-            "structure_id": structure_id,
-            "type_id": int(o["type_id"]),
-            "price": float(o["price"]),
-            "volume_remain": int(o["volume_remain"]),
-            "volume_total": int(o["volume_total"]),
-            "is_buy_order": bool(o["is_buy_order"]),
-            "issued": o["issued"].replace("T", " ").replace("Z", ""),
-            "duration": int(o["duration"]),
-        }
-        for o in raw_orders if not o.get("is_buy_order")
-    ]
+        current_sells = [
+            {
+                "order_id": int(o["order_id"]),
+                "structure_id": structure_id,
+                "type_id": int(o["type_id"]),
+                "price": float(o["price"]),
+                "volume_remain": int(o["volume_remain"]),
+                "volume_total": int(o["volume_total"]),
+                "is_buy_order": bool(o["is_buy_order"]),
+                "issued": o["issued"].replace("T", " ").replace("Z", ""),
+                "duration": int(o["duration"]),
+            }
+            for o in raw_orders if not o.get("is_buy_order")
+        ]
 
-    df_new = pd.DataFrame(current_sells)
-    if df_new.empty:
-        con.close()
-        return {"baseline": False, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
+        df_new = pd.DataFrame(current_sells)
+        if df_new.empty:
+            return {"baseline": False, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
 
-    last_meta = con.execute("""
-        SELECT snapshot_id, scan_time::TIMESTAMP
-        FROM staging_snapshots_meta
-        WHERE structure_id = ?
-        ORDER BY scan_time DESC
-        LIMIT 1;
+        last_meta = con.execute("""
+            SELECT snapshot_id, scan_time::TIMESTAMP
+            FROM staging_snapshots_meta
+            WHERE structure_id = ?
+            ORDER BY scan_time DESC
+            LIMIT 1;
     """, [structure_id]).fetchall()
 
-    if not last_meta:
-        _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
-        con.close()
-        print(f"[+] Initial C-J6MT baseline snapshot saved ({len(df_new)} active sell orders).")
-        return {"baseline": True, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
+        if not last_meta:
+            _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
+            print(f"[+] Initial C-J6MT baseline snapshot saved ({len(df_new)} active sell orders).")
+            return {"baseline": True, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
 
-    prev_snapshot_id, prev_scan_time = last_meta[0]
-    if getattr(prev_scan_time, "tzinfo", None) is not None:
-        prev_scan_time = prev_scan_time.replace(tzinfo=None)
-    hours_since = (now - prev_scan_time).total_seconds() / 3600.0
+        prev_snapshot_id, prev_scan_time = last_meta[0]
+        if getattr(prev_scan_time, "tzinfo", None) is not None:
+            prev_scan_time = prev_scan_time.replace(tzinfo=None)
+        hours_since = (now - prev_scan_time).total_seconds() / 3600.0
 
-    if hours_since < (1.0 / 60.0):
-        con.close()
-        return {"baseline": False, "skipped_too_soon": True, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
+        if hours_since < (1.0 / 60.0):
+            return {"baseline": False, "skipped_too_soon": True, "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
 
-    if hours_since > 12.0:
-        _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
-        con.close()
-        print(f"[+] Gap was {hours_since:.1f}h (>12h) — saved fresh C-J6MT baseline snapshot.")
-        return {"baseline": True, "reset_after_gap": round(hours_since, 2), "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
+        if hours_since > 12.0:
+            _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
+            print(f"[+] Gap was {hours_since:.1f}h (>12h) — saved fresh C-J6MT baseline snapshot.")
+            return {"baseline": True, "reset_after_gap": round(hours_since, 2), "events_detected": 0, "units_sold": 0, "gross_isk": 0.0}
 
-    df_old = con.execute("""
-        SELECT order_id, type_id, price, volume_remain, volume_total, issued::TIMESTAMP AS issued, duration
-        FROM staging_order_snapshots
-        WHERE snapshot_id = ?;
+        df_old = con.execute("""
+            SELECT order_id, type_id, price, volume_remain, volume_total, issued::TIMESTAMP AS issued, duration
+            FROM staging_order_snapshots
+            WHERE snapshot_id = ?;
     """, [prev_snapshot_id]).df()
 
-    events = _detect_order_fill_events(structure_id, df_old, df_new, now, prev_scan_time)
-    if events:
-        con.executemany("INSERT INTO staging_sales_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);", events)
+        events = _detect_order_fill_events(structure_id, df_old, df_new, now, prev_scan_time)
+        if events:
+            con.executemany("INSERT INTO staging_sales_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);", events)
 
-    _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
-    con.close()
+        _persist_snapshot_and_prune(con, now_ms, structure_id, now, len(raw_orders), df_new)
 
-    total_qty = sum(e[5] for e in events)
-    total_isk = sum(e[7] for e in events)
-    print(
-        f"[+] C-J6MT Snapshot Diff ({hours_since:.1f}h window): "
-        f"{len(events)} sales events, {total_qty:,} units, {total_isk / 1e9:.2f}B ISK"
-    )
-    return {
-        "baseline": False,
-        "hours_since_prev": round(hours_since, 2),
-        "events_detected": len(events),
-        "units_sold": total_qty,
-        "gross_isk": round(total_isk, 2),
-    }
+        total_qty = sum(e[5] for e in events)
+        total_isk = sum(e[7] for e in events)
+        print(
+            f"[+] C-J6MT Snapshot Diff ({hours_since:.1f}h window): "
+            f"{len(events)} sales events, {total_qty:,} units, {total_isk / 1e9:.2f}B ISK"
+        )
+        return {
+            "baseline": False,
+            "hours_since_prev": round(hours_since, 2),
+            "events_detected": len(events),
+            "units_sold": total_qty,
+            "gross_isk": round(total_isk, 2),
+        }
 
 def get_observed_staging_velocity(structure_id: int) -> dict:
     """Returns tracking coverage and observed 14d daily burn rates per type_id for the structure."""
     try:
-        con = duckdb.connect(DB_PATH, read_only=True)
-        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-        if "staging_snapshots_meta" not in tables:
-            con.close()
-            return {"days_tracked": 0.0, "snapshot_count": 0, "by_type": {}}
+        with connect_analytics(read_only=True, attach_sde=False) as con:
+            tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+            if "staging_snapshots_meta" not in tables:
+                return {"days_tracked": 0.0, "snapshot_count": 0, "by_type": {}}
 
-        meta_row = con.execute("""
-            SELECT
-                COUNT(*) AS snap_cnt,
-                COALESCE(date_diff('second', MIN(scan_time::TIMESTAMP), MAX(scan_time::TIMESTAMP)) / 86400.0, 0.0) AS days_tracked
-            FROM staging_snapshots_meta
-            WHERE structure_id = ?
-              AND scan_time::TIMESTAMP >= ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::TIMESTAMP - INTERVAL 14 DAY);
-        """, [structure_id]).fetchone()
+            meta_row = con.execute("""
+                SELECT
+                    COUNT(*) AS snap_cnt,
+                    COALESCE(date_diff('second', MIN(scan_time::TIMESTAMP), MAX(scan_time::TIMESTAMP)) / 86400.0, 0.0) AS days_tracked
+                FROM staging_snapshots_meta
+                WHERE structure_id = ?
+                  AND scan_time::TIMESTAMP >= ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::TIMESTAMP - INTERVAL 14 DAY);
+            """, [structure_id]).fetchone()
 
-        snap_cnt = int(meta_row[0] or 0) if meta_row else 0
-        days_tracked = float(meta_row[1] or 0.0) if meta_row else 0.0
+            snap_cnt = int(meta_row[0] or 0) if meta_row else 0
+            days_tracked = float(meta_row[1] or 0.0) if meta_row else 0.0
 
-        by_type = {}
-        if "v_staging_sales_velocity" in tables and days_tracked >= 0.05:
-            rows = con.execute("""
-                SELECT type_id, real_daily_burn, total_units_sold, event_count
-                FROM v_staging_sales_velocity
-                WHERE structure_id = ?;
-            """, [structure_id]).fetchall()
-            for tid, burn, sold, ev_cnt in rows:
-                by_type[int(tid)] = {
-                    "real_daily_burn": float(burn or 0.0),
-                    "total_units_sold": int(sold or 0),
-                    "event_count": int(ev_cnt or 0),
-                }
+            by_type = {}
+            if "v_staging_sales_velocity" in tables and days_tracked >= 0.05:
+                rows = con.execute("""
+                    SELECT type_id, real_daily_burn, total_units_sold, event_count
+                    FROM v_staging_sales_velocity
+                    WHERE structure_id = ?;
+                """, [structure_id]).fetchall()
+                for tid, burn, sold, ev_cnt in rows:
+                    by_type[int(tid)] = {
+                        "real_daily_burn": float(burn or 0.0),
+                        "total_units_sold": int(sold or 0),
+                        "event_count": int(ev_cnt or 0),
+                    }
 
-        con.close()
-        return {"days_tracked": round(days_tracked, 2), "snapshot_count": snap_cnt, "by_type": by_type}
+            return {"days_tracked": round(days_tracked, 2), "snapshot_count": snap_cnt, "by_type": by_type}
     except Exception as e:
         print(f"[!] Could not read observed staging velocity: {e}")
         return {"days_tracked": 0.0, "snapshot_count": 0, "by_type": {}}

@@ -11,10 +11,11 @@ Order of Priority:
 import os
 import sys
 import argparse
-import duckdb
 import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from services.sde import connect_analytics
 
 from services.storage import read_json
 
@@ -29,8 +30,6 @@ from services.ledgers import (
     compute_line_sizing,
 )
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-SQLITE_PATH = "data/latest-sqlite.db"
 OUTPUT_DIR = "ledgers"
 MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
 
@@ -130,9 +129,6 @@ def load_incumbent_positions() -> tuple[dict, dict, dict, dict]:
 
 
 def load_market_universe():
-    con = duckdb.connect(DUCKDB_PATH, read_only=True)
-    con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
-
     query = """
     WITH metrics_180d AS (
         SELECT 
@@ -220,8 +216,8 @@ def load_market_universe():
       AND LOWER(COALESCE(t.description, '')) NOT LIKE '%will expire%'
       AND LOWER(COALESCE(t.description, '')) NOT LIKE '%expired%';
     """
-    df = con.execute(query).df()
-    con.close()
+    with connect_analytics(read_only=True, attach_sde=True) as con:
+        df = con.execute(query).df()
     return df
 
 
@@ -319,28 +315,27 @@ def persist_desk_ledger(
 
     try:
         import datetime
-        con = duckdb.connect(DUCKDB_PATH)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS ledger_history (
-                snapshot_time TIMESTAMP,
-                desk_type VARCHAR,
-                type_id INTEGER,
-                name VARCHAR,
-                qty INTEGER,
-                dump_freq DOUBLE,
-                target_buy DOUBLE,
-                target_sell DOUBLE,
-                net_margin DOUBLE,
-                capital DOUBLE,
-                profit DOUBLE
-            );
-        """)
-        history_cols = ["type_id", "name", "qty", "dump_freq", "target_buy", "target_sell", "net_margin", "capital", "profit"]
-        df_history = df_ledger[history_cols].copy()
-        df_history.insert(0, "desk_type", desk_type)
-        df_history.insert(0, "snapshot_time", datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0))
-        con.execute("INSERT INTO ledger_history SELECT * FROM df_history")
-        con.close()
+        with connect_analytics(read_only=False, attach_sde=False) as con:
+            con.execute("""
+                CREATE TABLE IF NOT EXISTS ledger_history (
+                    snapshot_time TIMESTAMP,
+                    desk_type VARCHAR,
+                    type_id INTEGER,
+                    name VARCHAR,
+                    qty INTEGER,
+                    dump_freq DOUBLE,
+                    target_buy DOUBLE,
+                    target_sell DOUBLE,
+                    net_margin DOUBLE,
+                    capital DOUBLE,
+                    profit DOUBLE
+                );
+            """)
+            history_cols = ["type_id", "name", "qty", "dump_freq", "target_buy", "target_sell", "net_margin", "capital", "profit"]
+            df_history = df_ledger[history_cols].copy()
+            df_history.insert(0, "desk_type", desk_type)
+            df_history.insert(0, "snapshot_time", datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0))
+            con.execute("INSERT INTO ledger_history SELECT * FROM df_history")
     except Exception as e:
         print(f"[!] Failed to log history to DuckDB: {e}")
 

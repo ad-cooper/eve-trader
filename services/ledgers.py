@@ -1,13 +1,10 @@
 from dataclasses import dataclass
 import os
-import json
 import math
 import pandas as pd
-from services.storage import read_json, read_csv_records
+from services.storage import read_json, read_csv_records, load_market_prices_cache
 from services.esi import get_14d_average_volume
 from services.accounting import (
-    BUY_SCC_SURCHARGE,
-    TOTAL_EXIT_FEE,
     calc_unit_cost,
     calc_net_proceeds,
     calc_max_profitable_buy,
@@ -515,8 +512,6 @@ def load_sniper_deals() -> list:
     return data if isinstance(data, list) else data.get("deals", [])
 
 
-def load_market_prices_cache() -> dict:
-    return read_json(MARKET_CACHE_FILE, default={})
 
 def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_buy: float, sells: dict) -> tuple:
     """Determines target buy, target sell, and recommended quantity per desk strategy."""

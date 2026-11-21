@@ -1,15 +1,6 @@
 import { html, useState, useEffect, useCallback } from '../lib.js';
-import { fmtISK, copyToClipboard } from '../utils.js';
+import { fmtISK, fmtPreciseISK, copyToClipboard } from '../utils.js';
 import { DeskBadge, MarketLink, FilterPills } from './ui.js';
-
-function fmtPreciseISK(val) {
-  if (val === null || val === undefined) return '--';
-  const num = Number(val);
-  if (!num && num !== 0) return '--';
-  if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(3) + 'B ISK';
-  if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M ISK';
-  return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ISK';
-}
 
 export function BuyOrdersTab() {
   const [deskFilter, setDeskFilter] = useState('all');

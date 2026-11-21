@@ -1,11 +1,10 @@
-import duckdb
 import requests
 from datetime import datetime, timezone
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.ledgers import get_desk_profile, load_all_desk_ledgers, load_cached_orders, load_desk_csv
-from services.storage import read_json, write_json
+from services.storage import read_json, write_json, MARKET_CACHE_FILE, load_market_prices_cache
 from services.accounting import calc_line_financials
 from services.esi import (
     JITA_STATION_ID,
@@ -14,10 +13,8 @@ from services.esi import (
     fetch_jita_book_top,
     fetch_wallet_transactions,
 )
-from services.sde import resolve_type_ids
+from services.sde import connect_analytics, resolve_type_ids
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
 
 def fetch_station_asks_bulk(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
     """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""
@@ -120,8 +117,6 @@ def update_ledger_market_prices():
 
     return prices
 
-def load_market_prices_cache():
-    return read_json(MARKET_CACHE_FILE, default={})
 
 def _query_wallet_buys(type_ids: list[int]) -> dict[int, list[dict]]:
     """Groups live ESI wallet buy transactions by type_id for cost-basis and hold-duration lookups."""
@@ -162,32 +157,31 @@ def _query_historical_buys_db(type_ids: list[int], name_map: dict[int, str] | No
 
     out: dict[int, dict] = {}
     try:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in name_to_tid.keys())
-        query = f"""
-        WITH ranked AS (
+        with connect_analytics(read_only=True, attach_sde=False) as con:
+            quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in name_to_tid.keys())
+            query = f"""
+            WITH ranked AS (
+                SELECT
+                    item_name,
+                    price,
+                    quantity,
+                    date,
+                    ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY date DESC) AS rn
+                FROM historical_wallet_buys
+                WHERE item_name IN ({quoted_names})
+            )
             SELECT
                 item_name,
-                price,
-                quantity,
-                date,
-                ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY date DESC) AS rn
-            FROM historical_wallet_buys
-            WHERE item_name IN ({quoted_names})
-        )
-        SELECT
-            item_name,
-            ROUND(SUM(price * quantity) / SUM(quantity), 2) AS avg_price,
-            MIN(date) AS first_date
-        FROM ranked
-        WHERE rn <= 10
-        GROUP BY item_name;
-        """
-        for iname, avg_p, first_dt in con.execute(query).fetchall():
-            tid = name_to_tid.get(iname)
-            if tid:
-                out[tid] = {"avg_price": float(avg_p or 0.0), "first_date": first_dt}
-        con.close()
+                ROUND(SUM(price * quantity) / SUM(quantity), 2) AS avg_price,
+                MIN(date) AS first_date
+            FROM ranked
+            WHERE rn <= 10
+            GROUP BY item_name;
+            """
+            for iname, avg_p, first_dt in con.execute(query).fetchall():
+                tid = name_to_tid.get(iname)
+                if tid:
+                    out[tid] = {"avg_price": float(avg_p or 0.0), "first_date": first_dt}
     except Exception:
         pass
     return out
@@ -224,18 +218,17 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
     unmatched_tids = [tid for tid in type_ids if tid not in cost_map]
     if unmatched_tids:
         try:
-            con = duckdb.connect(DUCKDB_PATH, read_only=True)
-            id_str = ",".join(str(int(t)) for t in set(unmatched_tids))
-            query = f"""
-                SELECT
-                    type_id,
-                    SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap
-                FROM forge_market_history
-                WHERE type_id IN ({id_str}) AND date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history)
-                GROUP BY type_id;
-            """
-            vwap_rows = con.execute(query).fetchall()
-            con.close()
+            with connect_analytics(read_only=True, attach_sde=False) as con:
+                id_str = ",".join(str(int(t)) for t in set(unmatched_tids))
+                query = f"""
+                    SELECT
+                        type_id,
+                        SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap
+                    FROM forge_market_history
+                    WHERE type_id IN ({id_str}) AND date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history)
+                    GROUP BY type_id;
+                """
+                vwap_rows = con.execute(query).fetchall()
             for r in vwap_rows:
                 if r[1] and r[1] > 0:
                     cost_map[r[0]] = {"unit_cost": float(r[1]), "source": "EST_VWAP"}
@@ -334,21 +327,20 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
     db_clean_buys: dict[str, object] = {}
     db_snap_dates: dict[int, object] = {}
     try:
-        con = duckdb.connect(DUCKDB_PATH, read_only=True)
-        names_to_lookup = [name_map.get(tid) for tid in type_ids if name_map.get(tid)]
-        if names_to_lookup:
-            quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in names_to_lookup)
-            q_clean = f"SELECT item_name, MIN(tx_date) FROM clean_transactions WHERE tx_type = 'buy' AND item_name IN ({quoted_names}) GROUP BY item_name"
-            for iname, dt_val in con.execute(q_clean).fetchall():
-                if dt_val:
-                    db_clean_buys[iname] = dt_val
+        with connect_analytics(read_only=True, attach_sde=False) as con:
+            names_to_lookup = [name_map.get(tid) for tid in type_ids if name_map.get(tid)]
+            if names_to_lookup:
+                quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in names_to_lookup)
+                q_clean = f"SELECT item_name, MIN(tx_date) FROM clean_transactions WHERE tx_type = 'buy' AND item_name IN ({quoted_names}) GROUP BY item_name"
+                for iname, dt_val in con.execute(q_clean).fetchall():
+                    if dt_val:
+                        db_clean_buys[iname] = dt_val
 
-        id_str = ",".join(str(int(t)) for t in type_ids)
-        q_snap = f"SELECT type_id, MIN(snapshot_time) FROM ledger_history WHERE type_id IN ({id_str}) GROUP BY type_id"
-        for tid_row, snap_dt in con.execute(q_snap).fetchall():
-            if snap_dt:
-                db_snap_dates[int(tid_row)] = snap_dt
-        con.close()
+            id_str = ",".join(str(int(t)) for t in type_ids)
+            q_snap = f"SELECT type_id, MIN(snapshot_time) FROM ledger_history WHERE type_id IN ({id_str}) GROUP BY type_id"
+            for tid_row, snap_dt in con.execute(q_snap).fetchall():
+                if snap_dt:
+                    db_snap_dates[int(tid_row)] = snap_dt
     except Exception:
         pass
 

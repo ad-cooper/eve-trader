@@ -6,7 +6,6 @@ Add, list, update, and remove items or groups from the temporary exclusion regis
 """
 
 import os
-import sys
 import json
 import argparse
 from datetime import datetime, timezone, timedelta

@@ -30,6 +30,8 @@ def get_packaged_m3(group_id: int | None, raw_volume: float | None) -> float:
 @contextmanager
 def connect_analytics(read_only: bool = True, attach_sde: bool = True):
     """Context-managed DuckDB connection with optional read-only SQLite SDE attachment."""
+    if not read_only and os.path.dirname(DUCKDB_PATH):
+        os.makedirs(os.path.dirname(DUCKDB_PATH), exist_ok=True)
     con = duckdb.connect(DUCKDB_PATH, read_only=read_only)
     try:
         if attach_sde and os.path.exists(SQLITE_PATH):

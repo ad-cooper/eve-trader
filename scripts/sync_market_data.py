@@ -9,7 +9,6 @@ Bulk Market History Synchronizer (Archive Ingestion Engine)
 """
 
 import os
-import sys
 import bz2
 import json
 import datetime
@@ -17,7 +16,10 @@ import tempfile
 import duckdb
 import requests
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from services.sde import DUCKDB_PATH
 EMPTY_DUMP_CACHE = "data/.everef_pending_dumps.json"
 REGION_THE_FORGE = 10000002
 BASE_DUMP_URL = "https://data.everef.net/market-history"

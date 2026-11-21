@@ -35,3 +35,11 @@ def read_csv_records(path: str) -> list[dict]:
         return pd.read_csv(path).to_dict(orient="records")
     except Exception:
         return []
+
+
+MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
+
+
+def load_market_prices_cache() -> dict:
+    """Safely loads the cached live market prices JSON."""
+    return read_json(MARKET_CACHE_FILE, default={})

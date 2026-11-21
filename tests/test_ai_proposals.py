@@ -1,5 +1,3 @@
-import pytest
-from services.ledgers import DESK_PROFILES
 
 
 

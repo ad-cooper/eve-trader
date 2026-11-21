@@ -5,8 +5,6 @@ from collections import defaultdict, deque
 from services.esi import fetch_wallet_transactions
 
 PERF_CACHE_FILE = "ledgers/performance_cache.json"
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-SQLITE_PATH = "data/latest-sqlite.db"
 
 # --- Centralized Fee Constants ---
 SALES_TAX_RATE = 0.03375          # 3.375% Accounting V

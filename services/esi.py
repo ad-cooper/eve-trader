@@ -739,12 +739,6 @@ def fetch_top_buy_order(
         pass
     return type_id, None
 
-def fetch_telemetry_pair(session: requests.Session, type_id: int):
-    _, ask = fetch_lowest_sell_order(session, type_id)
-    _, buy = fetch_top_buy_order(session, type_id)
-    return type_id, ask, buy
-
-
 def fetch_jita_book_top(type_id: int, session: requests.Session | None = None) -> tuple[int, float, float]:
     """Fetches (type_id, top_buy, lowest_sell) in Jita 4-4 via a single ESI order_type=all query."""
     client = session or requests

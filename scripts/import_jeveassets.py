@@ -15,12 +15,11 @@ using the exact column schema:
 
 import os
 import sys
-import duckdb
 import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
+from services.sde import connect_analytics
 CSV_PATH = "data/jeveassets_transactions.csv"
 
 def import_transactions():
@@ -55,23 +54,6 @@ def import_transactions():
     buys = buys.dropna(subset=["clean_price", "clean_qty", "clean_date"])
     buys = buys[(buys["clean_price"] > 0) & (buys["clean_qty"] > 0)].copy()
 
-    # Create table in DuckDB
-    con = duckdb.connect(DUCKDB_PATH)
-    con.execute("""
-    CREATE TABLE IF NOT EXISTS historical_wallet_buys (
-        date TIMESTAMP,
-        item_name VARCHAR,
-        price DOUBLE,
-        quantity BIGINT,
-        station VARCHAR,
-        owner VARCHAR,
-        source VARCHAR DEFAULT 'JEVEASSETS'
-    );
-    """)
-
-    # Clean existing jEveAssets records before refreshing
-    con.execute("DELETE FROM historical_wallet_buys WHERE source = 'JEVEASSETS'")
-
     final_df = pd.DataFrame({
         "date": buys["clean_date"],
         "item_name": buys["clean_name"],
@@ -82,17 +64,29 @@ def import_transactions():
         "source": "JEVEASSETS"
     })
 
-    con.register("df_final", final_df)
-    con.execute("INSERT INTO historical_wallet_buys SELECT * FROM df_final")
+    with connect_analytics(read_only=False, attach_sde=False) as con:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS historical_wallet_buys (
+            date TIMESTAMP,
+            item_name VARCHAR,
+            price DOUBLE,
+            quantity BIGINT,
+            station VARCHAR,
+            owner VARCHAR,
+            source VARCHAR DEFAULT 'JEVEASSETS'
+        );
+        """)
+        con.execute("DELETE FROM historical_wallet_buys WHERE source = 'JEVEASSETS'")
+        con.register("df_final", final_df)
+        con.execute("INSERT INTO historical_wallet_buys SELECT * FROM df_final")
 
-    total_records = con.execute("SELECT COUNT(*) FROM historical_wallet_buys").fetchone()[0]
-    sample = con.execute("""
-        SELECT date, owner, item_name, quantity, price 
-        FROM historical_wallet_buys 
-        ORDER BY date DESC 
-        LIMIT 4
-    """).fetchall()
-    con.close()
+        total_records = con.execute("SELECT COUNT(*) FROM historical_wallet_buys").fetchone()[0]
+        sample = con.execute("""
+            SELECT date, owner, item_name, quantity, price 
+            FROM historical_wallet_buys 
+            ORDER BY date DESC 
+            LIMIT 4
+        """).fetchall()
 
     print(f"[+] Loaded {len(final_df):,} buy records into DuckDB. Total records in database: {total_records:,}")
     print("[*] Sample loaded buys:")
