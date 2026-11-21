@@ -146,13 +146,20 @@ def select_desk_candidates(
         desk_mask &= df["daily_vol_30d"] >= cfg.min_daily_vol
     if cfg.max_vwap_ratio_180d is not None:
         desk_mask &= df["price_m_30d"] <= (df["price_m_180d"] * cfg.max_vwap_ratio_180d)
+    if "bid_share_30d" in df.columns and desk_type in ("tactical", "evergreen"):
+        desk_mask &= df["bid_share_30d"].fillna(0.35) >= 0.12
 
     candidates = df[base_mask & (desk_mask | is_sticky_series)].copy()
     candidates["passes_desk"] = desk_mask.loc[candidates.index]
     candidates["is_sticky"] = candidates["type_id"].isin(desk_sticky_ids)
 
     max_cap_m = (cfg.max_line_cap * scale_factor) / 1e6
-    deployable_m = (candidates["daily_turnover_m"] * cfg.vol_pct).clip(upper=max_cap_m)
+    bid_share_series = (
+        candidates["bid_share_30d"].fillna(0.35).clip(lower=0.05, upper=0.95)
+        if "bid_share_30d" in candidates.columns
+        else 1.0
+    )
+    deployable_m = (candidates["daily_turnover_m"] * bid_share_series * cfg.vol_pct).clip(upper=max_cap_m)
     net_spread = (candidates["avg_spread_30d"] - 5.35).clip(lower=0.0)
 
     if desk_type == "hold":
@@ -171,6 +178,7 @@ def select_desk_candidates(
     candidates = candidates.sort_values(by=["is_sticky", cfg.sort_col], ascending=[False, False])
 
     params = {
+        "name": cfg.name,
         "vol_pct": cfg.vol_pct,
         "max_line_cap": cfg.max_line_cap * scale_factor,
         "min_line_cap": cfg.min_line_cap,
@@ -386,7 +394,15 @@ def compute_line_sizing(
     if not is_sticky and cost_unit > max_line_cap:
         return None
 
-    raw_qty = max(1, int(row["daily_vol_30d"] * vol_pct))
+    raw_bid_share = row.get("bid_share_30d")
+    if raw_bid_share is not None and not (isinstance(raw_bid_share, float) and math.isnan(raw_bid_share)):
+        bid_share = max(0.05, min(0.95, float(raw_bid_share)))
+    else:
+        bid_share = 1.0
+
+    desk_name = str(desk_params.get("name") or "")
+    effective_bid_vol = row["daily_vol_30d"] * (bid_share if desk_name != "hold" else 1.0)
+    raw_qty = max(1, int(effective_bid_vol * vol_pct))
     cap_qty = max(1, int(max_line_cap / cost_unit)) if cost_unit > 0 else 1
     qty = min(raw_qty, cap_qty)
 

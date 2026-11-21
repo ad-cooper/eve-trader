@@ -150,7 +150,24 @@ def load_market_universe():
             AVG(volume) AS daily_vol_30d,
             SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_30d,
             AVG((highest - lowest) / NULLIF(average, 0)) * 100.0 AS avg_spread_30d,
-            (COUNT(CASE WHEN (average - lowest) / NULLIF(average, 0) >= 0.045 THEN 1 END) * 100.0 / COUNT(*)) AS dump_freq_pct
+            SUM(volume * CASE WHEN highest > lowest THEN LEAST(0.95, GREATEST(0.02, (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest))) ELSE 0.25 END) / NULLIF(SUM(volume), 0) AS bid_share_30d,
+            SUM(
+                volume * CASE
+                    WHEN highest > lowest THEN LEAST(0.95, GREATEST(0.02, (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest)))
+                    ELSE 0.25
+                END
+            ) / NULLIF(SUM(volume), 0) AS bid_share_30d,
+            (COUNT(
+                CASE WHEN (average - lowest) / NULLIF(average, 0) >= 0.045
+                      AND (
+                          CASE WHEN highest > lowest
+                               THEN (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest)
+                               ELSE 0.25
+                          END
+                      ) >= 0.25
+                     THEN 1
+                END
+            ) * 100.0 / COUNT(*)) AS dump_freq_pct
         FROM forge_market_history
         WHERE date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history) AND volume > 0
         GROUP BY type_id
@@ -185,6 +202,7 @@ def load_market_universe():
         f.min_low_14d / 1e6 AS min_low_m_14d,
         f.p20_low_30d / 1e6 AS p20_low_m_30d,
         m.daily_vol_30d,
+        COALESCE(m.bid_share_30d, 0.35) AS bid_share_30d,
         m.dump_freq_pct,
         m.avg_spread_30d,
         (m.daily_vol_30d * (m.vwap_30d / 1e6)) AS daily_turnover_m

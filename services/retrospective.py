@@ -99,7 +99,23 @@ def _load_universe_as_of(con: duckdb.DuckDBPyConnection, as_of_date) -> pd.DataF
             AVG(volume) AS daily_vol_30d,
             SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_30d,
             AVG((highest - lowest) / NULLIF(average, 0)) * 100.0 AS avg_spread_30d,
-            (COUNT(CASE WHEN (average - lowest) / NULLIF(average, 0) >= 0.045 THEN 1 END) * 100.0 / COUNT(*)) AS dump_freq_pct
+            SUM(
+                volume * CASE
+                    WHEN highest > lowest THEN LEAST(0.95, GREATEST(0.02, (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest)))
+                    ELSE 0.25
+                END
+            ) / NULLIF(SUM(volume), 0) AS bid_share_30d,
+            (COUNT(
+                CASE WHEN (average - lowest) / NULLIF(average, 0) >= 0.045
+                      AND (
+                          CASE WHEN highest > lowest
+                               THEN (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest)
+                               ELSE 0.25
+                          END
+                      ) >= 0.25
+                     THEN 1
+                END
+            ) * 100.0 / COUNT(*)) AS dump_freq_pct
         FROM hist
         WHERE date >= DATE '{as_of_date}' - INTERVAL 30 DAY
         GROUP BY type_id
@@ -134,6 +150,7 @@ def _load_universe_as_of(con: duckdb.DuckDBPyConnection, as_of_date) -> pd.DataF
         f.min_low_14d / 1e6 AS min_low_m_14d,
         f.p20_low_30d / 1e6 AS p20_low_m_30d,
         m.daily_vol_30d,
+        COALESCE(m.bid_share_30d, 0.25) AS bid_share_30d,
         m.dump_freq_pct,
         m.avg_spread_30d,
         (m.daily_vol_30d * (m.vwap_30d / 1e6)) AS daily_turnover_m
@@ -176,6 +193,30 @@ def _load_forward_candles(con: duckdb.DuckDBPyConnection, as_of_date, horizon_da
     return by_tid
 
 
+def _estimate_daily_bid_share(lowest: float, highest: float, average: float) -> float:
+    """
+    Infers the fraction of daily volume executed on the bid (buy-order) side from OHLC/VWAP:
+    average ≈ b * lowest + (1 - b) * highest  =>  b = (highest - average) / (highest - lowest).
+    """
+    if highest <= 0 or lowest <= 0 or highest <= lowest:
+        return 0.25
+    clamped_avg = min(max(average, lowest), highest)
+    b = (highest - clamped_avg) / (highest - lowest)
+    return max(0.02, min(0.95, b))
+
+
+def _estimate_daily_bid_share(lowest: float, highest: float, average: float) -> float:
+    """
+    Infers the fraction of daily volume executed on the bid (buy-order) side from OHLC/VWAP:
+    average ≈ b * lowest + (1 - b) * highest  =>  b = (highest - average) / (highest - lowest).
+    """
+    if highest <= 0 or lowest <= 0 or highest <= lowest:
+        return 0.25
+    clamped_avg = min(max(average, lowest), highest)
+    b = (highest - clamped_avg) / (highest - lowest)
+    return max(0.02, min(0.95, b))
+
+
 def _simulate_line_execution(
     candles: list[dict],
     qty: int,
@@ -185,15 +226,16 @@ def _simulate_line_execution(
     max_hold_days: int,
 ) -> dict:
     """
-    Replays daily order fills and exits over `max_hold_days`:
-    - Buys up to `max(1, int(daily_volume * vol_pct))` on days where `lowest <= target_buy`.
-    - Sells filled inventory on subsequent days where `highest >= target_sell`.
-    - Marks any unsold inventory to market at the final candle's `average` price on day `max_hold_days`.
+    Replays daily order fills and exits over `max_hold_days` using inferred bid/ask volume
+    and candle depth weighting so 1-unit outlier wicks do not trigger phantom full-size fills.
     """
     window = candles[:max_hold_days]
     if not window or qty <= 0 or target_buy <= 0 or target_sell <= 0:
         return {
+            "target_qty": max(0, int(qty)),
             "filled_qty": 0,
+            "unfilled_qty": max(0, int(qty)),
+            "qty_fill_pct": 0.0,
             "sold_qty": 0,
             "unsold_qty": 0,
             "deployed_isk": 0.0,
@@ -212,20 +254,42 @@ def _simulate_line_execution(
     unit_proceeds = calc_net_proceeds(target_sell)
 
     for day in window:
-        daily_cap = max(1, int(day["volume"] * vol_pct))
+        low = day["lowest"]
+        high = day["highest"]
+        avg = day["average"]
+        vol = day["volume"]
+        bid_share = _estimate_daily_bid_share(low, high, avg)
 
-        if unsold_inventory > 0 and day["highest"] >= target_sell:
-            sell_fill = min(unsold_inventory, daily_cap)
-            unsold_inventory -= sell_fill
-            total_sold += sell_fill
-            net_revenue += sell_fill * unit_proceeds
+        if unsold_inventory > 0 and high >= target_sell:
+            ask_vol = vol * max(0.05, 1.0 - bid_share)
+            if avg > 0 and high > avg and target_sell > avg:
+                sell_depth = max(0.10, min(1.0, (high - target_sell) / (high - avg)))
+            else:
+                sell_depth = 1.0
+            fillable_ask = ask_vol * sell_depth
+            raw_sell_cap = fillable_ask * vol_pct
+            daily_sell_cap = int(raw_sell_cap) if raw_sell_cap >= 1.0 else (1 if fillable_ask >= 2.0 else 0)
+            if daily_sell_cap > 0:
+                sell_fill = min(unsold_inventory, daily_sell_cap)
+                unsold_inventory -= sell_fill
+                total_sold += sell_fill
+                net_revenue += sell_fill * unit_proceeds
 
-        if remaining_buy > 0 and day["lowest"] > 0 and day["lowest"] <= target_buy:
-            buy_fill = min(remaining_buy, daily_cap)
-            remaining_buy -= buy_fill
-            unsold_inventory += buy_fill
-            total_bought += buy_fill
-            gross_cost += buy_fill * unit_cost
+        if remaining_buy > 0 and low > 0 and low <= target_buy:
+            bid_vol = vol * bid_share
+            if avg > low and target_buy < avg:
+                buy_depth = max(0.10, min(1.0, (target_buy - low) / (avg - low)))
+            else:
+                buy_depth = 1.0
+            fillable_bid = bid_vol * buy_depth
+            raw_buy_cap = fillable_bid * vol_pct
+            daily_buy_cap = int(raw_buy_cap) if raw_buy_cap >= 1.0 else (1 if fillable_bid >= 2.0 else 0)
+            if daily_buy_cap > 0:
+                buy_fill = min(remaining_buy, daily_buy_cap)
+                remaining_buy -= buy_fill
+                unsold_inventory += buy_fill
+                total_bought += buy_fill
+                gross_cost += buy_fill * unit_cost
 
     mtm_revenue = 0.0
     if unsold_inventory > 0:
@@ -234,18 +298,24 @@ def _simulate_line_execution(
 
     realized_pnl = (net_revenue + mtm_revenue) - gross_cost
     realized_roi = (realized_pnl / gross_cost * 100.0) if gross_cost > 0 else 0.0
+    qty_fill_pct = round((total_bought / qty * 100.0) if qty > 0 else 0.0, 1)
 
     if total_bought == 0:
-        status = "UNFILLED"
-    elif total_sold == total_bought:
+        status = "UNFILLED_TIMEOUT"
+    elif total_sold == total_bought and total_bought == qty:
         status = "ROUNDTRIP_COMPLETE"
+    elif total_sold == total_bought:
+        status = "PARTIAL_FILL_ROUNDTRIP"
     elif total_sold > 0:
         status = "PARTIAL_EXIT_MTM"
     else:
         status = "STUCK_INVENTORY_MTM"
 
     return {
+        "target_qty": qty,
         "filled_qty": total_bought,
+        "unfilled_qty": remaining_buy,
+        "qty_fill_pct": qty_fill_pct,
         "sold_qty": total_sold,
         "unsold_qty": unsold_inventory,
         "deployed_isk": round(gross_cost, 2),
@@ -345,6 +415,10 @@ def _simulate_waterfall_checkpoint(
                 "type_id": tid,
                 "name": str(row["item_name"]),
                 "qty": sizing["qty"],
+                "filled_qty": sim["filled_qty"],
+                "unfilled_qty": sim["unfilled_qty"],
+                "qty_fill_pct": sim["qty_fill_pct"],
+                "bid_share_pct": round(float(row.get("bid_share_30d") or 0.25) * 100.0, 1),
                 "target_buy": round(pricing["target_buy"], 2),
                 "target_sell": round(pricing["target_sell"], 2),
                 "projected_margin_pct": round(pricing["net_margin"], 2),
@@ -583,14 +657,21 @@ def run_local_retrospective(
                     "appearances": 0,
                     "fills": 0,
                     "roundtrips": 0,
+                    "target_qty_total": 0,
+                    "filled_qty_total": 0,
+                    "bid_share_pct": ln["bid_share_pct"],
+                    "allocated_m": 0.0,
                     "deployed_m": 0.0,
                     "realized_pnl_m": 0.0,
                 },
             )
             agg["appearances"] += 1
+            agg["target_qty_total"] += ln["qty"]
+            agg["filled_qty_total"] += ln["filled_qty"]
+            agg["allocated_m"] += ln["allocated_isk"] / 1e6
             if ln["deployed_isk"] > 0:
                 agg["fills"] += 1
-            if ln["status"] == "ROUNDTRIP_COMPLETE":
+            if ln["status"] in ("ROUNDTRIP_COMPLETE", "PARTIAL_FILL_ROUNDTRIP"):
                 agg["roundtrips"] += 1
             agg["deployed_m"] += ln["deployed_isk"] / 1e6
             agg["realized_pnl_m"] += ln["realized_pnl_isk"] / 1e6
@@ -660,8 +741,22 @@ def run_local_retrospective(
 
     all_items_ranked = sorted(item_perf.values(), key=lambda x: x["realized_pnl_m"], reverse=True)
     for it in all_items_ranked:
+        it["allocated_m"] = round(it["allocated_m"], 2)
         it["deployed_m"] = round(it["deployed_m"], 2)
         it["realized_pnl_m"] = round(it["realized_pnl_m"], 2)
+        it["qty_fill_pct"] = round(
+            (it["filled_qty_total"] / it["target_qty_total"] * 100.0) if it["target_qty_total"] > 0 else 0.0,
+            1,
+        )
+
+    over_sized_timeouts = sorted(
+        [
+            x for x in all_items_ranked
+            if x["target_qty_total"] >= 5 and x["qty_fill_pct"] < 35.0
+        ],
+        key=lambda x: (x["allocated_m"] - x["deployed_m"]),
+        reverse=True,
+    )[:15]
 
     missed_gems.sort(key=lambda x: x["realized_pnl_m"], reverse=True)
     unified_diff = _build_services_ledgers_diff(optimized_profiles)
@@ -677,6 +772,7 @@ def run_local_retrospective(
         "tolerance_changes": tolerance_changes,
         "best_suggested_items": all_items_ranked[:15],
         "worst_suggested_items": [x for x in reversed(all_items_ranked) if x["realized_pnl_m"] < 0][:15],
+        "over_sized_timeout_items": over_sized_timeouts,
         "missed_opportunities_in_practice": missed_gems[:20],
         "unified_diff": unified_diff,
     }
