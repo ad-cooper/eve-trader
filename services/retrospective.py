@@ -1113,16 +1113,27 @@ def _ensure_remote_branch(
     target_branch: str,
     fallback_source: str = "main",
 ) -> tuple[str | None, str | None]:
-    """Ensures `target_branch` exists on GitHub, creating it from `fallback_source` if missing."""
+    """Ensures `target_branch` exists on GitHub, creating it from the repo's default branch if missing."""
     import requests
+
+    repo_resp = requests.get(api_base, headers=headers, timeout=15)
+    if repo_resp.status_code == 404:
+        return (
+            None,
+            f"GitHub returned 404 for {api_base}. Ensure GITHUB_REPO is accurate and GITHUB_TOKEN "
+            f"has 'Contents: Read & Write' and 'Pull requests: Read & Write' on this repository.",
+        )
+    if repo_resp.status_code in (401, 403):
+        return None, f"GitHub auth/permission error ({repo_resp.status_code}): {repo_resp.text}"
 
     ref_resp = requests.get(f"{api_base}/git/ref/heads/{target_branch}", headers=headers, timeout=15)
     if ref_resp.status_code == 200:
         return ref_resp.json()["object"]["sha"], None
 
-    src_resp = requests.get(f"{api_base}/git/ref/heads/{fallback_source}", headers=headers, timeout=15)
+    default_branch = repo_resp.json().get("default_branch") or fallback_source
+    src_resp = requests.get(f"{api_base}/git/ref/heads/{default_branch}", headers=headers, timeout=15)
     if src_resp.status_code != 200:
-        return None, f"Failed to read {fallback_source} ref: {src_resp.text}"
+        return None, f"Failed to read {default_branch} ref: {src_resp.text}"
     src_sha = src_resp.json()["object"]["sha"]
 
     create_resp = requests.post(
@@ -1132,7 +1143,7 @@ def _ensure_remote_branch(
         timeout=15,
     )
     if create_resp.status_code not in (200, 201):
-        return None, f"Failed to create branch {target_branch} from {fallback_source}: {create_resp.text}"
+        return None, f"Failed to create branch {target_branch} from {default_branch}: {create_resp.text}"
     return src_sha, None
 
 
@@ -1155,7 +1166,12 @@ def create_and_merge_github_pr(
         return {"status": "blocked", "reason": "Direct PR merges into 'main' are disabled; use 'ai-autopilot'."}
 
     token = os.getenv("GITHUB_TOKEN", "").strip()
-    repo = os.getenv("GITHUB_REPO", "ad-cooper/eve-trader").strip()
+    repo = os.getenv("GITHUB_REPO", "ad-cooper/eve-trader").strip().rstrip("/")
+    for _pfx in ("https://github.com/", "http://github.com/", "git@github.com:"):
+        if repo.startswith(_pfx):
+            repo = repo[len(_pfx):]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
     if not token:
         return {"status": "skipped", "reason": "GITHUB_TOKEN is not set in container environment"}
 
