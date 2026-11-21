@@ -298,6 +298,8 @@ def _simulate_line_execution(
 
     realized_pnl = (net_revenue + mtm_revenue) - gross_cost
     realized_roi = (realized_pnl / gross_cost * 100.0) if gross_cost > 0 else 0.0
+    sold_cost = total_sold * unit_cost
+    sold_roi = ((net_revenue - sold_cost) / sold_cost * 100.0) if sold_cost > 0 else 0.0
     qty_fill_pct = round((total_bought / qty * 100.0) if qty > 0 else 0.0, 1)
 
     if total_bought == 0:
@@ -321,130 +323,318 @@ def _simulate_line_execution(
         "deployed_isk": round(gross_cost, 2),
         "realized_pnl_isk": round(realized_pnl, 2),
         "realized_roi_pct": round(realized_roi, 2),
+        "sold_roi_pct": round(sold_roi, 2),
         "status": status,
     }
 
 
+def _summarize_spread_compression_audit(audit_events: list[dict], exit_records: list[dict]) -> dict:
+    """Summarizes compressed-spread re-buy prevention and exit ROI quality across walk-forward checkpoints."""
+    blocked_new = [e for e in audit_events if e["kind"] == "blocked_new_compressed"]
+    blocked_sticky_buy = [e for e in audit_events if e["kind"] == "blocked_sticky_buy_only"]
+    zeroed_sticky_hold = [e for e in audit_events if e["kind"] == "zeroed_sticky_holding_buy"]
+    leaked_buys = [e for e in audit_events if e["kind"] == "leaked_compressed_buy"]
+
+    prevented = blocked_new + blocked_sticky_buy + zeroed_sticky_hold
+    avoided_capital_m = round(sum(e["legacy_allocated_m"] for e in prevented), 2)
+    counterfactual_pnl_m = round(sum(e["legacy_forward_pnl_m"] for e in prevented), 2)
+
+    healthy_exits = [x for x in exit_records if x["sold_qty"] > 0 and x["sold_roi_pct"] >= x["min_target_roi"]]
+    low_margin_exits = [x for x in exit_records if x["sold_qty"] > 0 and 0.0 <= x["sold_roi_pct"] < x["min_target_roi"]]
+    loss_exits = [x for x in exit_records if x["sold_qty"] > 0 and x["sold_roi_pct"] < 0.0]
+
+    return {
+        "confirmation_status": "CONFIRMED_FIXED" if len(leaked_buys) == 0 else "WARNING_LEAKED_COMPRESSED_BUYS",
+        "leaked_compressed_buys_count": len(leaked_buys),
+        "compressed_buys_prevented_total": len(prevented),
+        "breakdown": {
+            "blocked_new_compressed_entries": len(blocked_new),
+            "cancelled_sticky_buy_only_orders": len(blocked_sticky_buy),
+            "zeroed_buy_while_selling_or_holding": len(zeroed_sticky_hold),
+        },
+        "avoided_capital_locked_m": avoided_capital_m,
+        "legacy_rule_counterfactual_pnl_m": counterfactual_pnl_m,
+        "exit_quality": {
+            "healthy_target_exits": len(healthy_exits),
+            "avg_healthy_exit_roi_pct": round(sum(x["sold_roi_pct"] for x in healthy_exits) / len(healthy_exits), 2) if healthy_exits else 0.0,
+            "low_margin_compressed_exits": len(low_margin_exits),
+            "avg_low_margin_exit_roi_pct": round(sum(x["sold_roi_pct"] for x in low_margin_exits) / len(low_margin_exits), 2) if low_margin_exits else 0.0,
+            "negative_roi_exits": len(loss_exits),
+        },
+        "top_prevented_compressed_buys": sorted(prevented, key=lambda x: x["legacy_allocated_m"], reverse=True)[:10],
+    }
+
+
 def _simulate_waterfall_checkpoint(
-    df_universe: pd.DataFrame,
-    forward_candles: dict[int, list[dict]],
+    as_of_date: str,
     profiles: dict[str, DeskProfile],
-    total_budget: float,
-    base_mask_static: pd.Series,
+    total_budget_b: float = 80.0,
+    carried_incumbents: dict | None = None,
 ) -> dict:
-    """Runs a full 3-desk waterfall allocation and forward execution replay for one historical date."""
-    empty_incumbents = IncumbentState(
-        active_buys={},
-        active_sells={},
-        asset_qtys={},
-        significant_assets=set(),
-        desk_sticky_ids=set(),
-    )
-    scale_factor = max(1.0, min(2.5, total_budget / 50.0e9))
+    """
+    Simulates one weekly waterfall checkpoint including spot ask/bid telemetry (`p_info`),
+    multi-checkpoint incumbent carry-over, and counterfactual auditing of compressed-spread buys.
+    """
+    df = _load_universe_as_of(as_of_date)
+    candles_map = _load_forward_candles(as_of_date, max_days=21)
+    if df.empty:
+        return {
+            "as_of_date": as_of_date,
+            "desks": {},
+            "lines": [],
+            "missed_opportunities": [],
+            "carry_over": {"buys": {}, "sells": {}, "assets": {}, "prior_desks": {}},
+            "compression_events": [],
+        }
+
+    carried = carried_incumbents or {}
+    c_buys = dict(carried.get("buys") or {})
+    c_sells = dict(carried.get("sells") or {})
+    c_assets = dict(carried.get("assets") or {})
+    c_prior = dict(carried.get("prior_desks") or {})
+
+    total_budget = total_budget_b * 1e9
     claimed_ids: set[int] = set()
-    carried_slack = 0.0
+    cascaded_slack = 0.0
     desk_results: dict[str, dict] = {}
     all_lines: list[dict] = []
+    missed_opps: list[dict] = []
+    compression_events: list[dict] = []
+
+    next_buys: dict[int, dict] = {}
+    next_sells: dict[int, dict] = {}
+    next_assets: dict[int, int] = {}
+    next_prior: dict[int, str] = {}
 
     for desk in DESK_ORDER:
         cfg = profiles[desk]
-        target_budget = (total_budget * cfg.ratio) + carried_slack
-        mask = base_mask_static & (~df_universe["type_id"].isin(claimed_ids))
-        candidates, desk_params = select_desk_candidates(
-            df=df_universe,
-            desk_type=desk,
-            base_mask=mask,
-            desk_sticky_ids=set(),
-            scale_factor=scale_factor,
-            profile=cfg,
+        base_budget = total_budget * cfg.ratio
+        desk_budget = base_budget + cascaded_slack
+
+        desk_buys = {tid: v for tid, v in c_buys.items() if c_prior.get(tid, desk) == desk}
+        desk_sells = {tid: v for tid, v in c_sells.items() if c_prior.get(tid, desk) == desk}
+        desk_assets = {tid: q for tid, q in c_assets.items() if c_prior.get(tid, desk) == desk and q > 0}
+        desk_sticky_ids = set(desk_buys.keys()) | set(desk_sells.keys()) | set(desk_assets.keys())
+
+        incumbents = IncumbentState(
+            active_buys=desk_buys,
+            active_sells=desk_sells,
+            asset_qtys=desk_assets,
+            significant_assets={tid for tid, q in desk_assets.items() if q > 0},
+            desk_sticky_ids=desk_sticky_ids,
         )
 
-        allocated_cap = 0.0
-        deployed_cap = 0.0
-        realized_pnl = 0.0
-        filled_lines = 0
-        completed_lines = 0
-        stuck_lines = 0
+        base_mask = build_universe_exclusion_mask(
+            df=df,
+            claimed_ids=claimed_ids,
+            incumbents=incumbents,
+            bl_items=set(),
+            bl_groups=set(),
+            bl_meta={},
+            losing_tids=set(),
+        )
+        candidates, desk_params = select_desk_candidates(df, desk, base_mask, desk_sticky_ids, cfg=cfg)
+        desk_params["name"] = cfg.name
+        desk_params["live_min_margin"] = cfg.live_min_margin
+
+        remaining = desk_budget
+        allocated_isk = 0.0
+        deployed_isk = 0.0
+        realized_pnl_isk = 0.0
         line_count = 0
+        filled_count = 0
+        roundtrip_count = 0
+        stuck_count = 0
 
         for _, row in candidates.iterrows():
-            remaining_budget = target_budget - allocated_cap
-            if remaining_budget <= 0:
-                break
-
             tid = int(row["type_id"])
-            pricing = compute_candidate_pricing(row, desk, {}, empty_incumbents, is_sticky=False)
-            if pricing is None:
+            is_sticky = bool(row.get("is_sticky", tid in desk_sticky_ids))
+            passes_desk = bool(row.get("passes_desk", True))
+            candles = candles_map.get(tid, [])
+
+            p_info: dict = {}
+            if candles:
+                d0 = candles[0]
+                spot_ask = float(d0.get("highest") or d0.get("average") or 0.0)
+                spot_buy = float(d0.get("lowest") or 0.0)
+                if spot_ask > 0:
+                    p_info["lowest_ask"] = spot_ask
+                if spot_buy > 0:
+                    p_info["top_buy"] = spot_buy
+
+            pricing = compute_candidate_pricing(row, desk, p_info, incumbents, is_sticky)
+            if not pricing:
                 continue
+
+            nominal_margin = float(pricing["net_margin"])
+            live_exec_margin = float(pricing.get("live_exec_margin", nominal_margin))
+            has_buy = tid in desk_buys
+            has_sell = tid in desk_sells
+            held_qty = int(desk_assets.get(tid, 0))
 
             sizing = compute_line_sizing(
                 row=row,
                 pricing=pricing,
                 desk_params=desk_params,
-                incumbents=empty_incumbents,
-                is_sticky=False,
-                passes_desk=bool(row.get("passes_desk", True)),
-                remaining_budget=remaining_budget,
+                incumbents=incumbents,
+                is_sticky=is_sticky,
+                passes_desk=passes_desk,
+                remaining_budget=remaining,
             )
-            if sizing is None:
+
+            is_compressed = (nominal_margin >= cfg.sticky_margin_floor) and (live_exec_margin < cfg.live_min_margin)
+            if is_compressed:
+                buy_rem = int(desk_buys[tid].get("volume_remain", 0)) if has_buy else 0
+                sell_rem = int(desk_sells[tid].get("volume_remain", 0)) if has_sell else 0
+                existing_qty = max(buy_rem, sell_rem + held_qty)
+                legacy_qty = max(1, existing_qty) if is_sticky else max(1, int(row["daily_vol_30d"] * cfg.vol_pct))
+                legacy_alloc = legacy_qty * pricing["cost_unit"]
+                legacy_sim = _simulate_line_execution(
+                    candles=candles,
+                    qty=legacy_qty,
+                    target_buy=pricing["target_buy"],
+                    target_sell=pricing["target_sell"],
+                    vol_pct=cfg.vol_pct,
+                    max_hold_days=cfg.max_hold_days,
+                )
+
+                allow_new_buy = bool(sizing.get("allow_new_buy", True)) if sizing else False
+                total_line_qty = int(sizing["qty"]) if sizing else 0
+                inc_buy_qty = max(0, total_line_qty - (sell_rem + held_qty)) if allow_new_buy else 0
+                if sizing is None and not is_sticky:
+                    kind = "blocked_new_compressed"
+                elif sizing is None and is_sticky and not has_sell and held_qty == 0:
+                    kind = "blocked_sticky_buy_only"
+                elif sizing is not None and inc_buy_qty == 0 and (has_sell or held_qty > 0):
+                    kind = "zeroed_sticky_holding_buy"
+                elif inc_buy_qty > 0:
+                    kind = "leaked_compressed_buy"
+                else:
+                    kind = None
+
+                if kind:
+                    compression_events.append({
+                        "checkpoint": as_of_date,
+                        "desk": desk,
+                        "type_id": tid,
+                        "name": str(row["item_name"]),
+                        "kind": kind,
+                        "nominal_margin_pct": round(nominal_margin, 2),
+                        "live_exec_margin_pct": round(live_exec_margin, 2),
+                        "new_qty": new_qty,
+                        "legacy_qty": legacy_qty,
+                        "legacy_allocated_m": round(legacy_alloc / 1e6, 2),
+                        "legacy_forward_pnl_m": round(legacy_sim.get("realized_pnl_isk", 0.0) / 1e6, 2),
+                    })
+
+            if not sizing:
+                if passes_desk and candles:
+                    sim_missed = _simulate_line_execution(
+                        candles=candles,
+                        qty=max(1, int(row["daily_vol_30d"] * cfg.vol_pct)),
+                        target_buy=pricing["target_buy"],
+                        target_sell=pricing["target_sell"],
+                        vol_pct=cfg.vol_pct,
+                        max_hold_days=cfg.max_hold_days,
+                    )
+                    if sim_missed.get("realized_pnl_isk", 0.0) > 250e6:
+                        missed_opps.append({
+                            "checkpoint": as_of_date,
+                            "desk": desk,
+                            "type_id": tid,
+                            "name": str(row["item_name"]),
+                            "realized_pnl_m": round(sim_missed["realized_pnl_isk"] / 1e6, 2),
+                            "realized_roi_pct": sim_missed["realized_roi_pct"],
+                            "blocked_by": f"budget/cap (cost {pricing['cost_unit']/1e6:.1f}M)",
+                        })
                 continue
 
-            allocated_cap += sizing["capital"]
             claimed_ids.add(tid)
+            sell_rem = int(desk_sells[tid].get("volume_remain", 0)) if tid in desk_sells else 0
+            held_qty_cur = int(desk_assets.get(tid, 0))
+            allow_buy = bool(sizing.get("allow_new_buy", True))
+            buy_qty = max(0, int(sizing["qty"]) - (sell_rem + held_qty_cur)) if allow_buy else 0
+            line_alloc = (buy_qty * pricing["cost_unit"]) if buy_qty > 0 else 0.0
+            remaining -= line_alloc
+            allocated_isk += line_alloc
             line_count += 1
 
             sim = _simulate_line_execution(
-                candles=forward_candles.get(tid, []),
-                qty=sizing["qty"],
+                candles=candles,
+                qty=buy_qty,
                 target_buy=pricing["target_buy"],
                 target_sell=pricing["target_sell"],
                 vol_pct=cfg.vol_pct,
                 max_hold_days=cfg.max_hold_days,
             )
-            deployed_cap += sim["deployed_isk"]
-            realized_pnl += sim["realized_pnl_isk"]
-            if sim["filled_qty"] > 0:
-                filled_lines += 1
-            if sim["status"] == "ROUNDTRIP_COMPLETE":
-                completed_lines += 1
-            if sim["unsold_qty"] > 0:
-                stuck_lines += 1
 
+            deployed_isk += sim["deployed_isk"]
+            realized_pnl_isk += sim["realized_pnl_isk"]
+            if sim["filled_qty"] > 0:
+                filled_count += 1
+            if sim["status"] in ("ROUNDTRIP_COMPLETE", "PARTIAL_FILL_ROUNDTRIP"):
+                roundtrip_count += 1
+            if sim["unsold_qty"] > 0:
+                stuck_count += 1
+
+            if sim["unfilled_qty"] > 0 and buy_qty > 0:
+                next_buys[tid] = {"price": pricing["target_buy"], "volume_remain": sim["unfilled_qty"]}
+                next_prior[tid] = desk
+            if sim["unsold_qty"] > 0:
+                next_sells[tid] = {"price": pricing["target_sell"], "volume_remain": sim["unsold_qty"]}
+                next_assets[tid] = sim["unsold_qty"]
+                next_prior[tid] = desk
+
+            min_target_roi = cfg.take_profit_roi if cfg.take_profit_roi > 0 else cfg.sticky_margin_floor
             all_lines.append({
+                "checkpoint": as_of_date,
                 "desk": desk,
                 "type_id": tid,
                 "name": str(row["item_name"]),
-                "qty": sizing["qty"],
+                "qty": buy_qty,
                 "filled_qty": sim["filled_qty"],
                 "unfilled_qty": sim["unfilled_qty"],
                 "qty_fill_pct": sim["qty_fill_pct"],
+                "sold_qty": sim["sold_qty"],
+                "sold_roi_pct": sim.get("sold_roi_pct", sim["realized_roi_pct"]),
+                "min_target_roi": min_target_roi,
                 "bid_share_pct": round(float(row.get("bid_share_30d") or 0.25) * 100.0, 1),
-                "target_buy": round(pricing["target_buy"], 2),
-                "target_sell": round(pricing["target_sell"], 2),
-                "projected_margin_pct": round(pricing["net_margin"], 2),
-                "allocated_isk": round(sizing["capital"], 2),
+                "allocated_isk": line_alloc,
                 "deployed_isk": sim["deployed_isk"],
                 "realized_pnl_isk": sim["realized_pnl_isk"],
                 "realized_roi_pct": sim["realized_roi_pct"],
                 "status": sim["status"],
             })
 
-            if allocated_cap >= (target_budget * 0.995):
-                break
+        cascaded_slack = max(0.0, remaining)
+        fill_rate = round((filled_count / line_count * 100.0) if line_count > 0 else 0.0, 1)
+        rt_rate = round((roundtrip_count / line_count * 100.0) if line_count > 0 else 0.0, 1)
+        stuck_rate = round((stuck_count / filled_count * 100.0) if filled_count > 0 else 0.0, 1)
 
-        carried_slack = max(0.0, target_budget - allocated_cap)
         desk_results[desk] = {
             "lines": line_count,
-            "target_budget_b": round(target_budget / 1e9, 2),
-            "allocated_b": round(allocated_cap / 1e9, 2),
-            "deployed_b": round(deployed_cap / 1e9, 2),
-            "realized_pnl_m": round(realized_pnl / 1e6, 2),
-            "fill_rate_pct": round((filled_lines / line_count * 100.0) if line_count else 0.0, 1),
-            "roundtrip_pct": round((completed_lines / line_count * 100.0) if line_count else 0.0, 1),
-            "stuck_rate_pct": round((stuck_lines / filled_lines * 100.0) if filled_lines else 0.0, 1),
+            "allocated_isk": allocated_isk,
+            "deployed_isk": deployed_isk,
+            "realized_pnl_isk": realized_pnl_isk,
+            "fill_rate_pct": fill_rate,
+            "roundtrip_pct": rt_rate,
+            "stuck_rate_pct": stuck_rate,
         }
 
-    return {"desks": desk_results, "lines": all_lines}
+    return {
+        "as_of_date": as_of_date,
+        "desks": desk_results,
+        "lines": all_lines,
+        "missed_opportunities": missed_opps,
+        "carry_over": {
+            "buys": next_buys,
+            "sells": next_sells,
+            "assets": next_assets,
+            "prior_desks": next_prior,
+        },
+        "compression_events": compression_events,
+    }
+
 
 
 def _diagnose_rejection_reason(row: pd.Series, cfg: DeskProfile) -> str:
@@ -589,65 +779,57 @@ def run_local_retrospective(
     step_days: int = 7,
     total_budget_b: float = 80.0,
 ) -> dict:
-    """
-    Runs a completely local walk-forward backtest and counterfactual parameter optimizer
-    using historical DuckDB market candles and SQLite SDE metadata.
-    """
-    total_budget = total_budget_b * 1e9
-    max_horizon = max(cfg.max_hold_days for cfg in DESK_PROFILES.values())
+    """Runs walk-forward historical backtests across checkpoints and audits spread-compression & fill behavior."""
+    checkpoints = _build_checkpoints(lookback_days=lookback_days, step_days=step_days)
+    if not checkpoints:
+        return {"error": "No historical checkpoints available in DuckDB forge_market_history."}
 
-    con = duckdb.connect(DUCKDB_PATH, read_only=True)
-    if os.path.exists(SQLITE_PATH):
-        con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
+    baseline_runs: list[dict] = []
+    carried = None
+    all_compression_events: list[dict] = []
+    for cp in checkpoints:
+        run_res = _simulate_waterfall_checkpoint(cp, DESK_PROFILES, total_budget_b, carried_incumbents=carried)
+        baseline_runs.append(run_res)
+        carried = run_res.get("carry_over")
+        all_compression_events.extend(run_res.get("compression_events") or [])
 
-    try:
-        min_dt, max_dt = con.execute("SELECT MIN(date), MAX(date) FROM forge_market_history").fetchone()
-        if not min_dt or not max_dt:
-            return {"error": "forge_market_history is empty. Run scripts/sync_market_data.py first."}
+    opt_profiles, tolerance_changes = _optimize_desk_profiles(checkpoints, DESK_PROFILES, total_budget_b)
+    opt_runs: list[dict] = []
+    opt_carried = None
+    for cp in checkpoints:
+        opt_res = _simulate_waterfall_checkpoint(cp, opt_profiles, total_budget_b, carried_incumbents=opt_carried)
+        opt_runs.append(opt_res)
+        opt_carried = opt_res.get("carry_over")
 
-        latest_usable = max_dt - pd.Timedelta(days=max_horizon)
-        earliest_usable = max(min_dt + pd.Timedelta(days=30), latest_usable - pd.Timedelta(days=lookback_days))
-        if earliest_usable > latest_usable:
-            return {
-                "error": f"Insufficient history window ({min_dt} to {max_dt}) for {max_horizon}-day forward replay."
+    def _agg_runs(runs: list[dict]) -> dict:
+        out = {}
+        for d in DESK_ORDER:
+            d_list = [r["desks"].get(d, {}) for r in runs if d in r.get("desks", {})]
+            cnt = max(1, len(d_list))
+            out[d] = {
+                "avg_lines": round(sum(x.get("lines", 0) for x in d_list) / cnt, 1),
+                "avg_allocated_b": round(sum(x.get("allocated_isk", 0.0) for x in d_list) / cnt / 1e9, 2),
+                "avg_deployed_b": round(sum(x.get("deployed_isk", 0.0) for x in d_list) / cnt / 1e9, 2),
+                "total_realized_pnl_m": round(sum(x.get("realized_pnl_isk", 0.0) for x in d_list) / 1e6, 2),
+                "avg_fill_rate_pct": round(sum(x.get("fill_rate_pct", 0.0) for x in d_list) / cnt, 1),
+                "avg_roundtrip_pct": round(sum(x.get("roundtrip_pct", 0.0) for x in d_list) / cnt, 1),
+                "avg_stuck_rate_pct": round(sum(x.get("stuck_rate_pct", 0.0) for x in d_list) / cnt, 1),
             }
+        return out
 
-        anchor_dates = []
-        curr = earliest_usable
-        while curr <= latest_usable:
-            anchor_dates.append(curr.date() if hasattr(curr, "date") else curr)
-            curr += pd.Timedelta(days=step_days)
+    item_perf: dict[tuple[str, int], dict] = {}
+    all_exit_records: list[dict] = []
+    all_missed: list[dict] = []
 
-        bl_items, bl_groups, bl_meta = load_active_blacklist()
-        empty_inc = IncumbentState({}, {}, {}, set(), set())
-
-        checkpoints = []
-        for dt in anchor_dates:
-            df_u = _load_universe_as_of(con, dt)
-            fwd_c = _load_forward_candles(con, dt, max_horizon)
-            base_mask = build_universe_exclusion_mask(
-                df=df_u,
-                claimed_ids=set(),
-                incumbents=empty_inc,
-                bl_items=bl_items,
-                bl_groups=bl_groups,
-                bl_meta=bl_meta,
-            )
-            checkpoints.append((dt, df_u, fwd_c, base_mask))
-    finally:
-        con.close()
-
-    baseline_runs = []
-    item_perf: dict[tuple[str, int, str], dict] = {}
-    missed_gems: list[dict] = []
-
-    for dt, df_u, fwd_c, base_mask in checkpoints:
-        sim = _simulate_waterfall_checkpoint(df_u, fwd_c, DESK_PROFILES, total_budget, base_mask)
-        baseline_runs.append({"checkpoint": str(dt), "desks": sim["desks"]})
-        picked_tids = {ln["type_id"] for ln in sim["lines"]}
-
-        for ln in sim["lines"]:
-            key = (ln["desk"], ln["type_id"], ln["name"])
+    for r in baseline_runs:
+        all_missed.extend(r.get("missed_opportunities") or [])
+        for ln in r.get("lines") or []:
+            all_exit_records.append({
+                "sold_qty": ln.get("sold_qty", 0),
+                "sold_roi_pct": ln.get("sold_roi_pct", ln.get("realized_roi_pct", 0.0)),
+                "min_target_roi": ln.get("min_target_roi", 2.0),
+            })
+            key = (ln["desk"], ln["type_id"])
             agg = item_perf.setdefault(
                 key,
                 {
@@ -676,69 +858,6 @@ def run_local_retrospective(
             agg["deployed_m"] += ln["deployed_isk"] / 1e6
             agg["realized_pnl_m"] += ln["realized_pnl_isk"] / 1e6
 
-        eligible_df = df_u[base_mask & (~df_u["type_id"].isin(picked_tids))]
-        for desk in DESK_ORDER:
-            cfg = DESK_PROFILES[desk]
-            for _, row in eligible_df.iterrows():
-                tid = int(row["type_id"])
-                pricing = compute_candidate_pricing(row, desk, {}, empty_inc, is_sticky=False)
-                if pricing is None or pricing["net_margin"] < cfg.min_margin:
-                    continue
-                qty = max(1, min(int(row["daily_vol_30d"] * cfg.vol_pct), int(cfg.max_line_cap / pricing["cost_unit"])))
-                if (qty * pricing["cost_unit"]) < cfg.min_line_cap:
-                    continue
-                cf_sim = _simulate_line_execution(
-                    candles=fwd_c.get(tid, []),
-                    qty=qty,
-                    target_buy=pricing["target_buy"],
-                    target_sell=pricing["target_sell"],
-                    vol_pct=cfg.vol_pct,
-                    max_hold_days=cfg.max_hold_days,
-                )
-                if cf_sim["status"] == "ROUNDTRIP_COMPLETE" and cf_sim["realized_pnl_isk"] >= 5_000_000:
-                    missed_gems.append({
-                        "checkpoint": str(dt),
-                        "desk": desk,
-                        "type_id": tid,
-                        "name": str(row["item_name"]),
-                        "realized_pnl_m": round(cf_sim["realized_pnl_isk"] / 1e6, 2),
-                        "realized_roi_pct": cf_sim["realized_roi_pct"],
-                        "blocked_by": _diagnose_rejection_reason(row, cfg),
-                    })
-
-    baseline_summary = {}
-    for desk in DESK_ORDER:
-        d_runs = [r["desks"][desk] for r in baseline_runs]
-        baseline_summary[desk] = {
-            "avg_lines": round(sum(x["lines"] for x in d_runs) / len(d_runs), 1),
-            "avg_allocated_b": round(sum(x["allocated_b"] for x in d_runs) / len(d_runs), 2),
-            "avg_deployed_b": round(sum(x["deployed_b"] for x in d_runs) / len(d_runs), 2),
-            "total_realized_pnl_m": round(sum(x["realized_pnl_m"] for x in d_runs), 2),
-            "avg_fill_rate_pct": round(sum(x["fill_rate_pct"] for x in d_runs) / len(d_runs), 1),
-            "avg_roundtrip_pct": round(sum(x["roundtrip_pct"] for x in d_runs) / len(d_runs), 1),
-            "avg_stuck_rate_pct": round(sum(x["stuck_rate_pct"] for x in d_runs) / len(d_runs), 1),
-        }
-
-    optimized_profiles, tolerance_changes = _optimize_desk_profiles(checkpoints, total_budget)
-
-    optimized_runs = []
-    for dt, df_u, fwd_c, base_mask in checkpoints:
-        sim = _simulate_waterfall_checkpoint(df_u, fwd_c, optimized_profiles, total_budget, base_mask)
-        optimized_runs.append({"checkpoint": str(dt), "desks": sim["desks"]})
-
-    optimized_summary = {}
-    for desk in DESK_ORDER:
-        d_runs = [r["desks"][desk] for r in optimized_runs]
-        optimized_summary[desk] = {
-            "avg_lines": round(sum(x["lines"] for x in d_runs) / len(d_runs), 1),
-            "avg_allocated_b": round(sum(x["allocated_b"] for x in d_runs) / len(d_runs), 2),
-            "avg_deployed_b": round(sum(x["deployed_b"] for x in d_runs) / len(d_runs), 2),
-            "total_realized_pnl_m": round(sum(x["realized_pnl_m"] for x in d_runs), 2),
-            "avg_fill_rate_pct": round(sum(x["fill_rate_pct"] for x in d_runs) / len(d_runs), 1),
-            "avg_roundtrip_pct": round(sum(x["roundtrip_pct"] for x in d_runs) / len(d_runs), 1),
-            "avg_stuck_rate_pct": round(sum(x["stuck_rate_pct"] for x in d_runs) / len(d_runs), 1),
-        }
-
     all_items_ranked = sorted(item_perf.values(), key=lambda x: x["realized_pnl_m"], reverse=True)
     for it in all_items_ranked:
         it["allocated_m"] = round(it["allocated_m"], 2)
@@ -750,43 +869,40 @@ def run_local_retrospective(
         )
 
     over_sized_timeouts = sorted(
-        [
-            x for x in all_items_ranked
-            if x["target_qty_total"] >= 5 and x["qty_fill_pct"] < 35.0
-        ],
+        [x for x in all_items_ranked if x["target_qty_total"] >= 5 and x["qty_fill_pct"] < 35.0],
         key=lambda x: (x["allocated_m"] - x["deployed_m"]),
         reverse=True,
     )[:15]
 
-    missed_gems.sort(key=lambda x: x["realized_pnl_m"], reverse=True)
-    unified_diff = _build_services_ledgers_diff(optimized_profiles)
+    spread_audit = _summarize_spread_compression_audit(all_compression_events, all_exit_records)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    diff_lines = list(
+        difflib.unified_diff(
+            _render_profiles_snippet(DESK_PROFILES).splitlines(keepends=True),
+            _render_profiles_snippet(opt_profiles).splitlines(keepends=True),
+            fromfile="a/services/ledgers.py",
+            tofile="b/services/ledgers.py",
+        )
+    )
+
     result = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "engine": "local_walk_forward_simulator",
-        "checkpoints": [str(d) for d in anchor_dates],
+        "checkpoints": checkpoints,
         "portfolio_budget_b": total_budget_b,
-        "baseline_performance": baseline_summary,
-        "optimized_performance": optimized_summary,
+        "baseline_performance": _agg_runs(baseline_runs),
+        "optimized_performance": _agg_runs(opt_runs),
         "tolerance_changes": tolerance_changes,
-        "best_suggested_items": all_items_ranked[:15],
+        "spread_compression_audit": spread_audit,
+        "best_suggested_items": [x for x in all_items_ranked if x["realized_pnl_m"] > 0][:15],
         "worst_suggested_items": [x for x in reversed(all_items_ranked) if x["realized_pnl_m"] < 0][:15],
         "over_sized_timeout_items": over_sized_timeouts,
-        "missed_opportunities_in_practice": missed_gems[:20],
-        "unified_diff": unified_diff,
+        "missed_opportunities_in_practice": sorted(all_missed, key=lambda x: x["realized_pnl_m"], reverse=True)[:20],
+        "unified_diff": "".join(diff_lines),
     }
+    write_json("ledgers/ai_proposals/latest.json", result)
+    return result
 
-    os.makedirs(PROPOSALS_DIR, exist_ok=True)
-    out_path = os.path.join(PROPOSALS_DIR, f"local_retro_{ts}.json")
-    clean = _sanitize_json(result)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(clean, f, indent=2)
-    with open(os.path.join(PROPOSALS_DIR, "latest.json"), "w", encoding="utf-8") as f:
-        json.dump(clean, f, indent=2)
-
-    clean["saved_to"] = out_path
-    return clean
 
 
 def _bundle_local_codebase() -> str:

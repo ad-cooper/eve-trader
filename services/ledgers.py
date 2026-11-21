@@ -351,7 +351,7 @@ def compute_candidate_pricing(
     proceeds_unit = calc_net_proceeds(t_sell)
     net_profit_unit = proceeds_unit - cost_unit
     net_margin = calc_projected_margin(t_buy, t_sell)
-    live_exec_sell = min(t_sell, float(live_ask)) if (live_ask and float(live_ask) > 0) else t_sell
+    live_exec_sell = min(t_sell, float(live_ask)) if (desk_type != "hold" and live_ask and float(live_ask) > 0) else t_sell
     live_exec_margin = calc_projected_margin(t_buy, live_exec_sell)
 
     return {
@@ -416,13 +416,15 @@ def compute_line_sizing(
     sell_rem = int(incumbents.active_sells[tid].get("volume_remain", 0)) if has_sell else 0
     existing_qty = max(buy_rem, sell_rem + held_qty)
 
+    allow_new_buy = passes_desk and (live_exec_margin >= live_min_margin)
     if is_sticky:
-        buy_still_viable = passes_desk and (live_exec_margin >= live_min_margin)
         if has_sell or held_qty > 0:
-            # Keep row for sell tracking, but drop buy qty to 0 unless live spread still clears full margin
-            qty = max(qty, existing_qty) if buy_still_viable else 0
+            # Preserve existing_qty so sell/hangar inventory stays tracked on ledger; block expansion if spread compressed
+            qty = max(qty, existing_qty) if allow_new_buy else max(1, existing_qty)
         else:
-            qty = max(1, existing_qty) if (live_exec_margin >= desk_params["sticky_margin_floor"]) else 0
+            if live_exec_margin < desk_params["sticky_margin_floor"]:
+                return None
+            qty = max(1, existing_qty)
 
     capital_line = cost_unit * qty
 
@@ -447,6 +449,7 @@ def compute_line_sizing(
 
     return {
         "qty": qty,
+        "allow_new_buy": allow_new_buy,
         "capital": capital_line,
         "profit": net_profit_unit * qty,
     }
