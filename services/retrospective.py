@@ -205,18 +205,6 @@ def _estimate_daily_bid_share(lowest: float, highest: float, average: float) -> 
     return max(0.02, min(0.95, b))
 
 
-def _estimate_daily_bid_share(lowest: float, highest: float, average: float) -> float:
-    """
-    Infers the fraction of daily volume executed on the bid (buy-order) side from OHLC/VWAP:
-    average ≈ b * lowest + (1 - b) * highest  =>  b = (highest - average) / (highest - lowest).
-    """
-    if highest <= 0 or lowest <= 0 or highest <= lowest:
-        return 0.25
-    clamped_avg = min(max(average, lowest), highest)
-    b = (highest - clamped_avg) / (highest - lowest)
-    return max(0.02, min(0.95, b))
-
-
 def _simulate_line_execution(
     candles: list[dict],
     qty: int,
@@ -366,20 +354,22 @@ def _summarize_spread_compression_audit(audit_events: list[dict], exit_records: 
 
 
 def _simulate_waterfall_checkpoint(
-    as_of_date: str,
+    df_u: pd.DataFrame,
+    candles_map: dict[int, list[dict]],
     profiles: dict[str, DeskProfile],
-    total_budget_b: float = 80.0,
+    total_budget: float,
+    base_exclusion_mask: pd.Series,
     carried_incumbents: dict | None = None,
+    as_of_date: str = "",
 ) -> dict:
     """
-    Simulates one weekly waterfall checkpoint including spot ask/bid telemetry (`p_info`),
-    multi-checkpoint incumbent carry-over, and counterfactual auditing of compressed-spread buys.
+    Simulates one historical point-in-time waterfall checkpoint across Hold, Tactical, and Evergreen
+    using pre-loaded point-in-time universe & forward candles, spot ask/bid telemetry (`p_info`),
+    multi-checkpoint incumbent carry-over, and spread-compression re-buy auditing.
     """
-    df = _load_universe_as_of(as_of_date)
-    candles_map = _load_forward_candles(as_of_date, max_days=21)
-    if df.empty:
+    if df_u.empty:
         return {
-            "as_of_date": as_of_date,
+            "as_of_date": str(as_of_date),
             "desks": {},
             "lines": [],
             "missed_opportunities": [],
@@ -393,7 +383,6 @@ def _simulate_waterfall_checkpoint(
     c_assets = dict(carried.get("assets") or {})
     c_prior = dict(carried.get("prior_desks") or {})
 
-    total_budget = total_budget_b * 1e9
     claimed_ids: set[int] = set()
     cascaded_slack = 0.0
     desk_results: dict[str, dict] = {}
@@ -424,16 +413,14 @@ def _simulate_waterfall_checkpoint(
             desk_sticky_ids=desk_sticky_ids,
         )
 
-        base_mask = build_universe_exclusion_mask(
-            df=df,
-            claimed_ids=claimed_ids,
-            incumbents=incumbents,
-            bl_items=set(),
-            bl_groups=set(),
-            bl_meta={},
-            losing_tids=set(),
-        )
-        candidates, desk_params = select_desk_candidates(df, desk, base_mask, desk_sticky_ids, cfg=cfg)
+        # Combine precomputed static blacklist mask with dynamic claimed_ids and sticky overrides
+        desk_mask = base_exclusion_mask.copy()
+        if claimed_ids:
+            desk_mask &= ~df_u["type_id"].isin(claimed_ids)
+        if desk_sticky_ids:
+            desk_mask |= df_u["type_id"].isin(desk_sticky_ids) & ~df_u["type_id"].isin(claimed_ids)
+
+        candidates, desk_params = select_desk_candidates(df_u, desk, desk_mask, desk_sticky_ids, cfg=cfg)
         desk_params["name"] = cfg.name
         desk_params["live_min_margin"] = cfg.live_min_margin
 
@@ -471,6 +458,8 @@ def _simulate_waterfall_checkpoint(
             has_buy = tid in desk_buys
             has_sell = tid in desk_sells
             held_qty = int(desk_assets.get(tid, 0))
+            buy_rem = int(desk_buys[tid].get("volume_remain", 0)) if has_buy else 0
+            sell_rem = int(desk_sells[tid].get("volume_remain", 0)) if has_sell else 0
 
             sizing = compute_line_sizing(
                 row=row,
@@ -484,8 +473,6 @@ def _simulate_waterfall_checkpoint(
 
             is_compressed = (nominal_margin >= cfg.sticky_margin_floor) and (live_exec_margin < cfg.live_min_margin)
             if is_compressed:
-                buy_rem = int(desk_buys[tid].get("volume_remain", 0)) if has_buy else 0
-                sell_rem = int(desk_sells[tid].get("volume_remain", 0)) if has_sell else 0
                 existing_qty = max(buy_rem, sell_rem + held_qty)
                 legacy_qty = max(1, existing_qty) if is_sticky else max(1, int(row["daily_vol_30d"] * cfg.vol_pct))
                 legacy_alloc = legacy_qty * pricing["cost_unit"]
@@ -501,6 +488,7 @@ def _simulate_waterfall_checkpoint(
                 allow_new_buy = bool(sizing.get("allow_new_buy", True)) if sizing else False
                 total_line_qty = int(sizing["qty"]) if sizing else 0
                 inc_buy_qty = max(0, total_line_qty - (sell_rem + held_qty)) if allow_new_buy else 0
+
                 if sizing is None and not is_sticky:
                     kind = "blocked_new_compressed"
                 elif sizing is None and is_sticky and not has_sell and held_qty == 0:
@@ -514,14 +502,14 @@ def _simulate_waterfall_checkpoint(
 
                 if kind:
                     compression_events.append({
-                        "checkpoint": as_of_date,
+                        "checkpoint": str(as_of_date),
                         "desk": desk,
                         "type_id": tid,
                         "name": str(row["item_name"]),
                         "kind": kind,
                         "nominal_margin_pct": round(nominal_margin, 2),
                         "live_exec_margin_pct": round(live_exec_margin, 2),
-                        "new_qty": new_qty,
+                        "new_qty": inc_buy_qty,
                         "legacy_qty": legacy_qty,
                         "legacy_allocated_m": round(legacy_alloc / 1e6, 2),
                         "legacy_forward_pnl_m": round(legacy_sim.get("realized_pnl_isk", 0.0) / 1e6, 2),
@@ -539,21 +527,19 @@ def _simulate_waterfall_checkpoint(
                     )
                     if sim_missed.get("realized_pnl_isk", 0.0) > 250e6:
                         missed_opps.append({
-                            "checkpoint": as_of_date,
+                            "checkpoint": str(as_of_date),
                             "desk": desk,
                             "type_id": tid,
                             "name": str(row["item_name"]),
                             "realized_pnl_m": round(sim_missed["realized_pnl_isk"] / 1e6, 2),
                             "realized_roi_pct": sim_missed["realized_roi_pct"],
-                            "blocked_by": f"budget/cap (cost {pricing['cost_unit']/1e6:.1f}M)",
+                            "blocked_by": _diagnose_rejection_reason(row, cfg),
                         })
                 continue
 
             claimed_ids.add(tid)
-            sell_rem = int(desk_sells[tid].get("volume_remain", 0)) if tid in desk_sells else 0
-            held_qty_cur = int(desk_assets.get(tid, 0))
             allow_buy = bool(sizing.get("allow_new_buy", True))
-            buy_qty = max(0, int(sizing["qty"]) - (sell_rem + held_qty_cur)) if allow_buy else 0
+            buy_qty = max(0, int(sizing["qty"]) - (sell_rem + held_qty)) if allow_buy else 0
             line_alloc = (buy_qty * pricing["cost_unit"]) if buy_qty > 0 else 0.0
             remaining -= line_alloc
             allocated_isk += line_alloc
@@ -587,7 +573,7 @@ def _simulate_waterfall_checkpoint(
 
             min_target_roi = cfg.take_profit_roi if cfg.take_profit_roi > 0 else cfg.sticky_margin_floor
             all_lines.append({
-                "checkpoint": as_of_date,
+                "checkpoint": str(as_of_date),
                 "desk": desk,
                 "type_id": tid,
                 "name": str(row["item_name"]),
@@ -616,13 +602,14 @@ def _simulate_waterfall_checkpoint(
             "allocated_isk": allocated_isk,
             "deployed_isk": deployed_isk,
             "realized_pnl_isk": realized_pnl_isk,
+            "realized_pnl_m": realized_pnl_isk / 1e6,
             "fill_rate_pct": fill_rate,
             "roundtrip_pct": rt_rate,
             "stuck_rate_pct": stuck_rate,
         }
 
     return {
-        "as_of_date": as_of_date,
+        "as_of_date": str(as_of_date),
         "desks": desk_results,
         "lines": all_lines,
         "missed_opportunities": missed_opps,
@@ -634,6 +621,8 @@ def _simulate_waterfall_checkpoint(
         },
         "compression_events": compression_events,
     }
+
+
 
 
 
@@ -779,25 +768,80 @@ def run_local_retrospective(
     step_days: int = 7,
     total_budget_b: float = 80.0,
 ) -> dict:
-    """Runs walk-forward historical backtests across checkpoints and audits spread-compression & fill behavior."""
-    checkpoints = _build_checkpoints(lookback_days=lookback_days, step_days=step_days)
-    if not checkpoints:
-        return {"error": "No historical checkpoints available in DuckDB forge_market_history."}
+    """
+    Executes a walk-forward backtest across historical checkpoints in DuckDB, evaluates
+    DeskProfile parameters via coordinate-descent, audits spread-compression re-buy prevention,
+    and saves the proposal artifact.
+    """
+    os.makedirs(PROPOSALS_DIR, exist_ok=True)
+    bl_items, bl_groups, bl_meta = load_active_blacklist()
+    empty_incumbents = IncumbentState(
+        active_buys={},
+        active_sells={},
+        asset_qtys={},
+        significant_assets=set(),
+        desk_sticky_ids=set(),
+    )
 
-    baseline_runs: list[dict] = []
+    con = duckdb.connect(DUCKDB_PATH, read_only=True)
+    try:
+        con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
+        row = con.execute("SELECT MAX(date) FROM forge_market_history").fetchone()
+        max_date = row[0] if row else None
+        if max_date is None:
+            return {"error": "No market history found in forge_market_history."}
+
+        cp_dates = []
+        d = max_date - pd.Timedelta(days=lookback_days)
+        end_cut = max_date - pd.Timedelta(days=10)
+        while d <= end_cut:
+            cp_dates.append(d)
+            d += pd.Timedelta(days=step_days)
+
+        if not cp_dates:
+            return {"error": "Insufficient history window for checkpoints."}
+
+        preloaded_checkpoints = []
+        for cp in cp_dates:
+            df_u = _load_universe_as_of(con, cp)
+            if df_u.empty:
+                continue
+            fwd_c = _load_forward_candles(con, cp, horizon_days=21)
+            base_mask = build_universe_exclusion_mask(
+                df=df_u,
+                claimed_ids=set(),
+                incumbents=empty_incumbents,
+                bl_items=bl_items,
+                bl_groups=bl_groups,
+                bl_meta=bl_meta,
+                losing_tids=set(),
+            )
+            preloaded_checkpoints.append((cp, df_u, fwd_c, base_mask))
+    finally:
+        con.close()
+
+    if not preloaded_checkpoints:
+        return {"error": "No non-empty checkpoints available for retrospective backtest."}
+
+    total_budget = total_budget_b * 1e9
+    baseline_runs = []
     carried = None
-    all_compression_events: list[dict] = []
-    for cp in checkpoints:
-        run_res = _simulate_waterfall_checkpoint(cp, DESK_PROFILES, total_budget_b, carried_incumbents=carried)
+    all_compression_events = []
+    for cp, df_u, fwd_c, base_mask in preloaded_checkpoints:
+        run_res = _simulate_waterfall_checkpoint(
+            df_u, fwd_c, DESK_PROFILES, total_budget, base_mask, carried_incumbents=carried, as_of_date=str(cp)
+        )
         baseline_runs.append(run_res)
         carried = run_res.get("carry_over")
         all_compression_events.extend(run_res.get("compression_events") or [])
 
-    opt_profiles, tolerance_changes = _optimize_desk_profiles(checkpoints, DESK_PROFILES, total_budget_b)
-    opt_runs: list[dict] = []
+    opt_profiles, tolerance_changes = _optimize_desk_profiles(preloaded_checkpoints, total_budget)
+    opt_runs = []
     opt_carried = None
-    for cp in checkpoints:
-        opt_res = _simulate_waterfall_checkpoint(cp, opt_profiles, total_budget_b, carried_incumbents=opt_carried)
+    for cp, df_u, fwd_c, base_mask in preloaded_checkpoints:
+        opt_res = _simulate_waterfall_checkpoint(
+            df_u, fwd_c, opt_profiles, total_budget, base_mask, carried_incumbents=opt_carried, as_of_date=str(cp)
+        )
         opt_runs.append(opt_res)
         opt_carried = opt_res.get("carry_over")
 
@@ -820,7 +864,6 @@ def run_local_retrospective(
     item_perf: dict[tuple[str, int], dict] = {}
     all_exit_records: list[dict] = []
     all_missed: list[dict] = []
-
     for r in baseline_runs:
         all_missed.extend(r.get("missed_opportunities") or [])
         for ln in r.get("lines") or []:
@@ -876,19 +919,11 @@ def run_local_retrospective(
 
     spread_audit = _summarize_spread_compression_audit(all_compression_events, all_exit_records)
 
-    diff_lines = list(
-        difflib.unified_diff(
-            _render_profiles_snippet(DESK_PROFILES).splitlines(keepends=True),
-            _render_profiles_snippet(opt_profiles).splitlines(keepends=True),
-            fromfile="a/services/ledgers.py",
-            tofile="b/services/ledgers.py",
-        )
-    )
-
-    result = {
+    out_payload = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "engine": "local_walk_forward_simulator",
-        "checkpoints": checkpoints,
+        "lookback_days": lookback_days,
+        "step_days": step_days,
+        "checkpoints": [str(cp) for cp, _, _, _ in preloaded_checkpoints],
         "portfolio_budget_b": total_budget_b,
         "baseline_performance": _agg_runs(baseline_runs),
         "optimized_performance": _agg_runs(opt_runs),
@@ -898,10 +933,12 @@ def run_local_retrospective(
         "worst_suggested_items": [x for x in reversed(all_items_ranked) if x["realized_pnl_m"] < 0][:15],
         "over_sized_timeout_items": over_sized_timeouts,
         "missed_opportunities_in_practice": sorted(all_missed, key=lambda x: x["realized_pnl_m"], reverse=True)[:20],
-        "unified_diff": "".join(diff_lines),
+        "unified_diff": _build_services_ledgers_diff(opt_profiles),
     }
-    write_json("ledgers/ai_proposals/latest.json", result)
-    return result
+    Path(f"{PROPOSALS_DIR}/latest.json").write_text(json.dumps(_sanitize_json(out_payload), indent=2), encoding="utf-8")
+    return out_payload
+
+
 
 
 
