@@ -17,6 +17,7 @@ compose.yaml.bak
 
 # --- Cache, Runtime States & Ephemeral Telemetry ---
 ledgers/*.json
+ledgers/ai_proposals/*.json
 ledgers/*.csv
 !ledgers/.gitkeep
 data/*.csv
@@ -39,3 +40,7 @@ Thumbs.db
 data/jeveassets_transactions.csv
 
 data/*cache.json
+
+# --- Local Environment Secrets ---
+.env
+.env.*

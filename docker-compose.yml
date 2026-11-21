@@ -35,6 +35,9 @@ services:
     environment:
       - TZ=UTC
       - PYTHONUNBUFFERED=1
-      - EVE_CLIENT_ID=c2dfe86e7fce4f39b9e87a1076e8d61b
-      - EVE_CLIENT_SECRET=eat_1mH4QAqBnvDWx6ZOe13XGvgmraU60sMWz_45wGgJ
+      - EVE_CLIENT_ID=c06167a9a9af4ce79e7f9aacda9eeee2
+      - EVE_CLIENT_SECRET=${EVE_CLIENT_SECRET}
       - EVE_CALLBACK_URL=http://localhost:8000/sso/callback
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_REPO=https://github.com/ad-cooper/eve-trader

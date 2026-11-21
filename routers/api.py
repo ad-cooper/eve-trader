@@ -109,3 +109,62 @@ def api_import_bundles(payload: dict):
 @router.post("/sniper/run")
 def api_sniper_run():
     return trigger_sniper_scan()
+
+
+# --- Workflow 5: Retrospective Ledger & Algorithm Advisor (Local Walk-Forward) ---
+
+@router.post("/retrospective/analyze")
+def api_retrospective_analyze(
+    lookback_days: int = 45,
+    step_days: int = 7,
+    total_budget_b: float = 80.0,
+):
+    from fastapi import HTTPException
+    from services.retrospective import run_local_retrospective
+    try:
+        return run_local_retrospective(
+            lookback_days=lookback_days,
+            step_days=step_days,
+            total_budget_b=total_budget_b,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/retrospective/latest")
+def api_retrospective_latest():
+    from services.storage import read_json
+    return read_json("ledgers/ai_proposals/latest.json", default={"status": "no_proposals_yet"})
+
+
+@router.post("/retrospective/deep-review")
+def api_retrospective_deep_review(
+    lookback_days: int = 45,
+    step_days: int = 7,
+    total_budget_b: float = 80.0,
+    model: str = "auto",
+    github_url: str | None = None,
+    auto_pr: bool = True,
+    auto_merge: bool = True,
+):
+    from fastapi import HTTPException
+    from services.retrospective import create_and_merge_github_pr, run_hybrid_code_review
+    try:
+        result = run_hybrid_code_review(
+            lookback_days=lookback_days,
+            step_days=step_days,
+            total_budget_b=total_budget_b,
+            model=model,
+            github_url=github_url,
+        )
+        if auto_pr and "error" not in result:
+            result["github_pr"] = create_and_merge_github_pr(result, auto_merge=auto_merge)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/retrospective/deep-review/latest")
+def api_retrospective_deep_review_latest():
+    from services.storage import read_json
+    return read_json("ledgers/ai_proposals/latest_deep_review.json", default={"status": "no_deep_reviews_yet"})
