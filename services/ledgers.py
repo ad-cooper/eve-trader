@@ -126,9 +126,10 @@ def select_desk_candidates(
     desk_sticky_ids: set[int],
     scale_factor: float = 1.0,
     profile: DeskProfile | None = None,
+    cfg: DeskProfile | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Filters, scores, and ranks universe candidates for a desk using its DeskProfile."""
-    cfg = profile or DESK_PROFILES[desk_type]
+    cfg = cfg or (profile or DESK_PROFILES[desk_type])
     is_sticky_series = df["type_id"].isin(desk_sticky_ids)
 
     desk_mask = (
