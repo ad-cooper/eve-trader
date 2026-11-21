@@ -31,6 +31,7 @@ services:
       - ./routers:/app/routers
       - ./scripts:/app/scripts
       - ./tests:/app/tests
+      - ./.git:/app/.git:ro
       - ./app.py:/app/app.py
     environment:
       - TZ=UTC

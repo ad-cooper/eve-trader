@@ -150,24 +150,19 @@ def api_retrospective_deep_review(
     min_uplift_pct: float = 10.0,
 ):
     from fastapi import HTTPException
-    from services.retrospective import create_and_merge_github_pr, run_hybrid_code_review
+    from services.retrospective import run_autopilot_pipeline
     try:
-        result = run_hybrid_code_review(
+        return run_autopilot_pipeline(
             lookback_days=lookback_days,
             step_days=step_days,
             total_budget_b=total_budget_b,
             model=model,
             github_url=github_url,
+            auto_pr=auto_pr,
+            auto_merge=auto_merge,
+            min_confidence=min_confidence,
+            min_uplift_pct=min_uplift_pct,
         )
-        if auto_pr and "error" not in result:
-            result["github_pr"] = create_and_merge_github_pr(
-                result,
-                auto_merge=auto_merge,
-                base_branch="ai-autopilot",
-                min_confidence=min_confidence,
-                min_uplift_pct=min_uplift_pct,
-            )
-        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

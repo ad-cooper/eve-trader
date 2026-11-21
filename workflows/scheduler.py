@@ -105,6 +105,34 @@ def _initial_startup_warmup() -> None:
             print(f"[!] Startup warmup error in {fn.__name__}: {e}")
 
 
+
+
+def run_weekly_retrospective_job() -> None:
+    """Triggers the centralized autopilot retrospective pipeline in the background."""
+    if STATE.get("retrospective_running", False):
+        return
+    STATE["retrospective_running"] = True
+    try:
+        from services.retrospective import run_autopilot_pipeline
+        print("[*] Starting background weekly retrospective review...")
+        result = run_autopilot_pipeline(auto_pr=True, auto_merge=True)
+        status = (result.get("github_pr") or {}).get("status") or result.get("status") or "completed"
+        print(f"[+] Background retrospective finished: {status}")
+    except Exception as e:
+        print(f"[!] Background retrospective error: {e}")
+    finally:
+        STATE["retrospective_running"] = False
+
+
+def _warmup_retrospective_if_stale() -> None:
+    """Runs weekly retrospective in a background thread on startup if the last review is >7 days old."""
+    time.sleep(45)
+    review_path = "ledgers/ai_proposals/latest_deep_review.json"
+    seven_days_sec = 7 * 86400
+    if not os.path.exists(review_path) or (time.time() - os.path.getmtime(review_path)) > seven_days_sec:
+        run_weekly_retrospective_job()
+
+
 def _warmup_imports_if_stale() -> None:
     cache_path = "ledgers/import_suggestions_cache.json"
     if not os.path.exists(cache_path) or (time.time() - os.path.getmtime(cache_path)) > 1800:
@@ -127,8 +155,19 @@ def start_background_scheduler() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        run_weekly_retrospective_job,
+        trigger="cron",
+        day_of_week="sun",
+        hour=12,
+        minute=30,
+        id="weekly_ai_retrospective",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     threading.Thread(target=_warmup_imports_if_stale, daemon=True).start()
+    threading.Thread(target=_warmup_retrospective_if_stale, daemon=True).start()
 
 
 def stop_background_scheduler() -> None:

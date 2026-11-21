@@ -25,6 +25,35 @@ PROPOSALS_DIR = "ledgers/ai_proposals"
 DESK_ORDER = ("hold", "tactical", "evergreen")
 
 
+AUTOPILOT_BRANCH = "ai-autopilot"
+
+
+def get_active_git_branch() -> str | None:
+    """Reads the host repository's active branch from mounted .git/HEAD."""
+    head_path = Path(".git/HEAD")
+    if head_path.is_file():
+        try:
+            raw = head_path.read_text(encoding="utf-8").strip()
+            if raw.startswith("ref: refs/heads/"):
+                return raw[len("ref: refs/heads/"):]
+            return "HEAD"
+        except Exception:
+            pass
+    return None
+
+
+def check_autopilot_allowed() -> tuple[bool, str, str]:
+    """Single source of truth for whether automated AI reviews and PRs are permitted."""
+    branch = get_active_git_branch() or "unknown"
+    if branch != AUTOPILOT_BRANCH:
+        return (
+            False,
+            branch,
+            f"Active branch is '{branch}' (autopilot only runs on '{AUTOPILOT_BRANCH}').",
+        )
+    return True, branch, f"Active branch '{branch}' matches '{AUTOPILOT_BRANCH}'."
+
+
 def _sanitize_json(obj):
     if isinstance(obj, dict):
         return {str(k): _sanitize_json(v) for k, v in obj.items()}
@@ -418,7 +447,8 @@ def _optimize_desk_profiles(
                 trial_cfg = dataclasses.replace(best_profiles[desk], **updates)
                 trial_profiles = {**best_profiles, desk: trial_cfg}
                 trial_score = score_profiles(trial_profiles)
-                if trial_score > best_score + 0.5:
+                min_gain = max(15.0, abs(best_score) * 0.02)
+                if trial_score > best_score + min_gain:
                     best_score = trial_score
                     best_param_val = val
                     best_profiles = trial_profiles
@@ -429,6 +459,7 @@ def _optimize_desk_profiles(
                     "parameter": param_name,
                     "current_value": orig_val,
                     "proposed_value": best_param_val,
+                    "portfolio_pnl_after_m": round(best_score, 2),
                 })
 
     return best_profiles, change_log
@@ -703,6 +734,15 @@ def run_hybrid_code_review(
     from google import genai
     from google.genai import types
 
+    allowed, active_branch, reason = check_autopilot_allowed()
+    if not allowed:
+        return {
+            "status": "skipped_inactive_branch",
+            "branch": active_branch,
+            "required_branch": AUTOPILOT_BRANCH,
+            "reason": reason,
+        }
+
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not set in the container environment.")
@@ -735,15 +775,16 @@ def run_hybrid_code_review(
 
     system_instruction = (
         "You are a principal quantitative trading engineer reviewing an EVE Online market-making system. "
-        "A local walk-forward simulator has ALREADY tuned simple scalar thresholds in DESK_PROFILES. "
-        "Do NOT propose simple scalar threshold tweaks, cosmetic refactors, or speculative churn. "
-        "DEFAULT TO `is_significant_improvement: false` and an empty `algorithmic_proposals` list unless "
-        "the walk-forward backtest telemetry proves a clear, recurring structural bottleneck (such as chronic "
-        "0-roundtrip losses, severe stuck-inventory rates, or major capital misallocation) where a concrete "
-        "algorithmic change in services/ledgers.py, scripts/generate_ledgers.py, or services/accounting.py "
-        "will realistically deliver at least +10% monthly realized P&L uplift or a major drop in stuck inventory. "
-        "If `is_significant_improvement` is true, provide exact before/after Python snippets and pytest tests "
-        "while respecting all invariants in tests/test_strategy_engines.py."
+        "Stage 1 ran a local coordinate search over DESK_PROFILES scalar parameters (`local_parameter_tuning_already_found`). "
+        "Your job has two parts:\n"
+        "1. AUDIT STAGE 1 PARAMETERS: Inspect each tweak in `local_parameter_tuning_already_found` against "
+        "`baseline_performance` and `optimized_performance`. Return ONLY the subset of Stage 1 parameter changes "
+        "worth keeping in `approved_stage1_parameters`—explicitly drop any tweak that degrades a desk's own profit "
+        "or adds noise for minimal gain, and set `apply_stage1_parameters: true` if the approved parameter changes "
+        "yield a meaningful net portfolio improvement (>= +10%).\n"
+        "2. STAGE 2 STRUCTURAL CODE REVIEW: Default `algorithmic_proposals` to empty (`[]`) unless the backtest proves "
+        "a recurring structural bottleneck that scalar parameters alone cannot solve. Never overfit to single-item "
+        "outliers. Respect all invariants in tests/test_strategy_engines.py."
     )
 
     prompt = (
@@ -758,6 +799,21 @@ def run_hybrid_code_review(
         "type": "OBJECT",
         "properties": {
             "is_significant_improvement": {"type": "BOOLEAN"},
+            "apply_stage1_parameters": {"type": "BOOLEAN"},
+            "approved_stage1_parameters": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "desk": {"type": "STRING"},
+                        "parameter": {"type": "STRING"},
+                        "current_value": {"type": "NUMBER"},
+                        "proposed_value": {"type": "NUMBER"},
+                        "rationale": {"type": "STRING"},
+                    },
+                    "required": ["desk", "parameter", "current_value", "proposed_value", "rationale"],
+                },
+            },
             "confidence_score": {"type": "NUMBER"},
             "estimated_monthly_pnl_uplift_pct": {"type": "NUMBER"},
             "no_change_rationale": {"type": "STRING"},
@@ -813,6 +869,8 @@ def run_hybrid_code_review(
         },
         "required": [
             "is_significant_improvement",
+            "apply_stage1_parameters",
+            "approved_stage1_parameters",
             "confidence_score",
             "estimated_monthly_pnl_uplift_pct",
             "no_change_rationale",
@@ -894,6 +952,76 @@ def run_hybrid_code_review(
 
     result["saved_to"] = out_path
     return result
+
+
+def _apply_approved_stage1_to_ledgers(
+    ledgers_src: str,
+    approved_params: list[dict],
+) -> tuple[str, list[dict]]:
+    """Applies Gemini-approved Stage 1 DeskProfile scalar updates onto services/ledgers.py source."""
+    updated_profiles = dict(DESK_PROFILES)
+    applied: list[dict] = []
+    allowed_fields = {
+        "vol_pct",
+        "min_margin",
+        "live_min_margin",
+        "min_turnover_m",
+        "min_spread_pct",
+        "min_dump_freq_pct",
+        "max_vwap_ratio_180d",
+    }
+
+    for item in approved_params:
+        desk = str(item.get("desk") or "").strip().lower()
+        param = str(item.get("parameter") or "").strip()
+        if desk not in updated_profiles or param not in allowed_fields:
+            continue
+        try:
+            val = float(item.get("proposed_value"))
+        except (TypeError, ValueError):
+            continue
+
+        cur_cfg = updated_profiles[desk]
+        cur_val = getattr(cur_cfg, param)
+        if cur_val == val:
+            continue
+
+        updates = {param: val}
+        if param == "min_margin":
+            updates["live_min_margin"] = max(cur_cfg.cancel_floor + 0.5, val)
+        updated_profiles[desk] = dataclasses.replace(cur_cfg, **updates)
+        applied.append({
+            "desk": desk,
+            "parameter": param,
+            "old_value": cur_val,
+            "new_value": val,
+            "rationale": str(item.get("rationale") or ""),
+        })
+
+    if not applied:
+        return ledgers_src, []
+
+    orig_lines = ledgers_src.splitlines(keepends=True)
+    new_lines = list(orig_lines)
+    current_desk = None
+
+    for idx, line in enumerate(new_lines):
+        stripped = line.strip()
+        for d in DESK_ORDER:
+            if stripped.startswith(f'"{d}": DeskProfile('):
+                current_desk = d
+                break
+        if stripped == "),":
+            current_desk = None
+
+        if current_desk:
+            cfg = updated_profiles[current_desk]
+            for field_name in allowed_fields:
+                prefix = f"        {field_name}="
+                if line.startswith(prefix):
+                    new_lines[idx] = f"{prefix}{getattr(cfg, field_name)},\n"
+
+    return "".join(new_lines), applied
 
 
 def _apply_proposals_in_memory(
@@ -1011,7 +1139,7 @@ def _ensure_remote_branch(
 def create_and_merge_github_pr(
     review_result: dict,
     auto_merge: bool = True,
-    base_branch: str = "ai-autopilot",
+    base_branch: str = AUTOPILOT_BRANCH,
     min_confidence: float = 0.75,
     min_uplift_pct: float = 10.0,
 ) -> dict:
@@ -1022,7 +1150,8 @@ def create_and_merge_github_pr(
     import base64
     import requests
 
-    if base_branch == "main":
+    allowed, _, branch_reason = check_autopilot_allowed()
+    if not allowed or base_branch == "main":
         return {"status": "blocked", "reason": "Direct PR merges into 'main' are disabled; use 'ai-autopilot'."}
 
     token = os.getenv("GITHUB_TOKEN", "").strip()
@@ -1032,14 +1161,18 @@ def create_and_merge_github_pr(
 
     deep = review_result.get("deep_code_review") or {}
     is_sig = bool(deep.get("is_significant_improvement", False))
+    apply_s1 = bool(deep.get("apply_stage1_parameters", False))
+    approved_s1 = deep.get("approved_stage1_parameters") or []
     confidence = float(deep.get("confidence_score") or 0.0)
     uplift_pct = float(deep.get("estimated_monthly_pnl_uplift_pct") or 0.0)
     no_change_reason = str(deep.get("no_change_rationale") or "")
 
-    if not is_sig or confidence < min_confidence or uplift_pct < min_uplift_pct:
+    has_actionable = is_sig or (apply_s1 and len(approved_s1) > 0)
+    if not has_actionable or confidence < min_confidence or uplift_pct < min_uplift_pct:
         return {
             "status": "skipped_no_significant_gain",
             "is_significant_improvement": is_sig,
+            "apply_stage1_parameters": apply_s1,
             "confidence_score": confidence,
             "estimated_monthly_pnl_uplift_pct": uplift_pct,
             "thresholds": {"min_confidence": min_confidence, "min_uplift_pct": min_uplift_pct},
@@ -1050,6 +1183,13 @@ def create_and_merge_github_pr(
     unit_tests = deep.get("recommended_unit_tests") or []
 
     updated_files, skipped = _apply_proposals_in_memory(proposals, unit_tests)
+
+    applied_s1_records = []
+    if apply_s1 and approved_s1:
+        base_ledgers = updated_files.get("services/ledgers.py") or Path("services/ledgers.py").read_text(encoding="utf-8")
+        patched_ledgers, applied_s1_records = _apply_approved_stage1_to_ledgers(base_ledgers, approved_s1)
+        if applied_s1_records:
+            updated_files["services/ledgers.py"] = patched_ledgers
     if not updated_files:
         return {
             "status": "no_applicable_changes",
@@ -1102,10 +1242,15 @@ def create_and_merge_github_pr(
         committed_files.append(fpath)
 
     diagnosis = deep.get("architectural_diagnosis", "")
-    prop_bullets = "\n".join(
-        f"- **{p.get('title')}** (`{p.get('file_path')} :: {p.get('target_function')}`): {p.get('rationale')}"
+    s1_bullets = [
+        f"- **[Stage 1 Parameter] {r['desk']}.{r['parameter']}**: `{r['old_value']}` -> `{r['new_value']}` ({r['rationale']})"
+        for r in applied_s1_records
+    ]
+    s2_bullets = [
+        f"- **[Stage 2 Code] {p.get('title')}** (`{p.get('file_path')} :: {p.get('target_function')}`): {p.get('rationale')}"
         for p in proposals
-    )
+    ]
+    prop_bullets = "\n".join(s1_bullets + s2_bullets)
     pr_body = (
         f"## Automated Retrospective Algorithm Review\n\n"
         f"**Model:** `{review_result.get('model')}` | **Target Branch:** `{base_branch}` | "
@@ -1165,3 +1310,54 @@ def create_and_merge_github_pr(
         "skipped": skipped,
         "note": merge_note,
     }
+
+
+def run_autopilot_pipeline(
+    lookback_days: int = 45,
+    step_days: int = 7,
+    total_budget_b: float = 80.0,
+    model: str = "auto",
+    github_url: str | None = None,
+    auto_pr: bool = True,
+    auto_merge: bool = True,
+    min_confidence: float = 0.75,
+    min_uplift_pct: float = 10.0,
+) -> dict:
+    """Single entry point used by both FastAPI routes and background scheduler jobs."""
+    result = run_hybrid_code_review(
+        lookback_days=lookback_days,
+        step_days=step_days,
+        total_budget_b=total_budget_b,
+        model=model,
+        github_url=github_url,
+    )
+    if auto_pr and "error" not in result and not str(result.get("status", "")).startswith("skipped"):
+        result["github_pr"] = create_and_merge_github_pr(
+            result,
+            auto_merge=auto_merge,
+            base_branch=AUTOPILOT_BRANCH,
+            min_confidence=min_confidence,
+            min_uplift_pct=min_uplift_pct,
+        )
+    return result
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="EVE Trader Retrospective & Autopilot CLI")
+    parser.add_argument("--check-branch", action="store_true", help="Exit 0 if on AUTOPILOT_BRANCH, else 1")
+    parser.add_argument("--print-branch", action="store_true", help="Print configured AUTOPILOT_BRANCH name")
+    args = parser.parse_args()
+
+    if args.print_branch:
+        print(AUTOPILOT_BRANCH)
+        sys.exit(0)
+
+    if args.check_branch:
+        allowed, _, reason = check_autopilot_allowed()
+        if allowed:
+            sys.exit(0)
+        print(f"[=] {reason}")
+        sys.exit(1)

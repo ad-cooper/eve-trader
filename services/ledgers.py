@@ -46,7 +46,7 @@ DESK_PROFILES: dict[str, DeskProfile] = {
     "hold": DeskProfile(
         name="hold",
         ratio=0.20,
-        vol_pct=0.08,
+        vol_pct=0.10,
         max_line_cap=1.5e9,
         min_line_cap=150.0e6,
         min_margin=18.0,
@@ -69,11 +69,11 @@ DESK_PROFILES: dict[str, DeskProfile] = {
     "tactical": DeskProfile(
         name="tactical",
         ratio=0.45,
-        vol_pct=0.20,
+        vol_pct=0.25,
         max_line_cap=1.5e9,
         min_line_cap=100.0e6,
-        min_margin=7.5,
-        live_min_margin=7.5,
+        min_margin=9.0,
+        live_min_margin=9.0,
         sticky_margin_floor=4.5,
         cancel_floor=4.5,
         max_hold_days=10,
@@ -85,7 +85,7 @@ DESK_PROFILES: dict[str, DeskProfile] = {
         max_price_m=2500.0,
         min_turnover_m=25.0,
         min_spread_pct=13.5,
-        min_dump_freq_pct=30.0,
+        min_dump_freq_pct=35.0,
     ),
     "evergreen": DeskProfile(
         name="evergreen",
