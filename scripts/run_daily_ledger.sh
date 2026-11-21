@@ -22,12 +22,12 @@ for i in {1..15}; do
     sleep 3
 done
 
-# 3. Pull merged PRs from origin/main and run pytest; auto-revert if tests fail
+# 3. Pull merged PRs from origin/ai-autopilot and run pytest; auto-revert if tests fail
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if git diff --quiet && git diff --cached --quiet; then
         PREV_HEAD="$(git rev-parse HEAD)"
-        echo "[*] Checking origin/main for newly merged changes..."
-        if git pull --ff-only origin main; then
+        echo "[*] Checking origin/ai-autopilot for newly merged changes..."
+        if git pull --ff-only origin ai-autopilot; then
             NEW_HEAD="$(git rev-parse HEAD)"
             if [ "$NEW_HEAD" != "$PREV_HEAD" ]; then
                 echo "[*] Pulled new commit ${NEW_HEAD:0:7} (was ${PREV_HEAD:0:7}). Running test suite..."
@@ -35,15 +35,15 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                 if docker compose exec -T eve-trading-desk pytest -q; then
                     echo "[+] All pytest checks passed on ${NEW_HEAD:0:7}."
                 else
-                    echo "[!] Tests FAILED on ${NEW_HEAD:0:7}! Reverting commit locally and on origin/main..." >&2
+                    echo "[!] Tests FAILED on ${NEW_HEAD:0:7}! Reverting commit locally and on origin/ai-autopilot..." >&2
                     git revert --no-edit HEAD
-                    git push origin main || echo "[!] Warning: could not push revert to origin/main; local repo rolled back." >&2
+                    git push origin ai-autopilot || echo "[!] Warning: could not push revert to origin/ai-autopilot; local repo rolled back." >&2
                     sleep 2
                     echo "[+] Reverted broken change. Continuing daily ledger build on verified code."
                 fi
             fi
         else
-            echo "[!] Warning: git pull --ff-only origin main failed; continuing with local working tree."
+            echo "[!] Warning: git pull --ff-only origin ai-autopilot failed; continuing with local working tree."
         fi
     else
         echo "[!] Uncommitted local modifications detected; skipping git pull so local edits are preserved."

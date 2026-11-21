@@ -697,8 +697,8 @@ def run_hybrid_code_review(
     """
     Stage 1: Runs the local walk-forward simulator on DuckDB to quantify fill rates,
             roundtrip completion, worst losing items, and missed opportunities.
-    Stage 2: Sends the simulation findings + full local source code (and optional public
-            GitHub URL via url_context) to Gemini for structural algorithm proposals.
+    Stage 2: Sends the simulation findings + full local source code to Gemini for
+            high-impact structural algorithm proposals (with anti-churn gating).
     """
     from google import genai
     from google.genai import types
@@ -736,12 +736,14 @@ def run_hybrid_code_review(
     system_instruction = (
         "You are a principal quantitative trading engineer reviewing an EVE Online market-making system. "
         "A local walk-forward simulator has ALREADY tuned simple scalar thresholds in DESK_PROFILES. "
-        "Do NOT propose simple scalar threshold tweaks. Instead, inspect the Python functions in "
-        "services/ledgers.py, scripts/generate_ledgers.py, and services/accounting.py to diagnose WHY "
-        "certain items failed to bounce (0 roundtrips, high stuck_rate_pct), why Hold desk under-allocates, "
-        "and why profitable items were missed. Propose concrete algorithmic, filtering, ranking-formula, "
-        "pricing, or exit-logic code modifications with exact before/after Python snippets and pytest tests. "
-        "Respect existing invariants in tests/test_strategy_engines.py."
+        "Do NOT propose simple scalar threshold tweaks, cosmetic refactors, or speculative churn. "
+        "DEFAULT TO `is_significant_improvement: false` and an empty `algorithmic_proposals` list unless "
+        "the walk-forward backtest telemetry proves a clear, recurring structural bottleneck (such as chronic "
+        "0-roundtrip losses, severe stuck-inventory rates, or major capital misallocation) where a concrete "
+        "algorithmic change in services/ledgers.py, scripts/generate_ledgers.py, or services/accounting.py "
+        "will realistically deliver at least +10% monthly realized P&L uplift or a major drop in stuck inventory. "
+        "If `is_significant_improvement` is true, provide exact before/after Python snippets and pytest tests "
+        "while respecting all invariants in tests/test_strategy_engines.py."
     )
 
     prompt = (
@@ -755,6 +757,10 @@ def run_hybrid_code_review(
     response_schema = {
         "type": "OBJECT",
         "properties": {
+            "is_significant_improvement": {"type": "BOOLEAN"},
+            "confidence_score": {"type": "NUMBER"},
+            "estimated_monthly_pnl_uplift_pct": {"type": "NUMBER"},
+            "no_change_rationale": {"type": "STRING"},
             "architectural_diagnosis": {"type": "STRING"},
             "failure_mode_breakdown": {
                 "type": "ARRAY",
@@ -806,6 +812,10 @@ def run_hybrid_code_review(
             },
         },
         "required": [
+            "is_significant_improvement",
+            "confidence_score",
+            "estimated_monthly_pnl_uplift_pct",
+            "no_change_rationale",
             "architectural_diagnosis",
             "failure_mode_breakdown",
             "algorithmic_proposals",
@@ -838,7 +848,7 @@ def run_hybrid_code_review(
                 "system_instruction": system_instruction,
                 "response_mime_type": "application/json",
                 "response_schema": response_schema,
-                "temperature": 0.2,
+                "temperature": 0.15,
             }
             if tools:
                 cfg_kwargs["tools"] = tools
@@ -969,17 +979,51 @@ def _apply_proposals_in_memory(
     return updated_files, skipped
 
 
+def _ensure_remote_branch(
+    api_base: str,
+    headers: dict,
+    target_branch: str,
+    fallback_source: str = "main",
+) -> tuple[str | None, str | None]:
+    """Ensures `target_branch` exists on GitHub, creating it from `fallback_source` if missing."""
+    import requests
+
+    ref_resp = requests.get(f"{api_base}/git/ref/heads/{target_branch}", headers=headers, timeout=15)
+    if ref_resp.status_code == 200:
+        return ref_resp.json()["object"]["sha"], None
+
+    src_resp = requests.get(f"{api_base}/git/ref/heads/{fallback_source}", headers=headers, timeout=15)
+    if src_resp.status_code != 200:
+        return None, f"Failed to read {fallback_source} ref: {src_resp.text}"
+    src_sha = src_resp.json()["object"]["sha"]
+
+    create_resp = requests.post(
+        f"{api_base}/git/refs",
+        headers=headers,
+        json={"ref": f"refs/heads/{target_branch}", "sha": src_sha},
+        timeout=15,
+    )
+    if create_resp.status_code not in (200, 201):
+        return None, f"Failed to create branch {target_branch} from {fallback_source}: {create_resp.text}"
+    return src_sha, None
+
+
 def create_and_merge_github_pr(
     review_result: dict,
     auto_merge: bool = True,
-    base_branch: str = "main",
+    base_branch: str = "ai-autopilot",
+    min_confidence: float = 0.75,
+    min_uplift_pct: float = 10.0,
 ) -> dict:
     """
-    Creates a feature branch on GitHub via REST API, commits validated code modifications,
-    opens a Pull Request with the backtest diagnosis, and squash-merges it into `base_branch`.
+    Enforces an anti-churn significance gate, then creates a feature branch off `base_branch`
+    (never `main`), opens a Pull Request with the backtest diagnosis, and merges into `base_branch`.
     """
     import base64
     import requests
+
+    if base_branch == "main":
+        return {"status": "blocked", "reason": "Direct PR merges into 'main' are disabled; use 'ai-autopilot'."}
 
     token = os.getenv("GITHUB_TOKEN", "").strip()
     repo = os.getenv("GITHUB_REPO", "ad-cooper/eve-trader").strip()
@@ -987,6 +1031,21 @@ def create_and_merge_github_pr(
         return {"status": "skipped", "reason": "GITHUB_TOKEN is not set in container environment"}
 
     deep = review_result.get("deep_code_review") or {}
+    is_sig = bool(deep.get("is_significant_improvement", False))
+    confidence = float(deep.get("confidence_score") or 0.0)
+    uplift_pct = float(deep.get("estimated_monthly_pnl_uplift_pct") or 0.0)
+    no_change_reason = str(deep.get("no_change_rationale") or "")
+
+    if not is_sig or confidence < min_confidence or uplift_pct < min_uplift_pct:
+        return {
+            "status": "skipped_no_significant_gain",
+            "is_significant_improvement": is_sig,
+            "confidence_score": confidence,
+            "estimated_monthly_pnl_uplift_pct": uplift_pct,
+            "thresholds": {"min_confidence": min_confidence, "min_uplift_pct": min_uplift_pct},
+            "reason": no_change_reason or "Proposed changes did not clear significance/confidence thresholds.",
+        }
+
     proposals = deep.get("algorithmic_proposals") or []
     unit_tests = deep.get("recommended_unit_tests") or []
 
@@ -1005,10 +1064,9 @@ def create_and_merge_github_pr(
     }
     api_base = f"https://api.github.com/repos/{repo}"
 
-    ref_resp = requests.get(f"{api_base}/git/ref/heads/{base_branch}", headers=headers, timeout=15)
-    if ref_resp.status_code != 200:
-        return {"status": "error", "reason": f"Failed to read {base_branch} ref: {ref_resp.text}"}
-    base_sha = ref_resp.json()["object"]["sha"]
+    base_sha, branch_err = _ensure_remote_branch(api_base, headers, target_branch=base_branch, fallback_source="main")
+    if branch_err or not base_sha:
+        return {"status": "error", "reason": branch_err or f"Could not resolve {base_branch}"}
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     branch_name = f"ai-proposal/{ts}"
@@ -1050,11 +1108,13 @@ def create_and_merge_github_pr(
     )
     pr_body = (
         f"## Automated Retrospective Algorithm Review\n\n"
-        f"**Model:** `{review_result.get('model')}` | **Generated:** `{review_result.get('generated_at')}`\n\n"
+        f"**Model:** `{review_result.get('model')}` | **Target Branch:** `{base_branch}` | "
+        f"**Confidence:** `{confidence:.2f}` | **Est. Monthly Uplift:** `+{uplift_pct:.1f}%`\n\n"
         f"### Architectural Diagnosis\n{diagnosis}\n\n"
         f"### Proposed Changes\n{prop_bullets}\n\n"
         f"### Files Modified\n" + "\n".join(f"- `{f}`" for f in committed_files) + "\n\n"
-        f"> *Auto-validated with Python AST checks. Local `run_daily_ledger.sh` runs `pytest` after pulling and automatically reverts if any test fails.*"
+        f"> *Merged into `{base_branch}` only (`main` remains your manually reviewed baseline). "
+        f"Local `run_daily_ledger.sh` runs `pytest` after pulling and automatically reverts if any test fails.*"
     )
 
     pr_resp = requests.post(
@@ -1076,7 +1136,7 @@ def create_and_merge_github_pr(
     pr_url = pr_data["html_url"]
 
     merged = False
-    merge_note = "PR opened (auto_merge=False)"
+    merge_note = f"PR opened against {base_branch} (auto_merge=False)"
     if auto_merge:
         merge_resp = requests.put(
             f"{api_base}/pulls/{pr_number}/merge",
@@ -1089,15 +1149,18 @@ def create_and_merge_github_pr(
         )
         if merge_resp.status_code == 200:
             merged = True
-            merge_note = "PR squash-merged into main"
+            merge_note = f"PR squash-merged into {base_branch} (main untouched)"
         else:
             merge_note = f"PR opened, but auto-merge returned HTTP {merge_resp.status_code}: {merge_resp.text}"
 
     return {
         "status": "merged" if merged else "opened",
+        "base_branch": base_branch,
         "pr_number": pr_number,
         "pr_url": pr_url,
         "branch": branch_name,
+        "confidence_score": confidence,
+        "estimated_monthly_pnl_uplift_pct": uplift_pct,
         "committed_files": committed_files,
         "skipped": skipped,
         "note": merge_note,
