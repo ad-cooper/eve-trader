@@ -25,7 +25,12 @@ def audit_missing_buys(desk: str = "all") -> dict:
         "all": eg + tac + hld,
     }
     rows = desk_map.get(desk.lower(), eg + tac + hld)
-    unplaced = [r for r in rows if r.get("char_status") == "UNPLACED"]
+    unplaced = [
+        r for r in rows
+        if r.get("char_status") == "UNPLACED"
+        and str(r.get("allow_new_buy", True)).strip().lower() not in ("false", "0", "no")
+        and not str(r.get("action_text") or "").startswith("DO NOT BUY")
+    ]
     if not unplaced:
         return {
             "total_items": 0,
