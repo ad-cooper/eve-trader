@@ -294,6 +294,7 @@ def allocate_desk_rows(
             "net_margin": round(pricing["net_margin"], 2),
             "capital": round(sizing["capital"], 2),
             "profit": round(sizing["profit"], 2),
+            "allow_new_buy": bool(sizing.get("allow_new_buy", True)),
         })
 
         if allocated_cap >= (budget * 0.995):
@@ -334,7 +335,8 @@ def persist_desk_ledger(
                 profit DOUBLE
             );
         """)
-        df_history = df_ledger.copy()
+        history_cols = ["type_id", "name", "qty", "dump_freq", "target_buy", "target_sell", "net_margin", "capital", "profit"]
+        df_history = df_ledger[history_cols].copy()
         df_history.insert(0, "desk_type", desk_type)
         df_history.insert(0, "snapshot_time", datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0))
         con.execute("INSERT INTO ledger_history SELECT * FROM df_history")

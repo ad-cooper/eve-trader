@@ -331,6 +331,8 @@ def compute_candidate_pricing(
     elif desk_type == "tactical":
         stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
         baseline_sell = vwap_30d * 1.045
+        if live_ask and float(live_ask) > 0:
+            baseline_sell = min(baseline_sell, float(live_ask) * 1.25)
         t_sell = (0.50 * stabilized_ask) + (0.50 * baseline_sell)
         t_buy = competitive_bid
         if not has_buy and live_ask and live_ask > 0:
@@ -339,6 +341,8 @@ def compute_candidate_pricing(
     else:  # evergreen
         stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
         baseline_sell = vwap_30d * 1.035
+        if live_ask and float(live_ask) > 0:
+            baseline_sell = min(baseline_sell, float(live_ask) * 1.25)
         t_sell = min((0.45 * stabilized_ask) + (0.55 * baseline_sell), vwap_30d * 1.065)
         t_buy = competitive_bid
         if not has_buy:
@@ -576,11 +580,7 @@ def evaluate_order_action(
     cur_margin = calc_projected_margin(my_price, effective_sell)
 
     if max_hold_buy > 0 and my_price > (max_hold_buy * 1.005):
-        baseline_margin = calc_projected_margin(my_price, csv_sell) if csv_sell > 0 else cur_margin
-        spot_not_crashed = (not live_ask) or (csv_sell <= 0) or (live_ask >= csv_sell * 0.78)
-        if desk_type in ("evergreen", "tactical") and baseline_margin >= cfg.sticky_margin_floor and spot_not_crashed:
-            return "PATIENT", f"WEEKEND DIP (HOLD +{baseline_margin:.1f}% BASE)"
-        return "CANCEL_OVERPRICED", f"OVERBID ({cur_margin:.1f}% MARGIN - CANCEL)"
+        return "CANCEL_OVERPRICED", f"OVERBID ({cur_margin:.1f}% LIVE MARGIN - CANCEL)"
 
     if desk_type == "hold" and proximity_pct is not None and proximity_pct > 92.0 and cur_margin < min_margin:
         return "CANCEL_RECOVERED", f"DIP RECOVERED ({cur_margin:.1f}% MARGIN - CANCEL)"
@@ -592,7 +592,7 @@ def evaluate_order_action(
         return "TOP_BOOK", "TOP BID (WINNING)"
 
     next_bid = top_buy + 0.01
-    proj_margin = calc_projected_margin(next_bid, t_sell)
+    proj_margin = calc_projected_margin(next_bid, effective_sell)
     outbid_pct = ((top_buy - my_price) / my_price * 100.0) if my_price > 0 else 100.0
 
     if desk_type == "hold":
@@ -605,7 +605,9 @@ def evaluate_order_action(
     if outbid_pct >= min_outbid_pct and top_buy <= max_buy and proj_margin >= min_margin:
         return "BUMP_VIABLE", f"BUMP VIABLE (+{proj_margin:.1f}%)"
     if desk_type in ("evergreen", "tactical"):
-        my_margin = calc_projected_margin(my_price, t_sell)
+        my_margin = calc_projected_margin(my_price, effective_sell)
+        if my_margin < cancel_floor:
+            return "CANCEL_OVERPRICED", f"COMPRESSED ({my_margin:.1f}% MARGIN - CANCEL)"
         return "PATIENT", f"OUTBID (HOLD +{my_margin:.1f}%)"
 
     return "CANCEL_CEILING", "CEILING REACHED (CANCEL)"
@@ -702,8 +704,17 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
                     item["action_code"] = "UNPLACED"
                     item["action_text"] = "NEW ORDER"
             else:
-                item["action_code"] = "UNPLACED"
-                item["action_text"] = "READY TO PLACE"
+                desk_cfg = get_desk_profile(desk_type)
+                raw_allow = item.get("allow_new_buy", True)
+                allow_new_buy = str(raw_allow).strip().lower() not in ("false", "0", "no")
+                eff_live_sell = min(t_sell, float(live_ask)) if (live_ask and float(live_ask) > 0) else t_sell
+                eff_live_margin = calc_projected_margin(t_buy, eff_live_sell) if t_buy > 0 else 0.0
+                if not allow_new_buy or eff_live_margin < desk_cfg.live_min_margin:
+                    item["action_code"] = "PATIENT"
+                    item["action_text"] = f"DO NOT BUY ({eff_live_margin:.1f}% LIVE)"
+                else:
+                    item["action_code"] = "UNPLACED"
+                    item["action_text"] = "READY TO PLACE"
 
     # Hold Desk curation: active orders + Top 8 Prime Dips
     if desk_type == "hold":

@@ -40,7 +40,20 @@ def test_weekend_dip_hysteresis_prevents_false_cancel():
     eg = get_desk_profile("evergreen")
     assert eg.cancel_floor < eg.live_min_margin
 
-    code, label = evaluate_order_action(
+    # Mild dip where live ask (99.5M) still leaves +2.72% margin (>= 2.0% cancel_floor) stays active
+    code_mild, _ = evaluate_order_action(
+        desk_type="evergreen",
+        my_price=92_000_000.0,
+        top_buy=92_000_000.0,
+        t_sell=99_500_000.0,
+        dump_freq=65.0,
+        csv_sell=105_000_000.0,
+        live_ask=99_500_000.0,
+    )
+    assert code_mild in ("TOP_BOOK", "PATIENT")
+
+    # Compressed live ask (98M -> +1.17% < 2.0% cancel_floor) cancels despite stale 105M csv_sell
+    code_comp, label_comp = evaluate_order_action(
         desk_type="evergreen",
         my_price=92_000_000.0,
         top_buy=92_000_000.0,
@@ -49,20 +62,9 @@ def test_weekend_dip_hysteresis_prevents_false_cancel():
         csv_sell=105_000_000.0,
         live_ask=98_000_000.0,
     )
-    assert code == "PATIENT"
-    assert "WEEKEND DIP" in label
+    assert code_comp == "CANCEL_OVERPRICED"
+    assert "CANCEL" in label_comp
 
-    code_outbid, label_outbid = evaluate_order_action(
-        desk_type="evergreen",
-        my_price=92_000_000.0,
-        top_buy=102_000_000.0,
-        t_sell=105_000_000.0,
-        dump_freq=65.0,
-        csv_sell=105_000_000.0,
-        live_ask=105_000_000.0,
-    )
-    assert code_outbid == "PATIENT"
-    assert "OUTBID" in label_outbid
 
 
 def test_staging_diff_detects_all_fill_archetypes():
@@ -285,7 +287,7 @@ def test_profitable_hold_and_weekend_dip_orders_are_not_cancelled():
     assert code_hold == "PATIENT"
     assert "HOLD FIRM" in label_hold
 
-    # Evergreen buy order during a 15% Sunday dip stays PATIENT when 30d VWAP baseline clears margin
+    # Evergreen buy order at 50.13M when live ask crashes to 48M (-9.06% live margin) MUST cancel
     code_eg, label_eg = evaluate_order_action(
         desk_type="evergreen",
         my_price=50_130_000.0,
@@ -296,8 +298,9 @@ def test_profitable_hold_and_weekend_dip_orders_are_not_cancelled():
         csv_sell=56_500_000.0,
         live_ask=48_000_000.0,
     )
-    assert code_eg == "PATIENT"
-    assert "WEEKEND DIP" in label_eg
+    assert code_eg == "CANCEL_OVERPRICED"
+    assert "CANCEL" in label_eg
+
 
 
 def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
