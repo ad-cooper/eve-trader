@@ -569,7 +569,10 @@ def evaluate_order_action(
     cfg = get_desk_profile(desk_type)
     min_margin = cfg.live_min_margin
     cancel_floor = cfg.cancel_floor
-    effective_sell = min(t_sell, float(live_ask)) if (live_ask and float(live_ask) > 0) else t_sell
+    if desk_type in ("evergreen", "tactical") and live_ask and float(live_ask) > 0:
+        effective_sell = min(t_sell, float(live_ask))
+    else:
+        effective_sell = t_sell
     max_buy = calc_max_profitable_buy(effective_sell, min_margin)
     max_hold_buy = calc_max_profitable_buy(effective_sell, cancel_floor)
     cur_margin = calc_projected_margin(my_price, effective_sell)

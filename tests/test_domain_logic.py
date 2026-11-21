@@ -344,3 +344,18 @@ def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
     # When top_buy exceeds margin floor, must cap at max_buy_floor and flag squeezed=True
     assert by_id[2002]["recommended_buy"] < 96_000_000.0
     assert by_id[2002]["squeezed"] is True
+
+
+def test_hold_desk_dip_orders_evaluate_against_recovery_target():
+    # Hold dip order with +26.5% upside to 180d target (83M) stays active even when depressed dip live_ask is 67M
+    code, _ = evaluate_order_action(
+        desk_type="hold",
+        my_price=62_540_000.0,
+        top_buy=63_830_000.0,
+        t_sell=83_300_000.0,
+        dump_freq=20.0,
+        proximity_pct=80.4,
+        csv_sell=83_300_000.0,
+        live_ask=67_000_000.0,
+    )
+    assert code in ("BUMP_VIABLE", "PATIENT", "TOP_BOOK")
