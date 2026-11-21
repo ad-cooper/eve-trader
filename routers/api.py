@@ -111,7 +111,7 @@ def api_sniper_run():
     return trigger_sniper_scan()
 
 
-# --- Workflow 5: Retrospective Ledger & Algorithm Advisor (Local Walk-Forward) ---
+# --- Workflow 5: Retrospective Ledger & Algorithm Advisor ---
 
 @router.post("/retrospective/analyze")
 def api_retrospective_analyze(

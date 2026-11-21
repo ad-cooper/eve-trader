@@ -41,4 +41,4 @@ services:
       - EVE_CALLBACK_URL=http://localhost:8000/sso/callback
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
-      - GITHUB_REPO=https://github.com/ad-cooper/eve-trader
+      - GITHUB_REPO=ad-cooper/eve-trader
