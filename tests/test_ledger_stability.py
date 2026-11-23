@@ -174,9 +174,16 @@ def test_cross_desk_exclusivity_across_waterfall(monkeypatch):
     Items claimed by an upstream desk (Hold -> Tactical -> Evergreen) must never
     duplicate onto or flap to downstream desks across rebuilds.
     """
+    from services.ledgers import get_desk_profile
+
+    eg_cfg = get_desk_profile("evergreen")
+    tac_cfg = get_desk_profile("tactical")
+    eg_spread = max(14.5, eg_cfg.min_spread_pct + 0.5)
+    eg_dump = max(0.0, tac_cfg.min_dump_freq_pct - 5.0)
+
     df = pd.DataFrame([
         _make_universe_row(501, "Dual Qualifying Ship", price_30d_m=150.0, price_180d_m=210.0, daily_vol=50.0, dump_freq=60.0, spread_pct=18.0, category="Ship"),
-        _make_universe_row(502, "Evergreen Workhorse", price_30d_m=50.0, price_180d_m=52.0, daily_vol=120.0, dump_freq=15.0, spread_pct=13.0),
+        _make_universe_row(502, "Evergreen Workhorse", price_30d_m=50.0, price_180d_m=52.0, daily_vol=120.0, dump_freq=eg_dump, spread_pct=eg_spread),
     ])
 
     monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {501: "hold", 502: "evergreen"}))
@@ -186,7 +193,7 @@ def test_cross_desk_exclusivity_across_waterfall(monkeypatch):
 
     telemetry = {
         "501": {"lowest_ask": 165_000_000.0, "top_buy": 140_000_000.0},
-        "502": {"lowest_ask": 54_000_000.0, "top_buy": 47_000_000.0},
+        "502": {"lowest_ask": 55_000_000.0, "top_buy": 46_500_000.0},
     }
 
     outcomes = gen_led.run_waterfall(df, total_budget=10_000_000_000.0, market_telemetry=telemetry, target_desks={"hold", "tactical", "evergreen"})
@@ -269,15 +276,22 @@ def test_multi_ledger_cap_aware_roi_optimization(monkeypatch):
       2. Every allocated line across Hold, Tactical, and Evergreen clears its DeskProfile min_margin.
       3. Budget tails below min_line_cap cascade downstream instead of creating sub-threshold dust lines.
     """
+    from services.ledgers import get_desk_profile
+
+    eg_cfg = get_desk_profile("evergreen")
+    tac_cfg = get_desk_profile("tactical")
+    thin_spread = max(12.2, eg_cfg.min_spread_pct + 0.2)
+    steady_dump = max(0.0, tac_cfg.min_dump_freq_pct - 5.0)
+
     df = pd.DataFrame([
-        # Mega-hub thin-spread item: 50B/day turnover, 12.2% spread (~6.5% net) -> capped at 1.2B line
-        _make_universe_row(701, "MegaHub Thin Spread", price_30d_m=100.0, price_180d_m=102.0, daily_vol=500.0, dump_freq=20.0, spread_pct=12.2),
-        # High-margin Evergreen workhorse: 10B/day turnover, 18.0% spread (~12.0% net) -> fills 1.2B line at ~2x ROI
-        _make_universe_row(702, "High Margin Workhorse", price_30d_m=100.0, price_180d_m=103.0, daily_vol=100.0, dump_freq=25.0, spread_pct=18.0),
+        # Mega-hub thin-spread item: 50B/day turnover -> capped at max_line_cap
+        _make_universe_row(701, "MegaHub Thin Spread", price_30d_m=100.0, price_180d_m=102.0, daily_vol=500.0, dump_freq=steady_dump, spread_pct=thin_spread),
+        # High-margin Evergreen workhorse: 10B/day turnover, 18.0% spread -> fills max_line_cap at ~2x ROI
+        _make_universe_row(702, "High Margin Workhorse", price_30d_m=100.0, price_180d_m=103.0, daily_vol=100.0, dump_freq=steady_dump, spread_pct=18.0),
         # Tactical high-dump loot module
-        _make_universe_row(703, "Tactical Deadspace Module", price_30d_m=150.0, price_180d_m=155.0, daily_vol=30.0, dump_freq=65.0, spread_pct=18.5),
+        _make_universe_row(703, "Tactical Deadspace Module", price_30d_m=150.0, price_180d_m=155.0, daily_vol=30.0, dump_freq=max(65.0, tac_cfg.min_dump_freq_pct + 10.0), spread_pct=max(18.5, tac_cfg.min_spread_pct + 2.0)),
         # Hold cyclical saturation dip
-        _make_universe_row(704, "Hold Cyclical Hull", price_30d_m=200.0, price_180d_m=275.0, daily_vol=20.0, dump_freq=25.0, spread_pct=15.0),
+        _make_universe_row(704, "Hold Cyclical Hull", price_30d_m=200.0, price_180d_m=275.0, daily_vol=20.0, dump_freq=steady_dump, spread_pct=15.0),
     ])
 
     mask = pd.Series(True, index=df.index)
