@@ -195,3 +195,17 @@ def test_desk_profiles_fee_alignment_and_evergreen_floor():
     )
     assert type_flip == "flip"
     assert price_flip == 111_999_999.99
+
+
+def test_desk_profiles_calibrated_bounds():
+    from services.ledgers import get_desk_profile
+
+    hold = get_desk_profile("hold")
+    tac = get_desk_profile("tactical")
+    eg = get_desk_profile("evergreen")
+
+    assert hold.min_margin >= 20.0
+    assert hold.max_vwap_ratio_180d <= 0.90
+    assert hold.vol_pct <= 0.06
+    assert tac.vol_pct <= 0.15
+    assert eg.min_margin >= 7.0

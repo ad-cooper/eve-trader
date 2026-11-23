@@ -60,7 +60,7 @@ DESK_PROFILES: dict[str, DeskProfile] = {
         min_turnover_m=10.0,
         min_spread_pct=8.0,
         min_history_days=60,
-        max_vwap_ratio_180d=0.9,
+        max_vwap_ratio_180d=0.90,
         excluded_categories=("Skill",),
     ),
     "tactical": DeskProfile(
@@ -102,7 +102,7 @@ DESK_PROFILES: dict[str, DeskProfile] = {
         min_price_m=1.0,
         max_price_m=2500.0,
         min_turnover_m=45.0,
-        min_spread_pct=12.0,
+        min_spread_pct=13.0,
         min_daily_vol=3.0,
     ),
 }
