@@ -20,7 +20,7 @@ from services.ledgers import (
 )
 
 STRATEGY_CONFIG_FILE = "data/strategy_config.json"
-DEFAULT_ACTIVE_VERSION = "v1"
+DEFAULT_ACTIVE_VERSION = "v2"
 
 
 @dataclass(frozen=True)
