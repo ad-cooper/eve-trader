@@ -264,9 +264,26 @@ def _evaluate_advisor_item(target: dict, ctx: dict) -> dict:
     active_orders = ctx["active_sells_map"].get(tid, [])
 
     if active_orders:
-        action, action_type, rec_sell, collision_info = _resolve_collision_strategy(
-            desk, qty, unit_cost, lowest_ask, active_orders, hold_meta
-        )
+        from services.strategy_versions import get_active_strategy_version, get_strategy_version
+        active_ver = get_active_strategy_version()
+        if active_ver != "v1":
+            strat = get_strategy_version(active_ver)
+            p_depth = (ctx.get("depth_map") or {}).get(tid) or {}
+            s_class = (hist or {}).get("supply_class") or "MANUFACTURED"
+            action, action_type, rec_sell, collision_info = strat.evaluate_sell_collision(
+                desk,
+                qty,
+                unit_cost,
+                lowest_ask,
+                active_orders,
+                hold_meta,
+                ask_days_of_supply=p_depth.get("ask_days_of_supply"),
+                supply_class=s_class,
+            )
+        else:
+            action, action_type, rec_sell, collision_info = _resolve_collision_strategy(
+                desk, qty, unit_cost, lowest_ask, active_orders, hold_meta
+            )
     else:
         action, action_type, rec_sell = _resolve_unlisted_strategy(
             desk, unit_cost, lowest_ask, target_sell, hold_meta

@@ -639,7 +639,24 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             item["escrow"] = float(b.get("escrow", item.get("capital", 0.0)))
             item["price_synced"] = abs(b["price"] - t_buy) / t_buy < 0.01 if t_buy > 0 else True
             dump_f = float(item.get("dump_freq", 0.0))
-            code, label = evaluate_order_action(desk_type, b["price"], live_top_buy or 0.0, t_sell, dump_f, item.get("proximity_pct"), orig_csv_sell, live_ask)
+            from services.strategy_versions import get_active_strategy_version, get_strategy_version
+            active_ver = get_active_strategy_version()
+            if active_ver != "v1":
+                strat = get_strategy_version(active_ver)
+                code, label = strat.evaluate_buy_order(
+                    desk_type,
+                    b["price"],
+                    live_top_buy or 0.0,
+                    t_sell,
+                    dump_f,
+                    item.get("proximity_pct"),
+                    orig_csv_sell,
+                    live_ask,
+                    ask_days_of_supply=p_info.get("ask_days_of_supply"),
+                    supply_class=str(item.get("supply_class") or "MANUFACTURED"),
+                )
+            else:
+                code, label = evaluate_order_action(desk_type, b["price"], live_top_buy or 0.0, t_sell, dump_f, item.get("proximity_pct"), orig_csv_sell, live_ask)
             item["action_code"] = code
             item["action_text"] = label
         elif tid in sells:
