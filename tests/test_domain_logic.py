@@ -359,3 +359,73 @@ def test_hold_desk_dip_orders_evaluate_against_recovery_target():
         live_ask=67_000_000.0,
     )
     assert code in ("BUMP_VIABLE", "PATIENT", "TOP_BOOK")
+
+
+def test_hangar_timestop_or_loss_cancels_active_buy_order(monkeypatch):
+    import workflows.order_actions as oa
+
+    eg_rows = [
+        {
+            "type_id": 3001,
+            "name": "'Peace' Large Remote Armor Repairer",
+            "desk_type": "evergreen",
+            "char_status": "BUY_ACTIVE",
+            "action_code": "TOP_BOOK",
+            "action_text": "TOP BID (WINNING)",
+            "my_price": 177_900_000.0,
+            "my_qty": 1,
+            "escrow": 177_900_000.0,
+            "target_buy": 177_900_000.0,
+            "target_sell": 205_000_000.0,
+        },
+    ]
+
+    monkeypatch.setattr(oa, "get_annotated_desks", lambda: (eg_rows, [], []))
+    monkeypatch.setattr(oa, "load_cached_orders", lambda: {"buys": {"3001": {"price": 177_900_000.0, "volume_remain": 1}}, "sells": {}})
+    monkeypatch.setattr(oa, "load_market_prices_cache", lambda: {"3001": {"top_buy": 177_900_000.0, "lowest_ask": 189_900_000.0}})
+    monkeypatch.setattr(oa, "load_active_blacklist", lambda: (set(), set(), {}))
+    monkeypatch.setattr(oa, "load_cached_assets", lambda max_age_seconds=600: [{"type_id": 3001, "quantity": 1}])
+    monkeypatch.setattr(oa, "resolve_type_ids", lambda tids: {3001: "'Peace' Large Remote Armor Repairer"})
+    monkeypatch.setattr(oa, "get_cost_basis_map", lambda tids, _: {3001: {"unit_cost": 221_600_000.0, "source": "WALLET"}})
+    monkeypatch.setattr(oa, "get_hold_desk_params", lambda tids, nm, hm: {3001: {"days_held": 17, "max_days": 3, "is_expired": True}})
+
+    res = oa.get_order_actions(desk="all", refresh_live=False)
+    assert res["buy_bump_count"] == 0
+    assert res["cancel_count"] == 1
+    assert res["cancels"][0]["type_id"] == 3001
+    assert "TIME STOP" in res["cancels"][0]["reason"]
+
+
+def test_partial_stub_and_tactical_target_met_cancel_remaining_buy(monkeypatch):
+    import workflows.order_actions as oa
+
+    tac_rows = [
+        {
+            "type_id": 4001,
+            "name": "Imperial Navy 200mm Steel Plates",
+            "desk_type": "tactical",
+            "char_status": "BUY_ACTIVE",
+            "action_code": "PATIENT",
+            "action_text": "OUTBID (HOLD +12.4%)",
+            "my_price": 10_150_000.0,
+            "my_qty": 8,
+            "escrow": 81_200_000.0,
+            "target_buy": 10_150_000.0,
+            "target_sell": 11_800_000.0,
+        },
+    ]
+
+    monkeypatch.setattr(oa, "get_annotated_desks", lambda: ([], tac_rows, []))
+    monkeypatch.setattr(
+        oa,
+        "load_cached_orders",
+        lambda: {"buys": {"4001": {"price": 10_150_000.0, "volume_remain": 8, "volume_total": 9, "escrow": 81_200_000.0}}, "sells": {}},
+    )
+    monkeypatch.setattr(oa, "load_market_prices_cache", lambda: {"4001": {"top_buy": 10_300_000.0, "lowest_ask": 12_000_000.0}})
+    monkeypatch.setattr(oa, "load_active_blacklist", lambda: (set(), set(), {}))
+    monkeypatch.setattr(oa, "load_cached_assets", lambda max_age_seconds=600: [{"type_id": 4001, "quantity": 1}])
+
+    res = oa.get_order_actions(desk="all", refresh_live=False)
+    assert res["cancel_count"] == 1
+    assert res["cancels"][0]["type_id"] == 4001
+    assert "PARTIAL STUB" in res["cancels"][0]["reason"]

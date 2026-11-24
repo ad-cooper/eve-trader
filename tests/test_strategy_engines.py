@@ -99,10 +99,22 @@ def test_advisor_collision_and_exit_strategies():
     )
     assert action == "CANCEL & MERGE"
     assert col["action"] == "CANCEL_MERGE"
-    assert rec_sell == 119_999_999.99
+    assert rec_sell == 119_900_000.0
 
-    # Tactical >=20% active ratio -> MODIFY & HOLD
+    # Tactical >=20% active ratio with compressed margin (<7.5%) -> MODIFY & HOLD
     action2, act_type2, _, col2 = _resolve_collision_strategy(
+        desk="TACTICAL",
+        qty=2,
+        unit_cost=100_000_000.0,
+        lowest_ask=110_000_000.0,
+        active_orders=[{"price": 125_000_000.0, "volume_remain": 3}],
+        hold_meta={},
+    )
+    assert action2 == "MODIFY & HOLD"
+    assert col2["action"] == "MODIFY_HOLD"
+
+    # Tactical >=20% active ratio clearing full target margin (>=7.5%) -> CANCEL & MERGE
+    action3, act_type3, rec_sell3, col3 = _resolve_collision_strategy(
         desk="TACTICAL",
         qty=2,
         unit_cost=100_000_000.0,
@@ -110,8 +122,9 @@ def test_advisor_collision_and_exit_strategies():
         active_orders=[{"price": 125_000_000.0, "volume_remain": 3}],
         hold_meta={},
     )
-    assert action2 == "MODIFY & HOLD"
-    assert col2["action"] == "MODIFY_HOLD"
+    assert action3 == "CANCEL & MERGE"
+    assert col3["action"] == "CANCEL_MERGE"
+    assert rec_sell3 == 119_900_000.0
 
     # Hold desk expired -> TIME STOP
     u_act, u_type, _ = _resolve_unlisted_strategy(
@@ -209,3 +222,17 @@ def test_desk_profiles_calibrated_bounds():
     assert hold.vol_pct <= 0.06
     assert tac.vol_pct <= 0.15
     assert eg.min_margin >= 7.0
+
+
+def test_evergreen_collision_joins_top_of_book_without_self_undercut():
+    act, act_type, rec_sell, col = _resolve_collision_strategy(
+        desk="EVERGREEN",
+        qty=2,
+        unit_cost=132_700_000.0,
+        lowest_ask=142_600_000.0,
+        active_orders=[{"price": 142_600_000.0, "volume_remain": 3}],
+        hold_meta={},
+    )
+    assert act == "MATCH ACTIVE ASK"
+    assert col["badge"] == "🟢 TOP OF BOOK"
+    assert rec_sell == 142_600_000.0

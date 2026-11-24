@@ -1,4 +1,8 @@
+import os
+import time
 from services.accounting import (
+    eve_tick,
+    round_down_eve,
     calc_net_proceeds,
     calc_unit_cost,
     TOTAL_EXIT_FEE as EXIT_FEE_JITA,
@@ -6,10 +10,11 @@ from services.accounting import (
 from services.esi import (
     load_cached_assets,
     fetch_character_assets,
+    fetch_character_orders,
     JITA_STATION_ID,
     create_esi_session as create_session,
 )
-from services.ledgers import get_desk_profile
+from services.ledgers import get_desk_profile, ORDERS_CACHE_FILE
 from services.sde import (
     parse_eve_item_lines as parse_multisell_export_text,
     resolve_type_names,
@@ -86,7 +91,9 @@ def _resolve_collision_strategy(
     min_active_price = min((o["price"] for o in active_orders), default=0.0)
     total_stack_qty = active_qty + qty
     active_ratio = (active_qty / total_stack_qty) if total_stack_qty > 0 else 0.0
-    is_undercut = bool(lowest_ask and lowest_ask < min_active_price)
+    tick = eve_tick(lowest_ask) if lowest_ask else 0.01
+    is_undercut = bool(lowest_ask and lowest_ask < (min_active_price - tick))
+    undercut_price = round_down_eve(lowest_ask - tick) if (lowest_ask and lowest_ask > tick) else min_active_price
     desk_upper = str(desk or "UNMANAGED").upper()
 
     collision_action = None
@@ -95,57 +102,63 @@ def _resolve_collision_strategy(
 
     if desk_upper == "EVERGREEN":
         eg_min_roi = get_desk_profile("evergreen").take_profit_roi
-        undercut_net = calc_net_proceeds(lowest_ask - 0.01) if lowest_ask else 0.0
+        undercut_net = calc_net_proceeds(undercut_price) if lowest_ask else 0.0
         eff_cost = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
         still_profitable = (undercut_net >= eff_cost * (1.0 + eg_min_roi / 100.0)) if eff_cost > 0 else True
         if is_undercut and not still_profitable:
             action, action_type = "HOLD (MARGIN FLOOR)", "hold"
             collision_action, collision_badge = "HOLD_HANGAR", "🛡️ MARGIN FLOOR"
             collision_reason = f"Undercut {lowest_ask:,.2f} drops net margin below {eg_min_roi:.0f}%. Hold."
-            rec_sell = min_active_price
+            rec_sell = round(min_active_price, 2)
         elif is_undercut:
             action, action_type = "UNDERCUT & FLIP", "flip"
             collision_action, collision_badge = "MATCH_ACTIVE", "⚡ UNDERCUT VIABLE"
             collision_reason = f"Undercutting {lowest_ask:,.2f} still clears >={eg_min_roi:.0f}% net margin. Rotate capital."
-            rec_sell = round(lowest_ask - 0.01, 2)
+            rec_sell = undercut_price
         else:
             action, action_type = "MATCH ACTIVE ASK", "flip"
-            collision_action, collision_badge = "MATCH_ACTIVE", "🟢 TOP OF BOOK"
-            collision_reason = f"Active order ({active_qty}x) is top of book."
-            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+            collision_action, collision_badge = "TOP_OF_BOOK", "🟢 TOP OF BOOK"
+            collision_reason = f"Active order ({active_qty}x @ {min_active_price:,.2f}) is top of book. Join stack."
+            rec_sell = round(min_active_price, 2)
 
     elif desk_upper == "TACTICAL":
+        tac_target_roi = get_desk_profile("tactical").min_margin
+        undercut_net = calc_net_proceeds(undercut_price) if lowest_ask else 0.0
+        eff_cost = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
+        live_roi = ((undercut_net - eff_cost) / eff_cost * 100.0) if eff_cost > 0 else tac_target_roi
         if is_undercut:
-            if active_ratio < 0.20:
+            if active_ratio < 0.20 or (eff_cost > 0 and live_roi >= tac_target_roi):
                 action, action_type = "CANCEL & MERGE", "flip"
                 collision_action, collision_badge = "CANCEL_MERGE", "⚡ CANCEL & MERGE"
-                collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (<20%). Cancel order & merge full {total_stack_qty}x."
-                rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+                collision_reason = f"Live ask clears +{live_roi:.1f}% net ROI (>={tac_target_roi:.1f}%). Merge full {total_stack_qty}x @ {undercut_price:,.2f}."
+                rec_sell = undercut_price
             else:
                 action, action_type = "MODIFY & HOLD", "hold"
                 collision_action, collision_badge = "MODIFY_HOLD", "✏️ MODIFY & HOLD"
-                collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (>=20%). Modify active order to {lowest_ask-0.01:,.2f}; hold {qty}x reserve."
-                rec_sell = min_active_price
+                collision_reason = f"Active stack {active_qty}x is {active_ratio*100:.1f}% (>=20%). Modify active order to {undercut_price:,.2f}; hold {qty}x reserve."
+                rec_sell = round(min_active_price, 2)
         else:
             action, action_type = "FLIP (TACTICAL)", "flip"
             collision_action, collision_badge = "TOP_OF_BOOK", "🟢 TOP OF BOOK"
-            collision_reason = f"Active order ({active_qty}x) is top of book."
-            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+            collision_reason = f"Active order ({active_qty}x @ {min_active_price:,.2f}) is top of book. Join stack."
+            rec_sell = round(min_active_price, 2)
 
     else:
         if is_undercut and hold_meta.get("is_expired"):
             action, action_type = f"TIME STOP ({hold_meta.get('days_held', 0)}d)", "time_stop"
             collision_action, collision_badge = "CANCEL_MERGE", "⏱️ TIME STOP"
-            collision_reason = f"Position held {hold_meta.get('days_held', 0)}d (expired). Liquidate at {lowest_ask-0.01:,.2f}."
-            rec_sell = round(lowest_ask - 0.01, 2)
+            collision_reason = f"Position held {hold_meta.get('days_held', 0)}d (expired). Liquidate at {undercut_price:,.2f}."
+            rec_sell = undercut_price
         elif is_undercut:
             action, action_type = "SELF-UNDERCUT RISK", "hold"
             collision_action, collision_badge = "HOLD_HANGAR", "⚠️ SELF-UNDERCUT"
             collision_reason = f"Active order exists @ {min_active_price:,.2f}. Avoid self-undercutting."
-            rec_sell = min_active_price
+            rec_sell = round(min_active_price, 2)
         else:
-            action, action_type = "MARKET EXIT", "flip"
-            rec_sell = round(lowest_ask - 0.01, 2) if (lowest_ask and lowest_ask > 0.01) else min_active_price
+            action, action_type = "MATCH ACTIVE ASK", "flip"
+            collision_action, collision_badge = "TOP_OF_BOOK", "🟢 TOP OF BOOK"
+            collision_reason = f"Active order ({active_qty}x @ {min_active_price:,.2f}) is top of book."
+            rec_sell = round(min_active_price, 2)
 
     collision_info = {
         "has_collision": True,
@@ -198,13 +211,18 @@ def _resolve_unlisted_strategy(
         live_roi_pct = ((net_proceeds_unit - effective_cost_unit) / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
         min_target_roi = desk_cfg.take_profit_roi if desk_cfg.take_profit_roi > 0 else desk_cfg.sticky_margin_floor
         meets_profit_floor = (live_roi_pct >= min_target_roi) if effective_cost_unit > 0 else True
+        late_cycle_days = max(desk_cfg.take_profit_days + 1, int(desk_cfg.max_hold_days * 0.65))
+        late_cycle_lock = bool(days_held >= late_cycle_days and live_roi_pct >= 2.0)
+        early_surge_lock = bool(desk == "TACTICAL" and days_held >= 2 and live_roi_pct >= 6.5)
         take_profit_ready = bool(
             lowest_ask
             and lowest_ask > 0.01
             and effective_cost_unit > 0
-            and desk_cfg.take_profit_days > 0
-            and days_held >= desk_cfg.take_profit_days
-            and live_roi_pct >= desk_cfg.take_profit_roi
+            and (
+                (desk_cfg.take_profit_days > 0 and days_held >= desk_cfg.take_profit_days and live_roi_pct >= desk_cfg.take_profit_roi)
+                or late_cycle_lock
+                or early_surge_lock
+            )
         )
 
         if lowest_ask and target_sell and lowest_ask >= target_sell:
@@ -271,6 +289,11 @@ def _evaluate_advisor_item(target: dict, ctx: dict) -> dict:
     line_profit = profit_unit * qty
     margin_pct = (profit_unit / effective_cost_unit * 100.0) if effective_cost_unit > 0 else 0.0
 
+    spot_sell = round_down_eve(lowest_ask - eve_tick(lowest_ask)) if (lowest_ask and lowest_ask > 0.01) else None
+    spot_profit_unit = (calc_net_proceeds(spot_sell) - effective_cost_unit) if (spot_sell and effective_cost_unit > 0) else 0.0
+    spot_profit = spot_profit_unit * qty
+    spot_margin_pct = (spot_profit_unit / effective_cost_unit * 100.0) if (spot_sell and effective_cost_unit > 0) else 0.0
+
     return {
         "type_id": tid,
         "name": name,
@@ -286,6 +309,8 @@ def _evaluate_advisor_item(target: dict, ctx: dict) -> dict:
         "line_cost": round(line_cost, 2),
         "profit": round(line_profit, 2),
         "margin_pct": round(margin_pct, 1),
+        "spot_profit": round(spot_profit, 2),
+        "spot_margin_pct": round(spot_margin_pct, 1),
         "hold_data": hold_meta,
         "cost_source": cost_source,
         "collision": collision_info,
@@ -334,6 +359,8 @@ def _summarize_advisor_results(items_result: list[dict]) -> dict:
 
 
 def evaluate_hangar_inventory(raw_text: str = None, force_refresh: bool = False):
+    if force_refresh or (os.path.exists(ORDERS_CACHE_FILE) and (time.time() - os.path.getmtime(ORDERS_CACHE_FILE)) > 45):
+        fetch_character_orders()
     targets = _collect_advisor_targets(raw_text=raw_text, force_refresh=force_refresh)
     if not targets:
         return _summarize_advisor_results([])

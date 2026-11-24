@@ -2,6 +2,15 @@ import { html, useState, useEffect, useMemo, useCallback } from '../lib.js';
 import { fmtISK, copyToClipboard } from '../utils.js';
 import { DeskBadge, MarketLink, FilterPills } from './ui.js';
 
+function fmtPreciseISK(val) {
+  if (val === null || val === undefined) return '--';
+  const num = Number(val);
+  if (!num && num !== 0) return '--';
+  if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(3) + 'B ISK';
+  if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M ISK';
+  return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ISK';
+}
+
 export function SellAdvisorTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -213,15 +222,25 @@ export function SellAdvisorTab() {
                                 : html`<span class="text-slate-500">--</span>`}
                             </td>
                             <td class="py-2.5 px-2 text-right text-slate-300">
-                              ${item.lowest_ask ? fmtISK(item.lowest_ask) : html`<span class="text-amber-500 font-sans font-bold text-[10px]">STOCKOUT</span>`}
+                              ${item.lowest_ask ? fmtPreciseISK(item.lowest_ask) : html`<span class="text-amber-500 font-sans font-bold text-[10px]">STOCKOUT</span>`}
                             </td>
-                            <td class="py-2.5 px-2 text-right font-bold text-slate-100">${fmtISK(item.recommended_sell)}</td>
+                            <td class="py-2.5 px-2 text-right font-bold text-slate-100">${fmtPreciseISK(item.recommended_sell)}</td>
                             <td class="py-2.5 px-3 text-right font-sans">
                               ${item.cost_source === 'UNKNOWN'
                                 ? html`<span class="text-slate-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-slate-500">Gross Proceeds</div>`
-                                : item.profit >= 0
-                                  ? html`<span class="text-emerald-400 font-bold">+${fmtISK(item.profit)}</span><div class="text-[9px] text-emerald-500/80 font-bold">+${item.margin_pct}%</div>`
-                                  : html`<span class="text-rose-400 font-bold">${fmtISK(item.profit)}</span><div class="text-[9px] text-rose-500/80 font-bold">${item.margin_pct}%</div>`}
+                                : html`
+                                  <span class=${`font-bold ${item.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    ${item.profit >= 0 ? '+' : ''}${fmtISK(item.profit)}
+                                  </span>
+                                  <div class=${`text-[9px] font-bold ${item.profit >= 0 ? 'text-emerald-500/80' : 'text-rose-500/80'}`}>
+                                    ${item.action_type === 'hold' ? 'Target: ' : ''}${item.profit >= 0 ? '+' : ''}${item.margin_pct}%
+                                  </div>
+                                  ${item.action_type === 'hold' && item.lowest_ask > 0 && html`
+                                    <div class=${`text-[9px] font-mono ${item.spot_profit >= 0 ? 'text-cyan-400' : 'text-slate-500'}`}>
+                                      Now: ${item.spot_profit >= 0 ? '+' : ''}${fmtISK(item.spot_profit)} (${item.spot_profit >= 0 ? '+' : ''}${item.spot_margin_pct}%)
+                                    </div>
+                                  `}
+                                `}
                             </td>
                             <td class="py-2.5 px-3 text-center">${actionBadge}</td>
                           </tr>

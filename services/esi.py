@@ -291,7 +291,7 @@ def fetch_character_orders():
             escrow = 0.0
             for o in raw:
                 tid = o["type_id"]
-                info = {"order_id": o["order_id"], "price": o["price"], "volume_remain": o["volume_remain"], "escrow": float(o.get("escrow") or (o["price"] * o["volume_remain"]))}
+                info = {"order_id": o["order_id"], "price": o["price"], "volume_remain": o["volume_remain"], "volume_total": o.get("volume_total", o["volume_remain"]), "escrow": float(o.get("escrow") or (o["price"] * o["volume_remain"]))}
                 if o.get("is_buy_order"):
                     buys[tid] = info
                     escrow += o.get("escrow", o["price"] * o["volume_remain"])
