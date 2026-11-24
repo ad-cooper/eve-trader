@@ -155,7 +155,8 @@ def load_market_universe():
         GROUP BY type_id
     ),
     metrics_30d AS (
-        SELECT 
+        SELECT
+            COUNT(*) AS active_days_30d, 
             type_id,
             AVG(volume) AS daily_vol_30d,
             SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_30d,
