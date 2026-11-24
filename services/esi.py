@@ -785,3 +785,28 @@ def get_30d_average_volume(type_id: int, region_id: int = REGION_THE_FORGE) -> f
     if not recent:
         return 0.0
     return round(sum(float(day.get("volume", 0)) for day in recent) / 30.0, 2)
+
+
+def fetch_jita_book_depth(type_id: int, daily_vol_30d: float = 10.0) -> tuple[int, float, dict]:
+    """
+    Fetches live Jita 4-4 top buy and depth-weighted sell book stats for `type_id`
+    so v2 can distinguish 1-2 unit tourist lowballs from genuine supply saturation.
+    """
+    from services.strategy_versions import compute_book_depth_stats
+
+    url = f"{ESI_BASE_URL}/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=all&type_id={type_id}"
+    try:
+        res = requests.get(url, timeout=8)
+        if res.status_code != 200:
+            return type_id, 0.0, compute_book_depth_stats([], daily_vol_30d)
+        orders = res.json()
+        jita_buys = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and o.get("is_buy_order")]
+        jita_sells = [
+            (o["price"], o.get("volume_remain", 1))
+            for o in orders
+            if o.get("location_id") == JITA_STATION_ID and not o.get("is_buy_order")
+        ]
+        top_buy = max(jita_buys) if jita_buys else 0.0
+        return type_id, top_buy, compute_book_depth_stats(jita_sells, daily_vol_30d)
+    except Exception:
+        return type_id, 0.0, compute_book_depth_stats([], daily_vol_30d)

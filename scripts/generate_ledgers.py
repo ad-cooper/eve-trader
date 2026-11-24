@@ -29,6 +29,20 @@ from services.ledgers import (
     compute_candidate_pricing,
     compute_line_sizing,
 )
+from services.strategy_versions import (
+    get_strategy_version,
+    get_active_strategy_version,
+    list_strategy_versions,
+    get_version_output_dir,
+)
+
+if "SQLITE_PATH" not in globals():
+    SQLITE_PATH = "data/latest-sqlite.db"
+if "DUCKDB_PATH" not in globals():
+    DUCKDB_PATH = "data/eve_analytics.duckdb"
+if "OUTPUT_DIR" not in globals():
+    OUTPUT_DIR = "ledgers"
+
 
 OUTPUT_DIR = "ledgers"
 MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
@@ -242,7 +256,9 @@ def allocate_desk_rows(
     market_telemetry: dict,
     desk_params: dict,
     incumbents: IncumbentState,
+    strategy_version: str = "v1",
 ) -> tuple[list[dict], float, list[int], int]:
+    strat = get_strategy_version(strategy_version)
     """Assembles ledger row dicts for ranked candidates up to the desk ISK budget."""
     ledger_rows: list[dict] = []
     allocated_cap = 0.0
@@ -259,19 +275,11 @@ def allocate_desk_rows(
         passes_desk = bool(row.get("passes_desk", False))
         p_info = market_telemetry.get(str(tid)) or {}
 
-        pricing = compute_candidate_pricing(row, desk_type, p_info, incumbents, is_sticky)
+        pricing = strat.price_candidate(row, desk_type, p_info, incumbents, is_sticky)
         if pricing is None:
             continue
 
-        sizing = compute_line_sizing(
-            row=row,
-            pricing=pricing,
-            desk_params=desk_params,
-            incumbents=incumbents,
-            is_sticky=is_sticky,
-            passes_desk=passes_desk,
-            remaining_budget=remaining_budget,
-        )
+        sizing = strat.size_line(row, pricing, desk_params, incumbents, is_sticky, passes_desk, remaining_budget)
         if sizing is None:
             continue
 
@@ -291,6 +299,7 @@ def allocate_desk_rows(
             "capital": round(sizing["capital"], 2),
             "profit": round(sizing["profit"], 2),
             "allow_new_buy": bool(sizing.get("allow_new_buy", True)),
+            "supply_class": str(row.get("supply_class") or "LEGACY_V1"),
         })
 
         if allocated_cap >= (budget * 0.995):
@@ -305,39 +314,67 @@ def persist_desk_ledger(
     allocated_cap: float,
     budget: float,
     sticky_kept: int,
+    strategy_version: str = "v1",
+    snapshot_time=None,
 ) -> None:
-    """Writes the desk CSV ledger and appends a timestamped snapshot to DuckDB."""
-    out_file = os.path.join(OUTPUT_DIR, f"{desk_type}_ledger.csv")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    """Writes the desk CSV ledger (active or shadow dir) and appends a version-tagged snapshot to DuckDB."""
+    out_dir = get_version_output_dir(strategy_version, base_dir=OUTPUT_DIR)
+    out_file = os.path.join(out_dir, f"{desk_type}_ledger.csv")
+    os.makedirs(out_dir, exist_ok=True)
     df_ledger = pd.DataFrame(ledger_rows)
     df_ledger.to_csv(out_file, index=False)
-    print(f"[+] Saved {len(ledger_rows)} lines to {out_file} ({sticky_kept} sticky incumbents kept | Allocated: {allocated_cap/1e9:.2f}B ISK / {budget/1e9:.2f}B target)")
+    print(f"[+][{strategy_version}] Saved {len(ledger_rows)} lines to {out_file} ({sticky_kept} sticky | Allocated: {allocated_cap/1e9:.2f}B / {budget/1e9:.2f}B)")
+
+    if df_ledger.empty:
+        return
 
     try:
         import datetime
-        with connect_analytics(read_only=False, attach_sde=False) as con:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS ledger_history (
-                    snapshot_time TIMESTAMP,
-                    desk_type VARCHAR,
-                    type_id INTEGER,
-                    name VARCHAR,
-                    qty INTEGER,
-                    dump_freq DOUBLE,
-                    target_buy DOUBLE,
-                    target_sell DOUBLE,
-                    net_margin DOUBLE,
-                    capital DOUBLE,
-                    profit DOUBLE
-                );
-            """)
-            history_cols = ["type_id", "name", "qty", "dump_freq", "target_buy", "target_sell", "net_margin", "capital", "profit"]
-            df_history = df_ledger[history_cols].copy()
-            df_history.insert(0, "desk_type", desk_type)
-            df_history.insert(0, "snapshot_time", datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0))
-            con.execute("INSERT INTO ledger_history SELECT * FROM df_history")
+        import duckdb
+        snap_ts = snapshot_time or datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        con = duckdb.connect(DUCKDB_PATH)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_history (
+                snapshot_time TIMESTAMP,
+                desk_type VARCHAR,
+                type_id INTEGER,
+                name VARCHAR,
+                qty INTEGER,
+                dump_freq DOUBLE,
+                target_buy DOUBLE,
+                target_sell DOUBLE,
+                net_margin DOUBLE,
+                capital DOUBLE,
+                profit DOUBLE,
+                strategy_version VARCHAR DEFAULT 'v1',
+                supply_class VARCHAR
+            );
+        """)
+        con.execute("ALTER TABLE ledger_history ADD COLUMN IF NOT EXISTS strategy_version VARCHAR DEFAULT 'v1'")
+        con.execute("ALTER TABLE ledger_history ADD COLUMN IF NOT EXISTS supply_class VARCHAR")
+
+        df_history = df_ledger.copy()
+        if "supply_class" not in df_history.columns:
+            df_history["supply_class"] = "LEGACY_V1"
+        df_history.insert(0, "desk_type", desk_type)
+        df_history.insert(0, "snapshot_time", snap_ts)
+        df_history["strategy_version"] = strategy_version
+
+        con.execute("""
+            INSERT INTO ledger_history (
+                snapshot_time, desk_type, type_id, name, qty, dump_freq,
+                target_buy, target_sell, net_margin, capital, profit,
+                strategy_version, supply_class
+            )
+            SELECT
+                snapshot_time, desk_type, type_id, name, qty, dump_freq,
+                target_buy, target_sell, net_margin, capital, profit,
+                strategy_version, supply_class
+            FROM df_history
+        """)
+        con.close()
     except Exception as e:
-        print(f"[!] Failed to log history to DuckDB: {e}")
+        print(f"[!] Failed to log {strategy_version} history to DuckDB: {e}")
 
 
 def generate_desk_ledger(
@@ -347,7 +384,10 @@ def generate_desk_ledger(
     market_telemetry: dict,
     claimed_ids: set,
     total_portfolio: float = 50.0e9,
+    strategy_version: str = "v1",
+    snapshot_time=None,
 ) -> tuple:
+    strat = get_strategy_version(strategy_version)
     scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
     active_buys, active_sells, asset_qtys, prior_desks = load_incumbent_positions()
     bl_items, bl_groups, bl_meta = load_active_blacklist()
@@ -370,12 +410,12 @@ def generate_desk_ledger(
         bl_meta=bl_meta,
         losing_tids=load_recent_losing_tids(),
     )
-    candidates, desk_params = select_desk_candidates(
-        df=df,
-        desk_type=desk_type,
-        base_mask=base_mask,
-        desk_sticky_ids=incumbents.desk_sticky_ids,
-        scale_factor=scale_factor,
+    candidates, desk_params = strat.select_candidates(
+        df,
+        desk_type,
+        base_mask,
+        incumbents.desk_sticky_ids,
+        scale_factor,
     )
     ledger_rows, allocated_cap, new_claimed_ids, sticky_kept = allocate_desk_rows(
         candidates=candidates,
@@ -384,16 +424,27 @@ def generate_desk_ledger(
         market_telemetry=market_telemetry,
         desk_params=desk_params,
         incumbents=incumbents,
+        strategy_version=strategy_version,
     )
-    persist_desk_ledger(desk_type, ledger_rows, allocated_cap, budget, sticky_kept)
+    persist_desk_ledger(
+        desk_type,
+        ledger_rows,
+        allocated_cap,
+        budget,
+        sticky_kept,
+        strategy_version=strategy_version,
+        snapshot_time=snapshot_time,
+    )
     return new_claimed_ids, allocated_cap
+
 
 DESK_ORDER = ("hold", "tactical", "evergreen")
 
 
-def load_existing_desk_state(desk_type: str) -> tuple[list[int], float]:
+def load_existing_desk_state(desk_type: str, strategy_version: str = "v1") -> tuple[list[int], float]:
     """Reads claimed type_ids and deployed capital from an existing desk CSV."""
-    path = os.path.join(OUTPUT_DIR, f"{desk_type}_ledger.csv")
+    out_dir = get_version_output_dir(strategy_version, base_dir=OUTPUT_DIR)
+    path = os.path.join(out_dir, f"{desk_type}_ledger.csv")
     if not os.path.exists(path):
         return [], 0.0
     try:
@@ -412,6 +463,8 @@ def run_waterfall(
     total_budget: float,
     market_telemetry: dict,
     target_desks: set[str],
+    strategy_version: str = "v1",
+    snapshot_time=None,
 ) -> dict[str, tuple[list[int], float]]:
     """
     Executes the multi-desk waterfall in priority order (hold -> tactical -> evergreen).
@@ -421,10 +474,14 @@ def run_waterfall(
     carried_slack = 0.0
     outcomes: dict[str, tuple[list[int], float]] = {}
 
+    strat = get_strategy_version(strategy_version)
+    df_enriched = strat.enrich_universe(df, SQLITE_PATH, DUCKDB_PATH)
+
     base_summary = " | ".join(
         f"{d.capitalize()} {(total_budget * DESK_RATIOS[d])/1e9:.2f}B" for d in DESK_ORDER
     )
-    print(f"\n=== Running Dynamic Multi-Desk Waterfall ({total_budget/1e9:.2f}B ISK Portfolio) ===")
+    print(f"\n=== Running Dynamic Multi-Desk Waterfall [{strategy_version.upper()}] ({total_budget/1e9:.2f}B ISK Portfolio) ===")
+    print(f"[*] Strategy: {strat.description}")
     print(f"[*] Base Allocation Targets: {base_summary}")
 
     for desk in DESK_ORDER:
@@ -437,10 +494,17 @@ def run_waterfall(
 
         if desk in target_desks:
             ids, deployed_cap = generate_desk_ledger(
-                df, desk, target_budget, market_telemetry, claimed_ids, total_budget
+                df_enriched,
+                desk,
+                target_budget,
+                market_telemetry,
+                claimed_ids,
+                total_budget,
+                strategy_version=strategy_version,
+                snapshot_time=snapshot_time,
             )
         else:
-            ids, deployed_cap = load_existing_desk_state(desk)
+            ids, deployed_cap = load_existing_desk_state(desk, strategy_version=strategy_version)
 
         claimed_ids.update(ids)
         carried_slack = max(0.0, target_budget - deployed_cap)
@@ -448,15 +512,18 @@ def run_waterfall(
 
     total_deployed = sum(cap for _, cap in outcomes.values())
     counts_summary = ", ".join(f"{len(outcomes[d][0])} {d.capitalize()}" for d in DESK_ORDER if d in outcomes)
-    print(f"\n=== Waterfall Complete: {counts_summary} ===")
+    print(f"\n=== Waterfall Complete [{strategy_version.upper()}]: {counts_summary} ===")
     print(f"[+] Total Portfolio Deployed: {total_deployed/1e9:.2f}B / {total_budget/1e9:.2f}B ISK ({(total_deployed/total_budget)*100:.1f}%)")
     return outcomes
 
 
 def main():
+    import datetime
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--desk", default="all", choices=["evergreen", "tactical", "hold", "all"])
     parser.add_argument("--capital", default="auto", help="Total portfolio capital in billions or 'auto' (e.g. 50.0, 89.5, 120.0, auto)")
+    parser.add_argument("--version", default="all", help="Strategy version to run ('v1', 'v2', 'all', or registered ai-* version)")
     args = parser.parse_args()
 
     total_budget = resolve_dynamic_budget(args.capital)
@@ -464,7 +531,28 @@ def main():
     df = load_market_universe()
 
     target_desks = set(DESK_ORDER) if args.desk == "all" else {args.desk}
-    run_waterfall(df, total_budget, market_telemetry, target_desks)
+    shared_snapshot_time = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+
+    if args.version.lower() == "all":
+        active_v = get_active_strategy_version()
+        versions_to_run = [active_v] + [v for v in list_strategy_versions() if v != active_v]
+    else:
+        versions_to_run = [v.strip().lower() for v in args.version.split(",") if v.strip()]
+
+    for ver in versions_to_run:
+        try:
+            run_waterfall(
+                df,
+                total_budget,
+                market_telemetry,
+                target_desks,
+                strategy_version=ver,
+                snapshot_time=shared_snapshot_time,
+            )
+        except Exception as e:
+            if ver == get_active_strategy_version():
+                raise
+            print(f"[!] Shadow version '{ver}' failed (non-blocking): {e}")
 
 
 if __name__ == "__main__":

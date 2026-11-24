@@ -18,7 +18,7 @@ def run_daily_ledger_rebuild(include_imports: bool = True) -> tuple[bool, str | 
     """
     try:
         subprocess.run(["python3", "scripts/sync_market_data.py"], check=False)
-        subprocess.run(["python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto"], check=True)
+        subprocess.run(["python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto", "--version", "all"], check=True)
         fetch_character_orders()
         update_ledger_market_prices()
         calculate_performance()
