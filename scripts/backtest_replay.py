@@ -103,6 +103,7 @@ def build_point_in_time_universe(
     metrics_30d AS (
         SELECT
             h.type_id,
+            COUNT(*) AS active_days_30d,
             AVG(h.volume) AS daily_vol_30d,
             SUM(h.average * h.volume) / NULLIF(SUM(h.volume), 0) AS vwap_30d,
             AVG((h.highest - h.lowest) / NULLIF(h.average, 0)) * 100.0 AS avg_spread_30d,
@@ -138,6 +139,7 @@ def build_point_in_time_universe(
     SELECT
         m.type_id,
         l.total_history_days,
+        m.active_days_30d,
         l.vwap_180d / 1e6 AS price_m_180d,
         m.vwap_30d / 1e6 AS price_m_30d,
         w.vwap_7d / 1e6 AS price_m_7d,

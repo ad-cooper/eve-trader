@@ -211,3 +211,47 @@ def test_persist_desk_ledger_logs_strategy_version_to_duckdb(tmp_path, monkeypat
     logged = con.execute("SELECT strategy_version, supply_class, type_id FROM ledger_history").fetchall()
     con.close()
     assert logged == [("v2", "MANUFACTURED", 801)]
+
+
+def test_v2_rejects_ultra_low_volume_high_price_traps():
+    from services.strategy_versions import v2_select_desk_candidates
+
+    df = pd.DataFrame([
+        {
+            "type_id": 99901,
+            "item_name": "Neophite",
+            "group_name": "Commodities",
+            "category_name": "Commodity",
+            "total_history_days": 180,
+            "active_days_30d": 7,
+            "price_m_180d": 450.0,
+            "price_m_30d": 420.0,
+            "price_m_7d": 410.0,
+            "p20_low_m_30d": 268.8,
+            "daily_vol_30d": 0.35,
+            "dump_freq_pct": 57.0,
+            "avg_spread_30d": 48.0,
+            "daily_turnover_m": 147.0,
+        },
+        {
+            "type_id": 99902,
+            "item_name": "Imperial Navy Large Armor Repairer",
+            "group_name": "Armor Repair Unit",
+            "category_name": "Module",
+            "total_history_days": 180,
+            "active_days_30d": 30,
+            "price_m_180d": 265.0,
+            "price_m_30d": 260.0,
+            "price_m_7d": 258.0,
+            "p20_low_m_30d": 227.5,
+            "daily_vol_30d": 14.0,
+            "dump_freq_pct": 42.0,
+            "avg_spread_30d": 16.5,
+            "daily_turnover_m": 3640.0,
+        },
+    ])
+    mask = pd.Series(True, index=df.index)
+    cands, _ = v2_select_desk_candidates(df, "tactical", mask, set())
+    picked_ids = set(cands["type_id"].astype(int))
+    assert 99901 not in picked_ids
+    assert 99902 in picked_ids

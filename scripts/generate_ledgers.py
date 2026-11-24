@@ -206,6 +206,7 @@ def load_market_universe():
         g.groupName AS group_name,
         c.categoryName AS category_name,
         l.total_history_days,
+        m.active_days_30d,
         l.vwap_180d / 1e6 AS price_m_180d,
         m.vwap_30d / 1e6 AS price_m_30d,
         w.vwap_7d / 1e6 AS price_m_7d,

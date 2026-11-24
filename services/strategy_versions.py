@@ -344,13 +344,20 @@ def v2_select_desk_candidates(
     if cfg.min_history_days > 0:
         desk_mask &= df["total_history_days"] >= cfg.min_history_days
 
+    active_days = df["active_days_30d"].fillna(30) if "active_days_30d" in df.columns else pd.Series(30, index=df.index)
+
     if desk_type == "evergreen":
-        desk_mask &= (df["daily_vol_30d"] >= cfg.min_daily_vol) & (
-            (s_class == "MANUFACTURED") | (df["daily_turnover_m"] >= 120.0)
+        desk_mask &= (
+            (df["daily_vol_30d"] >= cfg.min_daily_vol)
+            & (active_days >= 20)
+            & ((s_class == "MANUFACTURED") | (df["daily_turnover_m"] >= 120.0))
         )
     elif desk_type == "tactical":
-        desk_mask &= (df["dump_freq_pct"] >= max(22.0, cfg.min_dump_freq_pct - 5.0)) & (
-            s_class.isin(["LP_FACTION", "FARMED_RNG"]) | (df["dump_freq_pct"] >= 45.0)
+        desk_mask &= (
+            (df["daily_vol_30d"] >= 1.5)
+            & (active_days >= 15)
+            & (df["dump_freq_pct"] >= max(22.0, cfg.min_dump_freq_pct - 5.0))
+            & (s_class.isin(["LP_FACTION", "FARMED_RNG"]) | (df["dump_freq_pct"] >= 45.0))
         )
     else:  # hold
         ratio_cap = cfg.max_vwap_ratio_180d if cfg.max_vwap_ratio_180d is not None else 0.90
@@ -360,7 +367,7 @@ def v2_select_desk_candidates(
         deep_mfg_hold = (df["price_m_30d"] <= (df["price_m_180d"] * min(0.85, ratio_cap - 0.05))) & (
             s_class == "MANUFACTURED"
         )
-        desk_mask &= (inelastic_hold | deep_mfg_hold)
+        desk_mask &= (df["daily_vol_30d"] >= 1.0) & (active_days >= 12) & (inelastic_hold | deep_mfg_hold)
 
     candidates = df[base_mask & (desk_mask | is_sticky_series)].copy()
     candidates["passes_desk"] = desk_mask.loc[candidates.index]
@@ -370,7 +377,7 @@ def v2_select_desk_candidates(
     deployable_m = (candidates["daily_turnover_m"] * cfg.vol_pct).clip(upper=max_cap_m)
     net_spread = (candidates["avg_spread_30d"] - 5.35).clip(lower=0.0)
     cand_swing_edge = (swing_amp_30d.loc[candidates.index] - 5.35).clip(lower=0.0)
-    effective_edge = net_spread.combine(cand_swing_edge, max)
+    effective_edge = net_spread.combine(cand_swing_edge, max).clip(upper=45.0)
 
     if desk_type == "hold":
         raw_upside = (
@@ -419,6 +426,9 @@ def v2_compute_candidate_pricing(
     effective_p_info = dict(p_info or {})
     if effective_p_info.get("is_thin_lowball") and effective_p_info.get("effective_clearing_ask", 0.0) > 0:
         effective_p_info["lowest_ask"] = effective_p_info["effective_clearing_ask"]
+    vwap_30d_isk = float(row.get("price_m_30d") or 0.0) * 1e6
+    if vwap_30d_isk > 0 and effective_p_info.get("lowest_ask", 0.0) > (vwap_30d_isk * 1.40):
+        effective_p_info["lowest_ask"] = round(vwap_30d_isk * 1.40, 2)
     return v1_compute_candidate_pricing(row, desk_type, effective_p_info, incumbents, is_sticky)
 
 
