@@ -155,12 +155,12 @@ def test_side_by_side_v1_and_v2_shadow_isolation_and_ai_registration(tmp_path, m
         "803": {"lowest_ask": 172.0e6, "top_buy": 148.0e6},
     }
 
-    assert get_active_strategy_version() == "v1"
+    assert get_active_strategy_version() == "v2"
     gen_led.run_waterfall(df, total_budget=6.0e9, market_telemetry=telemetry, target_desks={"hold", "tactical", "evergreen"}, strategy_version="v1")
     gen_led.run_waterfall(df, total_budget=6.0e9, market_telemetry=telemetry, target_desks={"hold", "tactical", "evergreen"}, strategy_version="v2")
 
     assert os.path.exists(tmp_path / "ledgers" / "hold_ledger.csv")
-    assert os.path.exists(tmp_path / "ledgers" / "shadow" / "v2" / "hold_ledger.csv")
+    assert os.path.exists(tmp_path / "ledgers" / "shadow" / "v1" / "hold_ledger.csv")
 
     v2_spec = get_strategy_version("v2")
     register_strategy_version(
