@@ -327,11 +327,17 @@ def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
         },
     ]
 
+    from services.accounting import calc_max_profitable_buy, round_down_eve, round_up_eve
+    from services.ledgers import get_desk_profile
+
+    eg_max = round_down_eve(calc_max_profitable_buy(100_000_000.0, get_desk_profile("evergreen").live_min_margin))
+    near_top_buy = round_up_eve(eg_max * 1.015)
+
     monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows, [], []))
     monkeypatch.setattr(
         bo,
         "fetch_jita_book_top",
-        lambda tid: (tid, 84_900_000.0, 97_000_000.0) if tid == 2001 else (tid, 96_000_000.0, 100_000_000.0),
+        lambda tid: (tid, 84_900_000.0, 97_000_000.0) if tid == 2001 else (tid, near_top_buy, 100_000_000.0),
     )
 
     res = bo.audit_missing_buys(desk="all")
@@ -341,8 +347,8 @@ def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
     assert by_id[2001]["recommended_buy"] == 84_910_000.0
     assert by_id[2001]["squeezed"] is False
 
-    # When top_buy exceeds margin floor, must cap at max_buy_floor and flag squeezed=True
-    assert by_id[2002]["recommended_buy"] < 96_000_000.0
+    # When top_buy slightly exceeds margin floor (<=3% gap), must cap at max_buy_floor and flag squeezed=True
+    assert by_id[2002]["recommended_buy"] == eg_max
     assert by_id[2002]["squeezed"] is True
 
 
@@ -429,3 +435,91 @@ def test_partial_stub_and_tactical_target_met_cancel_remaining_buy(monkeypatch):
     assert res["cancel_count"] == 1
     assert res["cancels"][0]["type_id"] == 4001
     assert "PARTIAL STUB" in res["cancels"][0]["reason"]
+
+
+def test_missing_buys_filters_low_capital_and_low_profit_dust_orders(monkeypatch):
+    import workflows.buy_orders as bo
+
+    unplaced_rows = [
+        {
+            "type_id": 5001,
+            "name": "Shadow Serpentis 1MN Afterburner",
+            "desk_type": "evergreen",
+            "char_status": "UNPLACED",
+            "qty": 1,
+            "target_buy": 24_720_000.0,
+            "target_sell": 28_500_000.0,
+        },
+        {
+            "type_id": 5002,
+            "name": "Cruise Missile Specialization",
+            "desk_type": "tactical",
+            "char_status": "UNPLACED",
+            "qty": 2,
+            "target_buy": 2_710_000.0,
+            "target_sell": 6_400_000.0,
+        },
+        {
+            "type_id": 5003,
+            "name": "Core X-Type EM Armor Hardener",
+            "desk_type": "tactical",
+            "char_status": "UNPLACED",
+            "qty": 10,
+            "target_buy": 146_300_000.0,
+            "target_sell": 176_000_000.0,
+        },
+    ]
+
+    books = {
+        5001: (5001, 24_710_000.0, 28_500_000.0),
+        5002: (5002, 2_700_000.0, 6_400_000.0),
+        5003: (5003, 146_200_000.0, 176_000_000.0),
+    }
+
+    monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows[:1], unplaced_rows[1:], []))
+    monkeypatch.setattr(bo, "fetch_jita_book_top", lambda tid: books[tid])
+
+    res = bo.audit_missing_buys(desk="all")
+    assert res["total_items"] == 1
+    assert res["skipped_small_count"] == 2
+    assert res["items"][0]["type_id"] == 5003
+
+
+def test_missing_buys_uses_hold_recovery_target_and_skips_buried_margin_caps(monkeypatch):
+    import workflows.buy_orders as bo
+
+    unplaced_rows = [
+        {
+            "type_id": 6001,
+            "name": "Medium Vorton Projector II",
+            "desk_type": "hold",
+            "char_status": "UNPLACED",
+            "qty": 2,
+            "target_buy": 144_000_000.0,
+            "target_sell": 188_100_000.0,
+        },
+        {
+            "type_id": 6002,
+            "name": "Buried Margin Cap Module",
+            "desk_type": "evergreen",
+            "char_status": "UNPLACED",
+            "qty": 2,
+            "target_buy": 135_000_000.0,
+            "target_sell": 150_600_000.0,
+        },
+    ]
+
+    books = {
+        6001: (6001, 145_100_000.0, 150_600_000.0),
+        6002: (6002, 145_100_000.0, 150_600_000.0),
+    }
+
+    monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows[1:], [], unplaced_rows[:1]))
+    monkeypatch.setattr(bo, "fetch_jita_book_top", lambda tid: books[tid])
+
+    res = bo.audit_missing_buys(desk="all")
+    assert res["total_items"] == 1
+    assert res["skipped_small_count"] == 1
+    assert res["items"][0]["type_id"] == 6001
+    assert res["items"][0]["recommended_buy"] == 145_200_000.0
+    assert res["items"][0]["squeezed"] is False

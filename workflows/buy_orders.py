@@ -15,7 +15,7 @@ from services.accounting import (
 def audit_missing_buys(desk: str = "all") -> dict:
     """
     Audits UNPLACED orders for `desk` against live Jita 4-4 ESI order books using
-    each item's DeskProfile margin floor and centralized EVE tick rounding.
+    each item's DeskProfile margin floor, EVE tick rounding, and order-slot worthiness guards.
     """
     eg, tac, hld = get_annotated_desks()
     desk_map = {
@@ -25,15 +25,11 @@ def audit_missing_buys(desk: str = "all") -> dict:
         "all": eg + tac + hld,
     }
     rows = desk_map.get(desk.lower(), eg + tac + hld)
-    unplaced = [
-        r for r in rows
-        if r.get("char_status") == "UNPLACED"
-        and str(r.get("allow_new_buy", True)).strip().lower() not in ("false", "0", "no")
-        and not str(r.get("action_text") or "").startswith("DO NOT BUY")
-    ]
+    unplaced = [r for r in rows if r.get("char_status") == "UNPLACED"]
     if not unplaced:
         return {
             "total_items": 0,
+            "skipped_small_count": 0,
             "total_escrow": 0.0,
             "total_isk_needed": 0.0,
             "total_gross_exit": 0.0,
@@ -53,6 +49,8 @@ def audit_missing_buys(desk: str = "all") -> dict:
             books[tid] = (top_b, low_s)
 
     out_items = []
+    skipped_small_count = 0
+
     for r in unplaced:
         tid = int(r["type_id"])
         qty = int(r.get("qty") or 1)
@@ -60,11 +58,17 @@ def audit_missing_buys(desk: str = "all") -> dict:
         target_sell = float(r.get("target_sell") or 0.0)
         top_buy, live_ask = books.get(tid, (0.0, 0.0))
 
-        eff_sell = live_ask if live_ask > 0 else target_sell
+        desk_key = str(r.get("desk_type") or desk).lower()
+        cfg = get_desk_profile(desk_key)
+
+        # Hold desk captures cyclical dips to exit at 180d recovery target_sell; Evergreen/Tactical exit at live_ask
+        if cfg.name == "hold" and target_sell > 0:
+            eff_sell = max(target_sell, live_ask) if live_ask > 0 else target_sell
+        else:
+            eff_sell = live_ask if live_ask > 0 else target_sell
         if eff_sell <= 0:
             continue
 
-        cfg = get_desk_profile(r.get("desk_type") or desk)
         max_buy_floor = round_down_eve(calc_max_profitable_buy(eff_sell, cfg.live_min_margin))
         if max_buy_floor <= 0:
             continue
@@ -78,6 +82,10 @@ def audit_missing_buys(desk: str = "all") -> dict:
             rec_buy = desired_buy
             squeezed = False
         else:
+            # Skip MARGIN CAP orders buried >3% below live top_buy where higher bids block fills
+            if top_buy > 0 and ((top_buy - max_buy_floor) / top_buy) > 0.03:
+                skipped_small_count += 1
+                continue
             rec_buy = max_buy_floor
             squeezed = True
 
@@ -93,10 +101,17 @@ def audit_missing_buys(desk: str = "all") -> dict:
         line_total_fees = round(line_buy_fee + line_exit_fee, 2)
         line_profit = fin["profit"]
 
+        # Slot-worthiness guard: skip low-capital or low-profit dust lines not worth a Jita order slot
+        min_order_isk = cfg.min_line_cap * 0.75
+        min_order_profit = 25_000_000.0 if cfg.name == "hold" else 10_000_000.0
+        if line_isk_needed < min_order_isk or line_profit < min_order_profit:
+            skipped_small_count += 1
+            continue
+
         out_items.append({
             "type_id": tid,
             "name": r.get("name"),
-            "desk": str(r.get("desk_type") or desk).upper(),
+            "desk": cfg.name.upper(),
             "qty": qty,
             "top_buy": round(top_buy, 2),
             "recommended_buy": rec_buy,
@@ -126,6 +141,7 @@ def audit_missing_buys(desk: str = "all") -> dict:
 
     return {
         "total_items": len(out_items),
+        "skipped_small_count": skipped_small_count,
         "total_escrow": total_escrow,
         "total_isk_needed": total_isk_needed,
         "total_gross_exit": total_gross_exit,

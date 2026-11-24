@@ -431,13 +431,7 @@ def compute_line_sizing(
     capital_line = cost_unit * qty
 
     effective_min_cap = (min_line_cap * 0.35) if is_sticky else min_line_cap
-    if (
-        not has_buy
-        and not has_sell
-        and held_qty == 0
-        and capital_line < effective_min_cap
-        and (cost_unit * raw_qty) < effective_min_cap
-    ):
+    if not has_buy and capital_line < effective_min_cap:
         return None
 
     if capital_line > remaining_budget:

@@ -129,7 +129,7 @@ export function BuyOrdersTab() {
 
       <div class="bg-blue-950/20 border border-blue-900/40 rounded-lg px-4 py-2.5 text-slate-300 flex flex-wrap justify-between items-center gap-2 text-[11px]">
         <span>In EVE Online, open <strong>Market → Multibuy</strong> and click <strong>"Import from Clipboard"</strong> to place all missing buy orders at once.</span>
-        <span class="text-slate-400">Audited against live Jita 4-4 order books (+1 tick over top bid, capped at DeskProfile margin floor)</span>
+        <span class="text-slate-400">Audited against live Jita 4-4 order books (+1 tick over top bid)${data?.skipped_small_count > 0 ? ` • ${data.skipped_small_count} low-value dust lines hidden to save slots` : ''}</span>
       </div>
 
       <div class="bg-eveCard border border-eveBorder rounded-lg overflow-hidden">
