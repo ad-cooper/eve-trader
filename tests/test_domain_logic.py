@@ -190,7 +190,7 @@ def test_daily_pipeline_orchestrates_all_steps(monkeypatch):
     assert ts and ts.endswith("UTC")
     assert calls == [
         ("subprocess", ("python3", "scripts/sync_market_data.py"), False),
-        ("subprocess", ("python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto"), True),
+        ("subprocess", ("python3", "scripts/generate_ledgers.py", "--desk", "all", "--capital", "auto", "--version", "all"), True),
         ("fetch_character_orders",),
         ("update_ledger_market_prices",),
         ("calculate_performance",),

@@ -261,7 +261,7 @@ def enrich_universe_fundamentals(
         )
 
         if is_farmed_rng:
-            s_class, c_days, elast = "FARMED_RNG", 16.0, 0.25
+            s_class, c_days, elast = "FARMED_RNG", 21.0, 0.25
         elif is_lp_faction:
             s_class, c_days, elast = "LP_FACTION", 8.0, 0.55
         elif tid in mfg_ids or mg in (1, 2) or cat in ("ship", "module", "charge", "drone", "rig", "structure", "subsystem"):
@@ -328,10 +328,16 @@ def v2_select_desk_candidates(
     is_sticky_series = df["type_id"].isin(desk_sticky_ids)
     s_class = df["supply_class"]
 
+    p20_safe = df["p20_low_m_30d"].fillna(df["price_m_30d"]).replace(0, float("nan"))
+    swing_amp_30d = (((df["price_m_30d"] - p20_safe) / p20_safe) * 100.0).fillna(0.0)
+    spread_or_swing = (df["avg_spread_30d"] >= cfg.min_spread_pct) | (
+        (desk_type in ("tactical", "hold")) & (swing_amp_30d >= 14.0)
+    )
+
     desk_mask = (
         df[cfg.price_col].between(cfg.min_price_m, cfg.max_price_m)
         & (df["daily_turnover_m"] >= cfg.min_turnover_m)
-        & (df["avg_spread_30d"] >= cfg.min_spread_pct)
+        & spread_or_swing
     )
     if cfg.excluded_categories:
         desk_mask &= ~df["category_name"].isin(cfg.excluded_categories)
@@ -348,9 +354,13 @@ def v2_select_desk_candidates(
         )
     else:  # hold
         ratio_cap = cfg.max_vwap_ratio_180d if cfg.max_vwap_ratio_180d is not None else 0.90
-        desk_mask &= (df["price_m_30d"] <= (df["price_m_180d"] * ratio_cap)) & s_class.isin(
+        inelastic_hold = (df["price_m_30d"] <= (df["price_m_180d"] * ratio_cap)) & s_class.isin(
             ["FARMED_RNG", "LP_FACTION"]
         )
+        deep_mfg_hold = (df["price_m_30d"] <= (df["price_m_180d"] * min(0.85, ratio_cap - 0.05))) & (
+            s_class == "MANUFACTURED"
+        )
+        desk_mask &= (inelastic_hold | deep_mfg_hold)
 
     candidates = df[base_mask & (desk_mask | is_sticky_series)].copy()
     candidates["passes_desk"] = desk_mask.loc[candidates.index]
@@ -359,6 +369,8 @@ def v2_select_desk_candidates(
     max_cap_m = (cfg.max_line_cap * scale_factor) / 1e6
     deployable_m = (candidates["daily_turnover_m"] * cfg.vol_pct).clip(upper=max_cap_m)
     net_spread = (candidates["avg_spread_30d"] - 5.35).clip(lower=0.0)
+    cand_swing_edge = (swing_amp_30d.loc[candidates.index] - 5.35).clip(lower=0.0)
+    effective_edge = net_spread.combine(cand_swing_edge, max)
 
     if desk_type == "hold":
         raw_upside = (
@@ -375,7 +387,7 @@ def v2_select_desk_candidates(
     elif desk_type == "tactical":
         candidates["swing_score"] = (
             candidates["dump_freq_pct"]
-            * net_spread
+            * effective_edge
             * (1.0 + deployable_m.clip(lower=0.0).map(math.log1p))
         )
     else:

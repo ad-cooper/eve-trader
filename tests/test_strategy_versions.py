@@ -87,7 +87,7 @@ def test_sde_supply_elasticity_classification(tmp_path):
     assert by_id[802]["supply_class"] == "LP_FACTION"
     assert by_id[802]["natural_cycle_days"] == 8.0
     assert by_id[803]["supply_class"] == "FARMED_RNG"
-    assert by_id[803]["natural_cycle_days"] == 16.0
+    assert by_id[803]["natural_cycle_days"] == 21.0
 
 
 def test_book_depth_stats_distinguish_thin_lowball_from_saturation_wall():
