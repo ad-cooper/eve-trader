@@ -33,6 +33,7 @@ services:
       - ./tests:/app/tests
       - ./.git:/app/.git:ro
       - ./app.py:/app/app.py
+      - ./constants.py:/app/constants.py
     environment:
       - TZ=UTC
       - PYTHONUNBUFFERED=1

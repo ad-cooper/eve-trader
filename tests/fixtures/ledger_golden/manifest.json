@@ -1,0 +1,15 @@
+{
+  "snapshot_time": "2026-11-26T11:30:00+00:00",
+  "budget": 50000000000.0,
+  "active_ledger_item_count": 156,
+  "total_fixture_type_ids": 450,
+  "versions": [
+    "v1",
+    "v2"
+  ],
+  "desks": [
+    "hold",
+    "tactical",
+    "evergreen"
+  ]
+}

@@ -18,9 +18,9 @@ from services.staging_diff import get_observed_staging_velocity, process_snapsho
 from services.storage import read_json, write_json
 from workflows.imports.freight import calc_courier_freight, calc_hisec_optimal_split
 
-
-IMPORT_CACHE_FILE = "ledgers/import_suggestions_cache.json"
-
+from constants import (
+    IMPORT_CACHE_FILE
+)
 
 IMPORT_DESTINATIONS = [
     {

@@ -2,6 +2,9 @@ import os
 import json
 import pandas as pd
 
+from constants import (
+    MARKET_CACHE_FILE
+)
 
 def read_json(path: str, default=None):
     """Safely reads a JSON file, returning `default` if missing or malformed."""
@@ -37,7 +40,6 @@ def read_csv_records(path: str) -> list[dict]:
         return []
 
 
-MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
 
 
 def load_market_prices_cache() -> dict:

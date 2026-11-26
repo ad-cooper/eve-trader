@@ -6,14 +6,15 @@ from pathlib import Path
 
 from services.ledgers import DESK_PROFILES
 from services.retrospective.optimizer import (
-    DESK_ORDER,
-    PROPOSALS_DIR,
     _sanitize_json,
     run_local_retrospective,
 )
 
-AUTOPILOT_BRANCH = "ai-autopilot"
-
+from constants import (
+    AUTOPILOT_BRANCH,
+    DESK_ORDER,
+    PROPOSALS_DIR
+)
 
 def get_active_git_branch() -> str | None:
     """Reads the host repository's active branch from mounted .git/HEAD."""

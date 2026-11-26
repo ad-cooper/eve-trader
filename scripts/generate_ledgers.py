@@ -36,19 +36,16 @@ from services.strategy_versions import (
     get_version_output_dir,
 )
 
-if "SQLITE_PATH" not in globals():
-    SQLITE_PATH = "data/latest-sqlite.db"
-if "DUCKDB_PATH" not in globals():
-    DUCKDB_PATH = "data/eve_analytics.duckdb"
-if "OUTPUT_DIR" not in globals():
-    OUTPUT_DIR = "ledgers"
-
-
-OUTPUT_DIR = "ledgers"
-MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
+from constants import (
+    DEFAULT_FALLBACK_BUDGET,
+    DESK_ORDER,
+    DUCKDB_PATH,
+    MARKET_CACHE_FILE,
+    OUTPUT_DIR,
+    SQLITE_PATH
+)
 
 DESK_RATIOS = {k: cfg.ratio for k, cfg in DESK_PROFILES.items()}
-DEFAULT_FALLBACK_BUDGET = 50.0e9
 
 
 def resolve_dynamic_budget(capital_arg: str) -> float:
@@ -438,10 +435,6 @@ def generate_desk_ledger(
         snapshot_time=snapshot_time,
     )
     return new_claimed_ids, allocated_cap
-
-
-DESK_ORDER = ("hold", "tactical", "evergreen")
-
 
 def load_existing_desk_state(desk_type: str, strategy_version: str = "v1") -> tuple[list[int], float]:
     """Reads claimed type_ids and deployed capital from an existing desk CSV."""

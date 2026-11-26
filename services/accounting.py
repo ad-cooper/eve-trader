@@ -4,14 +4,13 @@ from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
 from services.esi import fetch_wallet_transactions
 
-PERF_CACHE_FILE = "ledgers/performance_cache.json"
-
-# --- Centralized Fee Constants ---
-SALES_TAX_RATE = 0.03375          # 3.375% Accounting V
-SELL_BROKER_FEE = 0.0123          # 1.23% Broker Relations V in Citadel
-TOTAL_EXIT_FEE = SALES_TAX_RATE + SELL_BROKER_FEE  # 4.605%
-BUY_SCC_SURCHARGE = 0.0050        # 0.50% SCC Citadel 1-jump surcharge
-
+from constants import (
+    BUY_SCC_SURCHARGE,
+    PERF_CACHE_FILE,
+    SALES_TAX_RATE,
+    SELL_BROKER_FEE,
+    TOTAL_EXIT_FEE,
+)
 
 # --- EVE 4-Significant-Figure Tick Helpers ---
 def eve_tick(price: float) -> float:

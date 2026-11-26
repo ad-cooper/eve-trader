@@ -2,7 +2,9 @@ import os
 import json
 from datetime import datetime, timezone
 
-BLACKLIST_FILE = "data/temporary_blacklist.json"
+from constants import (
+    BLACKLIST_FILE
+)
 
 def load_active_blacklist():
     """

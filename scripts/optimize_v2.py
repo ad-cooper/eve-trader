@@ -28,12 +28,14 @@ from services.strategy_versions import (
     set_active_strategy_version,
 )
 from scripts.backtest_replay import (
-    DUCKDB_PATH,
-    SQLITE_PATH,
     load_sde_item_metadata,
     run_walkforward_replay,
 )
 
+from constants import (
+    DUCKDB_PATH,
+    SQLITE_PATH
+)
 
 def _register_tuned_v2_candidate(name: str, profile_overrides: dict[str, dict]) -> str:
     base_v2 = get_strategy_version("v2")

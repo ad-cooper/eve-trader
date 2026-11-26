@@ -4,10 +4,9 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.ledgers import get_desk_profile, load_all_desk_ledgers, load_cached_orders, load_desk_csv
-from services.storage import read_json, write_json, MARKET_CACHE_FILE, load_market_prices_cache
+from services.storage import read_json, write_json, load_market_prices_cache
 from services.accounting import calc_line_financials
 from services.esi import (
-    JITA_STATION_ID,
     create_esi_session as create_session,
     fetch_lowest_sell_order,
     fetch_jita_book_top,
@@ -15,6 +14,10 @@ from services.esi import (
 )
 from services.sde import connect_analytics, resolve_type_ids
 
+from constants import (
+    JITA_STATION_ID,
+    MARKET_CACHE_FILE
+)
 
 def fetch_station_asks_bulk(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
     """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""

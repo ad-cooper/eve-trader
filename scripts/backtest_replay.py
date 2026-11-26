@@ -41,9 +41,11 @@ from services.strategy_versions import (
     enrich_universe_fundamentals,
 )
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-SQLITE_PATH = "data/latest-sqlite.db"
-DESK_ORDER = ("hold", "tactical", "evergreen")
+from constants import (
+    DESK_ORDER,
+    DUCKDB_PATH,
+    SQLITE_PATH
+)
 DESK_RATIOS = {k: cfg.ratio for k, cfg in DESK_PROFILES.items()}
 
 

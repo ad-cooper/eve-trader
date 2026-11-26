@@ -20,14 +20,16 @@ from services.strategy_versions import (
     get_version_output_dir,
 )
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-DESKS = ("hold", "tactical", "evergreen")
+from constants import (
+    DESK_ORDER,
+    DUCKDB_PATH
+)
 
 
 def load_version_ledgers(version: str) -> dict[str, pd.DataFrame]:
     out_dir = get_version_output_dir(version)
     frames: dict[str, pd.DataFrame] = {}
-    for desk in DESKS:
+    for desk in DESK_ORDER:
         path = os.path.join(out_dir, f"{desk}_ledger.csv")
         if os.path.exists(path):
             try:
@@ -50,7 +52,7 @@ def compare_current_snapshots(versions: list[str]) -> None:
     print(header)
     print("-" * len(header))
 
-    for desk in DESKS:
+    for desk in DESK_ORDER:
         for v in versions:
             df = all_data[v].get(desk, pd.DataFrame())
             if df.empty:
@@ -70,7 +72,7 @@ def compare_current_snapshots(versions: list[str]) -> None:
     if len(versions) >= 2:
         base_v, cand_v = versions[0], versions[1]
         print(f"\n=== DIFF HIGHLIGHTS: {cand_v.upper()} vs {base_v.upper()} ===")
-        for desk in DESKS:
+        for desk in DESK_ORDER:
             df_a = all_data[base_v].get(desk, pd.DataFrame())
             df_b = all_data[cand_v].get(desk, pd.DataFrame())
             ids_a = set(df_a["type_id"].astype(int)) if (not df_a.empty and "type_id" in df_a.columns) else set()

@@ -9,28 +9,27 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from services.storage import read_json, write_json
 
-EVE_AUTH_URL = "https://login.eveonline.com/v2/oauth/authorize"
-EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
-ESI_BASE_URL = "https://esi.evetech.net/latest"
-
-CLIENT_ID = os.getenv("EVE_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("EVE_CLIENT_SECRET", "")
-CALLBACK_URL = os.getenv("EVE_CALLBACK_URL", "http://localhost:8000/sso/callback")
-SCOPES = " ".join([
-    "esi-markets.read_character_orders.v1",
-    "esi-wallet.read_character_wallet.v1",
-    "esi-assets.read_assets.v1",
-    "esi-markets.structure_markets.v1",
-    "esi-universe.read_structures.v1",
-])
-
-SSO_TOKEN_FILE = "ledgers/sso_token.json"
-ORDERS_CACHE_FILE = "ledgers/character_orders.json"
-ASSETS_CACHE_FILE = "ledgers/character_assets.json"
-
-REGION_THE_FORGE = 10000002
-JITA_STATION_ID = 60003760
-
+from constants import (
+    ASSETS_CACHE_FILE,
+    CALLBACK_URL,
+    CLIENT_ID,
+    CLIENT_SECRET,
+    ESI_BASE_URL,
+    ESI_HEADERS,
+    EVE_AUTH_URL,
+    EVE_TOKEN_URL,
+    HISTORY_CACHE_FILE,
+    ORDERS_CACHE_FILE,
+    JITA_STATION_ID,
+    JITA_SYSTEM_ID,
+    JUMP_ORDER_RANGES,
+    PERIMETER_SYSTEM_ID,
+    REGION_THE_FORGE,
+    SCOPES,
+    SSO_TOKEN_FILE,
+    WALLET_CACHE_FILE,
+    WALLET_TX_CACHE_FILE
+)
 
 def create_esi_session() -> requests.Session:
     session = requests.Session()
@@ -305,8 +304,6 @@ def fetch_character_orders():
         print(f"[!] Order fetch failed: {str(e)}")
     return None
 
-WALLET_CACHE_FILE = "data/wallet_cache.json"
-WALLET_TX_CACHE_FILE = "data/wallet_transactions_cache.json"
 _MEM_WALLET_BAL_CACHE: dict = {"character_id": None, "timestamp": 0.0, "balance": 0.0}
 _MEM_WALLET_TX_CACHE: dict = {"character_id": None, "timestamp": 0.0, "transactions": []}
 
@@ -470,8 +467,7 @@ def load_cached_assets(max_age_seconds: int = 300, force: bool = False, *args, *
 # ==========================================
 # MARKET HISTORY & VOLUME GUARD
 # ==========================================
-HISTORY_CACHE_FILE = "data/history_cache.json"
-ESI_HEADERS = {"User-Agent": "eve-trading-desk-app/1.0 (local trading bot)"}
+
 
 import threading
 
@@ -681,12 +677,6 @@ def fetch_lowest_sell_order(session: requests.Session, type_id: int, station_id:
     except Exception:
         pass
     return type_id, None
-
-
-JITA_SYSTEM_ID = 30000142
-PERIMETER_SYSTEM_ID = 30000144
-JUMP_ORDER_RANGES = {"1", "2", "3", "4", "5", "10", "20", "30", "40"}
-
 
 def extract_top_buy_for_station(
     orders: list[dict],

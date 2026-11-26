@@ -1,0 +1,42 @@
+{
+  "Zero-Point Field Manipulator": {
+    "type": "item",
+    "reason": "T2 capital component speculation dump following balance pass",
+    "category": "market_trend",
+    "added_date": "2026-10-28",
+    "expires_at": "2026-12-01",
+    "active": true
+  },
+  "Stormbringer": {
+    "type": "item",
+    "reason": "Post-nerf floor reset to ~78M-112M. Do not auto-generate until history purges old 400M+ data.",
+    "category": "meta_shift",
+    "added_date": "2026-11-01",
+    "expires_at": "2026-12-01",
+    "active": true
+  },
+  "Babaroga": {
+    "type": "item",
+    "reason": "New hull release price discovery phase; downward price slide",
+    "category": "market_trend",
+    "added_date": "2026-11-01",
+    "expires_at": "2026-11-20",
+    "active": true
+  },
+  "Keypass|Cipher|Shortcut|Gauntlet|Tetrimon|Chemal Tech|Harvest .*Booster|Radiance.*Accelerator": {
+    "type": "pattern",
+    "reason": "Crimson Harvest & seasonal event keys/boosters/accelerators (post-event price collapse)",
+    "category": "seasonal_event",
+    "added_date": "2026-11-15",
+    "expires_at": "2026-12-15",
+    "active": true
+  },
+  "Yoiul|Cryo|Frostline": {
+    "type": "pattern",
+    "reason": "Winter Nexus event items",
+    "category": "seasonal_event",
+    "added_date": "2026-11-15",
+    "expires_at": "2026-12-15",
+    "active": true
+  }
+}

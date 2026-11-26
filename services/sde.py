@@ -3,8 +3,10 @@ import re
 from contextlib import contextmanager
 import duckdb
 
-DUCKDB_PATH = "data/eve_analytics.duckdb"
-SQLITE_PATH = "data/latest-sqlite.db"
+from constants import (
+    DUCKDB_PATH,
+    SQLITE_PATH
+)
 
 # Packaged ship volumes (m3) by SDE groupID
 PACKAGED_SHIP_M3: dict[int, float] = {

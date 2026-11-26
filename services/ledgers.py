@@ -12,6 +12,12 @@ from services.accounting import (
     calc_line_financials,
 )
 
+from constants import (
+    LEDGER_DIR,
+    MARKET_CACHE_FILE,
+    ORDERS_CACHE_FILE
+)
+
 @dataclass(frozen=True)
 class DeskProfile:
     name: str
@@ -185,15 +191,6 @@ def select_desk_candidates(
         "sticky_margin_floor": cfg.sticky_margin_floor,
     }
     return candidates, params
-
-
-LEDGER_DIR = "ledgers"
-ORDERS_CACHE_FILE = "ledgers/character_orders.json"
-MARKET_CACHE_FILE = "ledgers/market_prices_cache.json"
-
-
-
-
 
 @dataclass(frozen=True)
 class IncumbentState:

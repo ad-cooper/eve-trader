@@ -1,0 +1,1813 @@
+{
+  "kpis": {
+    "net_profit_30d": 9371327077.924032,
+    "trade_income_30d": 152860479621.87,
+    "trade_purchases_30d": 181994356222.63995,
+    "blended_margin": 6.130640896264244
+  },
+  "chart": {
+    "labels": [
+      "10-28",
+      "10-29",
+      "10-30",
+      "10-31",
+      "11-01",
+      "11-02",
+      "11-03",
+      "11-04",
+      "11-05",
+      "11-06",
+      "11-07",
+      "11-08",
+      "11-09",
+      "11-10",
+      "11-11",
+      "11-12",
+      "11-13",
+      "11-14",
+      "11-15",
+      "11-16",
+      "11-17",
+      "11-18",
+      "11-19",
+      "11-20",
+      "11-21",
+      "11-22",
+      "11-23",
+      "11-24",
+      "11-25",
+      "11-26"
+    ],
+    "daily_profits": [
+      142643872.05,
+      197026659.89,
+      274750804.5,
+      43551163.08,
+      313283225.0,
+      769723331.5,
+      57284712.9,
+      111167154.4,
+      335730519.23,
+      1491428429.74,
+      461246864.93,
+      101393297.3,
+      133293235.06,
+      49901514.05,
+      555734128.25,
+      165573506.0,
+      201050008.75,
+      522562242.66,
+      388191410.68,
+      315933980.55,
+      6594108.3,
+      341341332.14,
+      201157291.47,
+      334122112.0,
+      482644526.75,
+      940265923.06,
+      -67092088.09,
+      238669221.55,
+      226581320.0,
+      31733786.25
+    ],
+    "running_totals": [
+      142643872.05,
+      339670531.94,
+      614421336.44,
+      657972499.51,
+      971255724.51,
+      1740979056.01,
+      1798263768.91,
+      1909430923.31,
+      2245161442.54,
+      3736589872.28,
+      4197836737.21,
+      4299230034.5,
+      4432523269.57,
+      4482424783.62,
+      5038158911.87,
+      5203732417.87,
+      5404782426.62,
+      5927344669.28,
+      6315536079.95,
+      6631470060.5,
+      6638064168.8,
+      6979405500.94,
+      7180562792.41,
+      7514684904.41,
+      7997329431.16,
+      8937595354.22,
+      8870503266.12,
+      9109172487.67,
+      9335753807.67,
+      9367487593.92
+    ]
+  },
+  "items": [
+    {
+      "type_id": 92541,
+      "name": "Capital Disintegrator Specialization",
+      "qty_sold": 4,
+      "revenue": 7205000000.0,
+      "cost": 6439034999.999999,
+      "profit": 434174750.00000095
+    },
+    {
+      "type_id": 52244,
+      "name": "Veles Entropic Radiation Sink",
+      "qty_sold": 11,
+      "revenue": 4269500000.0,
+      "cost": 3650360999.9999995,
+      "profit": 422528525.0000007
+    },
+    {
+      "type_id": 25609,
+      "name": "Nanite Compound",
+      "qty_sold": 3317,
+      "revenue": 5379306000.0,
+      "cost": 4733789280.0,
+      "profit": 397799678.70000005
+    },
+    {
+      "type_id": 56715,
+      "name": "Cultural Semiosis Data",
+      "qty_sold": 104,
+      "revenue": 6568260000.0,
+      "cost": 5871903449.999999,
+      "profit": 393888177.0000011
+    },
+    {
+      "type_id": 52242,
+      "name": "Zorya's Entropic Radiation Sink",
+      "qty_sold": 1,
+      "revenue": 1693000000.0,
+      "cost": 1228109999.9999998,
+      "profit": 386927350.00000024
+    },
+    {
+      "type_id": 28799,
+      "name": "Mid-grade Nomad Epsilon",
+      "qty_sold": 4,
+      "revenue": 2151200000.0,
+      "cost": 1715132999.9999998,
+      "profit": 337004240.00000024
+    },
+    {
+      "type_id": 22122,
+      "name": "Mid-grade Amulet Epsilon",
+      "qty_sold": 13,
+      "revenue": 2786800000.0,
+      "cost": 2355619499.9999995,
+      "profit": 302848360.0000005
+    },
+    {
+      "type_id": 53299,
+      "name": "Zirnitra Blueprint Data Vault",
+      "qty_sold": 7,
+      "revenue": 1887200000.0,
+      "cost": 1512524999.9999998,
+      "profit": 287769440.00000024
+    },
+    {
+      "type_id": 52997,
+      "name": "Precursor Dreadnought",
+      "qty_sold": 15,
+      "revenue": 1811700000.0,
+      "cost": 1459933349.9999998,
+      "profit": 268337865.00000018
+    },
+    {
+      "type_id": 25600,
+      "name": "Burned Logic Circuit",
+      "qty_sold": 64941,
+      "revenue": 3441873000.0,
+      "cost": 3028848240.0,
+      "profit": 254526508.3499999
+    },
+    {
+      "type_id": 15931,
+      "name": "Caldari Navy Large Graviton Smartbomb",
+      "qty_sold": 20,
+      "revenue": 3000000000.0,
+      "cost": 2640000000.0,
+      "profit": 221850000.0
+    },
+    {
+      "type_id": 25594,
+      "name": "Tangled Power Conduit",
+      "qty_sold": 22879,
+      "revenue": 2930799900.0,
+      "cost": 2579103912.0,
+      "profit": 216732652.60499987
+    },
+    {
+      "type_id": 16652,
+      "name": "Promethium",
+      "qty_sold": 51679,
+      "revenue": 2675921830.0,
+      "cost": 2354811210.4,
+      "profit": 197884419.3285
+    },
+    {
+      "type_id": 25608,
+      "name": "Intact Shield Emitter",
+      "qty_sold": 6497,
+      "revenue": 2527294500.0,
+      "cost": 2224019160.0,
+      "profit": 186893428.27500004
+    },
+    {
+      "type_id": 97265,
+      "name": "Criterion Cipher",
+      "qty_sold": 7,
+      "revenue": 1147300000.0,
+      "cost": 925805999.9999999,
+      "profit": 168660835.00000012
+    },
+    {
+      "type_id": 41510,
+      "name": "Domination Capital Shield Booster",
+      "qty_sold": 1,
+      "revenue": 2149000000.0,
+      "cost": 1891120000.0,
+      "profit": 158918550.0
+    },
+    {
+      "type_id": 16054,
+      "name": "Republic Fleet 425mm Autocannon",
+      "qty_sold": 5,
+      "revenue": 750000000.0,
+      "cost": 557774999.9999999,
+      "profit": 157687500.00000012
+    },
+    {
+      "type_id": 56139,
+      "name": "Cataclysmic Electrical Filament",
+      "qty_sold": 98,
+      "revenue": 5326810000.0,
+      "cost": 4937303699.999999,
+      "profit": 144206699.50000066
+    },
+    {
+      "type_id": 18867,
+      "name": "Centum A-Type Thermal Energized Membrane",
+      "qty_sold": 5,
+      "revenue": 863300000.0,
+      "cost": 682395000.0,
+      "profit": 141150035.0
+    },
+    {
+      "type_id": 14204,
+      "name": "Dread Guristas Large Graviton Smartbomb",
+      "qty_sold": 12,
+      "revenue": 1772800000.0,
+      "cost": 1560064000.0,
+      "profit": 131098560.0
+    },
+    {
+      "type_id": 15891,
+      "name": "Republic Fleet Warp Disruptor",
+      "qty_sold": 15,
+      "revenue": 1677000000.0,
+      "cost": 1475760000.0,
+      "profit": 124014150.0
+    },
+    {
+      "type_id": 16650,
+      "name": "Dysprosium",
+      "qty_sold": 32570,
+      "revenue": 1580622100.0,
+      "cost": 1390947448.0,
+      "profit": 116887004.29500008
+    },
+    {
+      "type_id": 24702,
+      "name": "Hurricane",
+      "qty_sold": 29,
+      "revenue": 1505680000.0,
+      "cost": 1324998400.0,
+      "profit": 111345036.0
+    },
+    {
+      "type_id": 28811,
+      "name": "Mid-grade Virtue Epsilon",
+      "qty_sold": 6,
+      "revenue": 2530800000.0,
+      "cost": 2305268999.9999995,
+      "profit": 108987660.00000036
+    },
+    {
+      "type_id": 89156,
+      "name": "Vigilance Resonance Key",
+      "qty_sold": 37,
+      "revenue": 558520000.0,
+      "cost": 433215299.99999994,
+      "profit": 99584854.00000006
+    },
+    {
+      "type_id": 20171,
+      "name": "Datacore - Hydromagnetic Physics",
+      "qty_sold": 13468,
+      "revenue": 1318182280.0,
+      "cost": 1160000406.4,
+      "profit": 97479579.60599989
+    },
+    {
+      "type_id": 47123,
+      "name": "Standup Shadow",
+      "qty_sold": 15,
+      "revenue": 611850000.0,
+      "cost": 487223999.99999994,
+      "profit": 96450307.50000006
+    },
+    {
+      "type_id": 11558,
+      "name": "Sustained Shield Emitter",
+      "qty_sold": 31189,
+      "revenue": 1238203300.0,
+      "cost": 1089618904.0,
+      "profit": 91565134.03499983
+    },
+    {
+      "type_id": 41533,
+      "name": "Ligature Integrated Analyzer",
+      "qty_sold": 5,
+      "revenue": 1242100000.0,
+      "cost": 1093942499.9999998,
+      "profit": 90958795.00000015
+    },
+    {
+      "type_id": 16651,
+      "name": "Neodymium",
+      "qty_sold": 19558,
+      "revenue": 1224330800.0,
+      "cost": 1077411104.0,
+      "profit": 90539262.65999985
+    },
+    {
+      "type_id": 25590,
+      "name": "Contaminated Nanite Compound",
+      "qty_sold": 6838,
+      "revenue": 1211598900.0,
+      "cost": 1066207032.0,
+      "profit": 89597738.65499994
+    },
+    {
+      "type_id": 90469,
+      "name": "Unstable Modulated Strip Miner Mutaplasmid",
+      "qty_sold": 6,
+      "revenue": 448440000.0,
+      "cost": 339488999.99999994,
+      "profit": 88300338.00000004
+    },
+    {
+      "type_id": 28750,
+      "name": "ORE Miner",
+      "qty_sold": 5,
+      "revenue": 870500000.0,
+      "cost": 746312999.9999999,
+      "profit": 84100475.00000015
+    },
+    {
+      "type_id": 3095,
+      "name": "Eifyr and Co. 'Rogue' Evasive Maneuvering EM-706",
+      "qty_sold": 2,
+      "revenue": 1193000000.0,
+      "cost": 1054345499.9999999,
+      "profit": 83716850.00000012
+    },
+    {
+      "type_id": 16683,
+      "name": "Ferrogel",
+      "qty_sold": 41884,
+      "revenue": 1081026040.0,
+      "cost": 951302915.1999999,
+      "profit": 79941875.65799999
+    },
+    {
+      "type_id": 24700,
+      "name": "Myrmidon",
+      "qty_sold": 20,
+      "revenue": 1049400000.0,
+      "cost": 923472000.0,
+      "profit": 77603130.0
+    },
+    {
+      "type_id": 37298,
+      "name": "Dual Giga Pulse Laser II",
+      "qty_sold": 5,
+      "revenue": 1359500000.0,
+      "cost": 1221577499.9999998,
+      "profit": 75317525.00000018
+    },
+    {
+      "type_id": 16653,
+      "name": "Thulium",
+      "qty_sold": 38479,
+      "revenue": 1012767280.0,
+      "cost": 891235206.4,
+      "profit": 74894140.35600008
+    },
+    {
+      "type_id": 47903,
+      "name": "Chaotic Gamma Filament",
+      "qty_sold": 87,
+      "revenue": 1300830000.0,
+      "cost": 1167257249.8492498,
+      "profit": 73669528.65075019
+    },
+    {
+      "type_id": 27116,
+      "name": "Inherent Implants 'Squire' Capacitor Management EM-805",
+      "qty_sold": 9,
+      "revenue": 1115700000.0,
+      "cost": 996758999.9999999,
+      "profit": 67563015.00000013
+    },
+    {
+      "type_id": 95741,
+      "name": "Akoman",
+      "qty_sold": 2,
+      "revenue": 1307700000.0,
+      "cost": 1181377499.9999998,
+      "profit": 66102915.00000024
+    },
+    {
+      "type_id": 18975,
+      "name": "Core X-Type Explosive Armor Hardener",
+      "qty_sold": 3,
+      "revenue": 643500000.0,
+      "cost": 550237499.9999999,
+      "profit": 63629325.00000012
+    },
+    {
+      "type_id": 17478,
+      "name": "Retriever",
+      "qty_sold": 20,
+      "revenue": 709000000.0,
+      "cost": 613049999.9999999,
+      "profit": 63300550.00000013
+    },
+    {
+      "type_id": 17918,
+      "name": "Rattlesnake",
+      "qty_sold": 3,
+      "revenue": 2513400000.0,
+      "cost": 2334413999.9999995,
+      "profit": 63243930.00000036
+    },
+    {
+      "type_id": 57516,
+      "name": "Core Temperature Regulator Blueprint",
+      "qty_sold": 1,
+      "revenue": 749900000.0,
+      "cost": 653249999.9999999,
+      "profit": 62117105.00000012
+    },
+    {
+      "type_id": 47830,
+      "name": "Unstable Heavy Energy Neutralizer Mutaplasmid",
+      "qty_sold": 5,
+      "revenue": 190840000.0,
+      "cost": 121524599.99999999,
+      "profit": 60527218.000000015
+    },
+    {
+      "type_id": 25601,
+      "name": "Fried Interface Circuit",
+      "qty_sold": 59024,
+      "revenue": 767730110.0,
+      "cost": 675602496.8,
+      "profit": 56773641.63450003
+    },
+    {
+      "type_id": 25538,
+      "name": "Neurotoxin Control",
+      "qty_sold": 31,
+      "revenue": 487790000.0,
+      "cost": 409374689.99999994,
+      "profit": 55952580.50000001
+    },
+    {
+      "type_id": 14070,
+      "name": "Dark Blood Multispectrum Energized Membrane",
+      "qty_sold": 12,
+      "revenue": 875270000.0,
+      "cost": 780392549.9999999,
+      "profit": 54571266.50000009
+    },
+    {
+      "type_id": 16056,
+      "name": "Republic Fleet 720mm Howitzer Artillery",
+      "qty_sold": 3,
+      "revenue": 276030000.0,
+      "cost": 209844000.0,
+      "profit": 53474818.5
+    },
+    {
+      "type_id": 13969,
+      "name": "Dread Guristas Multispectrum Shield Hardener",
+      "qty_sold": 13,
+      "revenue": 2771700000.0,
+      "cost": 2590789499.9999995,
+      "profit": 53273715.00000039
+    },
+    {
+      "type_id": 48438,
+      "name": "Unstable Large Cap Battery Mutaplasmid",
+      "qty_sold": 1,
+      "revenue": 279600000.0,
+      "cost": 213461999.99999997,
+      "profit": 53262420.00000003
+    },
+    {
+      "type_id": 25621,
+      "name": "Impetus Console",
+      "qty_sold": 9084,
+      "revenue": 697651200.0,
+      "cost": 613933056.0,
+      "profit": 51591306.24000001
+    },
+    {
+      "type_id": 13970,
+      "name": "True Sansha EM Armor Hardener",
+      "qty_sold": 4,
+      "revenue": 90680000.0,
+      "cost": 35492579.99999999,
+      "profit": 51011606.00000001
+    },
+    {
+      "type_id": 25530,
+      "name": "Neurotoxin Recovery",
+      "qty_sold": 5,
+      "revenue": 493050000.0,
+      "cost": 421909049.99999994,
+      "profit": 48435997.500000075
+    },
+    {
+      "type_id": 41504,
+      "name": "Capital Ancillary Shield Booster",
+      "qty_sold": 9,
+      "revenue": 652140000.0,
+      "cost": 573883200.0,
+      "profit": 48225753.0
+    },
+    {
+      "type_id": 53705,
+      "name": "Mid-grade Nirvana Beta",
+      "qty_sold": 4,
+      "revenue": 640000000.0,
+      "cost": 563200000.0,
+      "profit": 47328000.0
+    },
+    {
+      "type_id": 47902,
+      "name": "Raging Gamma Filament",
+      "qty_sold": 243,
+      "revenue": 2224943000.0,
+      "cost": 2075157935.9556,
+      "profit": 47326438.894400045
+    },
+    {
+      "type_id": 47899,
+      "name": "Chaotic Firestorm Filament",
+      "qty_sold": 136,
+      "revenue": 1300512000.0,
+      "cost": 1193623425.0,
+      "profit": 46999997.40000007
+    },
+    {
+      "type_id": 4306,
+      "name": "Naga",
+      "qty_sold": 11,
+      "revenue": 753530000.0,
+      "cost": 672143999.9999999,
+      "profit": 46685943.50000009
+    },
+    {
+      "type_id": 17887,
+      "name": "Oxygen Isotopes",
+      "qty_sold": 1005691,
+      "revenue": 601302648.9,
+      "cost": 529146331.03199995,
+      "profit": 44466330.88615502
+    },
+    {
+      "type_id": 37295,
+      "name": "XL Cruise Missile Launcher II",
+      "qty_sold": 3,
+      "revenue": 598500000.0,
+      "cost": 527624999.9999999,
+      "profit": 43314075.00000009
+    },
+    {
+      "type_id": 48437,
+      "name": "Gravid Large Cap Battery Mutaplasmid",
+      "qty_sold": 4,
+      "revenue": 265160000.0,
+      "cost": 210459387.30839998,
+      "profit": 42489994.691600025
+    },
+    {
+      "type_id": 19038,
+      "name": "Core X-Type Large Armor Repairer",
+      "qty_sold": 2,
+      "revenue": 691400000.0,
+      "cost": 617270999.9999999,
+      "profit": 42290030.00000012
+    },
+    {
+      "type_id": 3140,
+      "name": "Zainou 'Deadeye' Rapid Launch RL-1006",
+      "qty_sold": 1,
+      "revenue": 591700000.0,
+      "cost": 522197999.99999994,
+      "profit": 42254215.00000006
+    },
+    {
+      "type_id": 52226,
+      "name": "Unstable Damage Control Mutaplasmid",
+      "qty_sold": 2,
+      "revenue": 269800000.0,
+      "cost": 217481999.99999997,
+      "profit": 39893710.00000003
+    },
+    {
+      "type_id": 23416,
+      "name": "'Peace' Large Remote Armor Repairer",
+      "qty_sold": 4,
+      "revenue": 974600000.0,
+      "cost": 890630999.9999999,
+      "profit": 39088670.00000015
+    },
+    {
+      "type_id": 16681,
+      "name": "Nanotransistors",
+      "qty_sold": 145381,
+      "revenue": 494440781.0,
+      "cost": 435107887.28000003,
+      "profit": 36563895.75494996
+    },
+    {
+      "type_id": 52252,
+      "name": "Ikitursa",
+      "qty_sold": 1,
+      "revenue": 710900000.0,
+      "cost": 642094499.9999999,
+      "profit": 36068555.00000012
+    },
+    {
+      "type_id": 28812,
+      "name": "Mid-grade Virtue Gamma",
+      "qty_sold": 7,
+      "revenue": 986600000.0,
+      "cost": 905504999.9999999,
+      "profit": 35662070.000000104
+    },
+    {
+      "type_id": 14190,
+      "name": "True Sansha Large EMP Smartbomb",
+      "qty_sold": 4,
+      "revenue": 861600000.0,
+      "cost": 786311999.9999999,
+      "profit": 35611320.00000015
+    },
+    {
+      "type_id": 32262,
+      "name": "Black Eagle Drone Link Augmentor",
+      "qty_sold": 1,
+      "revenue": 255800000.0,
+      "cost": 210547499.99999997,
+      "profit": 33472910.00000003
+    },
+    {
+      "type_id": 18710,
+      "name": "Centii A-Type Multispectrum Coating",
+      "qty_sold": 4,
+      "revenue": 921600000.0,
+      "cost": 846209999.9999999,
+      "profit": 32950320.00000012
+    },
+    {
+      "type_id": 19301,
+      "name": "Gist X-Type Shield Boost Amplifier",
+      "qty_sold": 4,
+      "revenue": 251160000.0,
+      "cost": 207632999.99999997,
+      "profit": 31961082.00000003
+    },
+    {
+      "type_id": 22571,
+      "name": "Inherent Implants 'Yeti' Ice Harvesting IH-1005",
+      "qty_sold": 5,
+      "revenue": 721600000.0,
+      "cost": 656465999.9999999,
+      "profit": 31904320.00000009
+    },
+    {
+      "type_id": 57442,
+      "name": "Counter-Subversion Sensor Array",
+      "qty_sold": 6,
+      "revenue": 393840000.0,
+      "cost": 344483849.99999994,
+      "profit": 31219818.000000045
+    },
+    {
+      "type_id": 19282,
+      "name": "Pith X-Type EM Shield Hardener",
+      "qty_sold": 9,
+      "revenue": 849960000.0,
+      "cost": 779678999.9999999,
+      "profit": 31140342.00000015
+    },
+    {
+      "type_id": 14127,
+      "name": "Domination Nanofiber Structure",
+      "qty_sold": 10,
+      "revenue": 415000000.0,
+      "cost": 365200000.0,
+      "profit": 30689250.0
+    },
+    {
+      "type_id": 35922,
+      "name": "Standup Multirole Missile Launcher I",
+      "qty_sold": 3,
+      "revenue": 155760000.0,
+      "cost": 117916649.99999997,
+      "profit": 30670602.000000022
+    },
+    {
+      "type_id": 86261,
+      "name": "Breacher Pod Clone Efficacity",
+      "qty_sold": 6,
+      "revenue": 419760000.0,
+      "cost": 369940499.99999994,
+      "profit": 30489552.000000045
+    },
+    {
+      "type_id": 20417,
+      "name": "Datacore - Electromagnetic Physics",
+      "qty_sold": 4000,
+      "revenue": 396000000.0,
+      "cost": 348480000.0,
+      "profit": 29284200.000000015
+    },
+    {
+      "type_id": 25605,
+      "name": "Armor Plates",
+      "qty_sold": 7122,
+      "revenue": 387365580.0,
+      "cost": 340881710.4,
+      "profit": 28645684.641000032
+    },
+    {
+      "type_id": 49741,
+      "name": "Unstable Ballistic Control System Mutaplasmid",
+      "qty_sold": 10,
+      "revenue": 607500000.0,
+      "cost": 551242499.9999999,
+      "profit": 28282125.000000075
+    },
+    {
+      "type_id": 13924,
+      "name": "Dread Guristas Torpedo Launcher",
+      "qty_sold": 4,
+      "revenue": 415200000.0,
+      "cost": 368312399.99999994,
+      "profit": 27767640.000000075
+    },
+    {
+      "type_id": 27260,
+      "name": "Poteque 'Prospector' Environmental Analysis EY-1005",
+      "qty_sold": 19,
+      "revenue": 532230000.0,
+      "cost": 480048299.99999994,
+      "profit": 27672508.500000067
+    },
+    {
+      "type_id": 27188,
+      "name": "Poteque 'Prospector' Astrometric Rangefinding AR-806",
+      "qty_sold": 12,
+      "revenue": 337720000.0,
+      "cost": 294665999.99999994,
+      "profit": 27501994.000000045
+    },
+    {
+      "type_id": 20159,
+      "name": "High-grade Crystal Delta",
+      "qty_sold": 1,
+      "revenue": 256800000.0,
+      "cost": 217883999.99999997,
+      "profit": 27090360.00000003
+    },
+    {
+      "type_id": 25622,
+      "name": "Capacitor Console",
+      "qty_sold": 2097,
+      "revenue": 364039200.0,
+      "cost": 320354496.0,
+      "profit": 26920698.84000001
+    },
+    {
+      "type_id": 33470,
+      "name": "Stratios",
+      "qty_sold": 4,
+      "revenue": 1113100000.0,
+      "cost": 1035551999.9999999,
+      "profit": 26289745.00000012
+    },
+    {
+      "type_id": 13965,
+      "name": "Dread Guristas EM Shield Hardener",
+      "qty_sold": 10,
+      "revenue": 245640000.0,
+      "cost": 209904299.99999997,
+      "profit": 24423978.000000037
+    },
+    {
+      "type_id": 19281,
+      "name": "Gist X-Type EM Shield Hardener",
+      "qty_sold": 8,
+      "revenue": 675020000.0,
+      "cost": 620527199.9999999,
+      "profit": 23408129.000000134
+    },
+    {
+      "type_id": 644,
+      "name": "Typhoon",
+      "qty_sold": 1,
+      "revenue": 235000000.0,
+      "cost": 200999999.99999997,
+      "profit": 23178250.00000003
+    },
+    {
+      "type_id": 33359,
+      "name": "Photonic Metamaterials",
+      "qty_sold": 39146,
+      "revenue": 302453204.0,
+      "cost": 266158819.52,
+      "profit": 22366414.43579998
+    },
+    {
+      "type_id": 86262,
+      "name": "Breacher Pod Clone Longevity",
+      "qty_sold": 5,
+      "revenue": 449850000.0,
+      "cost": 407225999.99999994,
+      "profit": 21908407.500000075
+    },
+    {
+      "type_id": 21484,
+      "name": "'Full Duplex' Ballistic Control System",
+      "qty_sold": 4,
+      "revenue": 203560000.0,
+      "cost": 172769549.99999997,
+      "profit": 21416512.00000003
+    },
+    {
+      "type_id": 42207,
+      "name": "Mid-grade Asklepian Delta",
+      "qty_sold": 9,
+      "revenue": 1025400000.0,
+      "cost": 957764999.9999999,
+      "profit": 20415330.000000134
+    },
+    {
+      "type_id": 47906,
+      "name": "Raging Electrical Filament",
+      "qty_sold": 176,
+      "revenue": 1357659000.0,
+      "cost": 1274774159.9999998,
+      "profit": 20364643.050000172
+    },
+    {
+      "type_id": 18871,
+      "name": "Centum A-Type EM Energized Membrane",
+      "qty_sold": 5,
+      "revenue": 325720000.0,
+      "cost": 290444999.99999994,
+      "profit": 20275594.000000037
+    },
+    {
+      "type_id": 17499,
+      "name": "Caldari Navy EM Shield Hardener",
+      "qty_sold": 7,
+      "revenue": 290200000.0,
+      "cost": 256586549.99999997,
+      "profit": 20249740.000000052
+    },
+    {
+      "type_id": 47261,
+      "name": "Inquest 'Eros' Stasis Webifier MR-803",
+      "qty_sold": 1,
+      "revenue": 1496000000.0,
+      "cost": 1406999999.9999998,
+      "profit": 20109200.00000024
+    },
+    {
+      "type_id": 14116,
+      "name": "Shadow Serpentis 500MN Microwarpdrive",
+      "qty_sold": 2,
+      "revenue": 159820000.0,
+      "cost": 132519299.99999999,
+      "profit": 19940989.000000015
+    },
+    {
+      "type_id": 57444,
+      "name": "Nanoscale Filter Plate",
+      "qty_sold": 12,
+      "revenue": 630120000.0,
+      "cost": 581714099.9999999,
+      "profit": 19388874.000000097
+    },
+    {
+      "type_id": 14166,
+      "name": "True Sansha Medium Energy Neutralizer",
+      "qty_sold": 2,
+      "revenue": 175940000.0,
+      "cost": 148760099.99999997,
+      "profit": 19077863.00000003
+    },
+    {
+      "type_id": 15615,
+      "name": "Imperial Navy General Insignia I",
+      "qty_sold": 60,
+      "revenue": 252660000.0,
+      "cost": 222340800.0,
+      "profit": 18684206.99999997
+    },
+    {
+      "type_id": 37480,
+      "name": "Bifrost",
+      "qty_sold": 3,
+      "revenue": 160770000.0,
+      "cost": 134800649.99999997,
+      "profit": 18565891.500000022
+    },
+    {
+      "type_id": 33360,
+      "name": "Terahertz Metamaterials",
+      "qty_sold": 18836,
+      "revenue": 245626980.0,
+      "cost": 216151742.4,
+      "profit": 18164115.170999993
+    },
+    {
+      "type_id": 18989,
+      "name": "Corelum B-Type Medium Remote Armor Repairer",
+      "qty_sold": 4,
+      "revenue": 233040000.0,
+      "cost": 204617999.99999997,
+      "profit": 17690508.000000037
+    },
+    {
+      "type_id": 16682,
+      "name": "Hypersynaptic Fibers",
+      "qty_sold": 40021,
+      "revenue": 235403522.0,
+      "cost": 207155099.35999998,
+      "profit": 17408090.451900005
+    },
+    {
+      "type_id": 17317,
+      "name": "Fermionic Condensates",
+      "qty_sold": 5018,
+      "revenue": 234942760.0,
+      "cost": 206749628.79999998,
+      "profit": 17374017.101999998
+    },
+    {
+      "type_id": 18797,
+      "name": "Coreli A-Type Thermal Coating",
+      "qty_sold": 31,
+      "revenue": 268770000.0,
+      "cost": 239052314.99999997,
+      "profit": 17340826.500000026
+    },
+    {
+      "type_id": 626,
+      "name": "Vexor",
+      "qty_sold": 20,
+      "revenue": 224400000.0,
+      "cost": 197472000.0,
+      "profit": 16594380.0
+    },
+    {
+      "type_id": 52254,
+      "name": "Draugur",
+      "qty_sold": 1,
+      "revenue": 464800000.0,
+      "cost": 427024499.99999994,
+      "profit": 16371460.00000006
+    },
+    {
+      "type_id": 88147,
+      "name": "Triplot Scan Acquisition Array",
+      "qty_sold": 2,
+      "revenue": 505000000.0,
+      "cost": 465515999.99999994,
+      "profit": 16228750.00000006
+    },
+    {
+      "type_id": 46002,
+      "name": "Agency 'Hardshell' TB5 Dose II",
+      "qty_sold": 107,
+      "revenue": 256092000.0,
+      "cost": 228511875.0,
+      "profit": 15787088.4
+    },
+    {
+      "type_id": 45590,
+      "name": "Tengu Defensive - Supplemental Screening",
+      "qty_sold": 8,
+      "revenue": 287600000.0,
+      "cost": 260174399.99999997,
+      "profit": 14181620.00000003
+    },
+    {
+      "type_id": 25620,
+      "name": "Interface Circuit",
+      "qty_sold": 8848,
+      "revenue": 190143520.0,
+      "cost": 167326297.6,
+      "profit": 14061113.30400002
+    },
+    {
+      "type_id": 13960,
+      "name": "Dark Blood Medium Armor Repairer",
+      "qty_sold": 3,
+      "revenue": 187710000.0,
+      "cost": 165282299.99999997,
+      "profit": 13783654.500000022
+    },
+    {
+      "type_id": 28810,
+      "name": "Mid-grade Virtue Delta",
+      "qty_sold": 4,
+      "revenue": 903600000.0,
+      "cost": 848621999.9999999,
+      "profit": 13367220.000000149
+    },
+    {
+      "type_id": 25612,
+      "name": "Trigger Unit",
+      "qty_sold": 437,
+      "revenue": 179388500.0,
+      "cost": 157861880.0,
+      "profit": 13265779.574999988
+    },
+    {
+      "type_id": 27192,
+      "name": "Poteque 'Prospector' Astrometric Acquisition AQ-710",
+      "qty_sold": 1,
+      "revenue": 202900000.0,
+      "cost": 180799499.99999997,
+      "profit": 12756955.00000003
+    },
+    {
+      "type_id": 13920,
+      "name": "Dread Guristas Rapid Light Missile Launcher",
+      "qty_sold": 3,
+      "revenue": 245250000.0,
+      "cost": 221331149.99999994,
+      "profit": 12625087.50000006
+    },
+    {
+      "type_id": 47756,
+      "name": "Gravid 100MN Afterburner Mutaplasmid",
+      "qty_sold": 15,
+      "revenue": 155400000.0,
+      "cost": 135750374.99999997,
+      "profit": 12493455.000000032
+    },
+    {
+      "type_id": 58950,
+      "name": "Large Industrial Core II",
+      "qty_sold": 3,
+      "revenue": 168840000.0,
+      "cost": 148699799.99999997,
+      "profit": 12365118.000000022
+    },
+    {
+      "type_id": 16064,
+      "name": "Caldari Navy Heavy Missile Launcher",
+      "qty_sold": 3,
+      "revenue": 329800000.0,
+      "cost": 302404499.99999994,
+      "profit": 12208210.000000045
+    },
+    {
+      "type_id": 56068,
+      "name": "Proximity-5 'Extraction' Filament",
+      "qty_sold": 12,
+      "revenue": 99971000.0,
+      "cost": 83397914.99999999,
+      "profit": 11969420.450000003
+    },
+    {
+      "type_id": 24688,
+      "name": "Rokh",
+      "qty_sold": 1,
+      "revenue": 157200000.0,
+      "cost": 138336000.0,
+      "profit": 11624940.0
+    },
+    {
+      "type_id": 641,
+      "name": "Megathron",
+      "qty_sold": 1,
+      "revenue": 149500000.0,
+      "cost": 131560000.0,
+      "profit": 11055525.0
+    },
+    {
+      "type_id": 20158,
+      "name": "High-grade Crystal Gamma",
+      "qty_sold": 1,
+      "revenue": 134300000.0,
+      "cost": 118184000.0,
+      "profit": 9931485.0
+    },
+    {
+      "type_id": 37612,
+      "name": "True Sansha Warp Disruption Field Generator",
+      "qty_sold": 4,
+      "revenue": 336280000.0,
+      "cost": 311268599.99999994,
+      "profit": 9525706.00000006
+    },
+    {
+      "type_id": 14260,
+      "name": "Shadow Serpentis Warp Scrambler",
+      "qty_sold": 4,
+      "revenue": 211920000.0,
+      "cost": 192799199.99999997,
+      "profit": 9361884.00000003
+    },
+    {
+      "type_id": 56716,
+      "name": "Protective Equipment Patterns",
+      "qty_sold": 1,
+      "revenue": 74410000.0,
+      "cost": 61928099.99999999,
+      "profit": 9055319.500000007
+    },
+    {
+      "type_id": 20423,
+      "name": "Datacore - Nuclear Physics",
+      "qty_sold": 1278,
+      "revenue": 119365200.0,
+      "cost": 105041376.0,
+      "profit": 8827056.539999992
+    },
+    {
+      "type_id": 33361,
+      "name": "Plasmonic Metamaterials",
+      "qty_sold": 9083,
+      "revenue": 119259790.0,
+      "cost": 104948615.2,
+      "profit": 8819261.470499992
+    },
+    {
+      "type_id": 41463,
+      "name": "Capital I-ax Enduring Remote Armor Repairer",
+      "qty_sold": 5,
+      "revenue": 304190000.0,
+      "cost": 281651249.99999994,
+      "profit": 8530800.500000037
+    },
+    {
+      "type_id": 31904,
+      "name": "Imperial Navy 200mm Steel Plates",
+      "qty_sold": 6,
+      "revenue": 72330000.0,
+      "cost": 60963299.99999999,
+      "profit": 8035903.500000011
+    },
+    {
+      "type_id": 25592,
+      "name": "Defective Current Pump",
+      "qty_sold": 9900,
+      "revenue": 101475000.0,
+      "cost": 89298000.0,
+      "profit": 7504076.25
+    },
+    {
+      "type_id": 47447,
+      "name": "C3-A 'Hivaa Saitsuo' Ballistic Control System",
+      "qty_sold": 4,
+      "revenue": 92740000.0,
+      "cost": 81002999.99999999,
+      "profit": 7466323.000000015
+    },
+    {
+      "type_id": 22119,
+      "name": "Mid-grade Amulet Alpha",
+      "qty_sold": 2,
+      "revenue": 75980000.0,
+      "cost": 65706899.99999999,
+      "profit": 6774221.000000007
+    },
+    {
+      "type_id": 16671,
+      "name": "Titanium Carbide",
+      "qty_sold": 1000208,
+      "revenue": 89988713.75999999,
+      "cost": 79190068.1088,
+      "profit": 6654665.382552003
+    },
+    {
+      "type_id": 47875,
+      "name": "Large Disintegrator Specialization",
+      "qty_sold": 2,
+      "revenue": 244000000.0,
+      "cost": 226124999.99999997,
+      "profit": 6638800.00000003
+    },
+    {
+      "type_id": 14100,
+      "name": "Domination Tracking Enhancer",
+      "qty_sold": 3,
+      "revenue": 130230000.0,
+      "cost": 117826199.99999997,
+      "profit": 6406708.500000022
+    },
+    {
+      "type_id": 25602,
+      "name": "Thruster Console",
+      "qty_sold": 5781,
+      "revenue": 86541570.0,
+      "cost": 76156581.60000001,
+      "profit": 6399749.10149999
+    },
+    {
+      "type_id": 37624,
+      "name": "Corpii A-Type Small Energy Neutralizer",
+      "qty_sold": 3,
+      "revenue": 237420000.0,
+      "cost": 220155299.99999994,
+      "profit": 6331509.00000006
+    },
+    {
+      "type_id": 34481,
+      "name": "Domination Inertial Stabilizers",
+      "qty_sold": 2,
+      "revenue": 103520000.0,
+      "cost": 92500199.99999999,
+      "profit": 6252704.000000015
+    },
+    {
+      "type_id": 81948,
+      "name": "Consortium Small Tractor Beam",
+      "qty_sold": 1,
+      "revenue": 56690000.0,
+      "cost": 47848049.99999999,
+      "profit": 6231375.500000007
+    },
+    {
+      "type_id": 14047,
+      "name": "Dread Guristas Shield Boost Amplifier",
+      "qty_sold": 5,
+      "revenue": 114830000.0,
+      "cost": 103313999.99999997,
+      "profit": 6228078.500000019
+    },
+    {
+      "type_id": 16672,
+      "name": "Tungsten Carbide",
+      "qty_sold": 872225,
+      "revenue": 83210265.0,
+      "cost": 73225033.20000002,
+      "profit": 6153399.096749992
+    },
+    {
+      "type_id": 16673,
+      "name": "Fernite Carbide",
+      "qty_sold": 1410854,
+      "revenue": 82012943.02000001,
+      "cost": 72171389.8576,
+      "profit": 6064857.136328995
+    },
+    {
+      "type_id": 16678,
+      "name": "Sylramic Fibers",
+      "qty_sold": 367775,
+      "revenue": 79770397.5,
+      "cost": 70197949.80000001,
+      "profit": 5899020.895124998
+    },
+    {
+      "type_id": 41059,
+      "name": "Domination Heavy Stasis Grappler",
+      "qty_sold": 4,
+      "revenue": 565300000.0,
+      "cost": 533453999.99999994,
+      "profit": 5813935.00000006
+    },
+    {
+      "type_id": 19009,
+      "name": "Centii A-Type Small Armor Repairer",
+      "qty_sold": 3,
+      "revenue": 215950000.0,
+      "cost": 200407049.99999997,
+      "profit": 5598452.500000022
+    },
+    {
+      "type_id": 20212,
+      "name": "Cruise Missile Specialization",
+      "qty_sold": 3,
+      "revenue": 19962000.0,
+      "cost": 13570514.999999996,
+      "profit": 5472234.900000001
+    },
+    {
+      "type_id": 25604,
+      "name": "Conductive Polymer",
+      "qty_sold": 3275,
+      "revenue": 62290500.0,
+      "cost": 54815639.99999999,
+      "profit": 4606382.475000009
+    },
+    {
+      "type_id": 20415,
+      "name": "Datacore - Molecular Engineering",
+      "qty_sold": 625,
+      "revenue": 61875000.0,
+      "cost": 54450000.0,
+      "profit": 4575656.25
+    },
+    {
+      "type_id": 40661,
+      "name": "Capital Infectious Scoped Energy Neutralizer",
+      "qty_sold": 1,
+      "revenue": 64540000.0,
+      "cost": 56993549.99999999,
+      "profit": 4574383.000000007
+    },
+    {
+      "type_id": 90475,
+      "name": "Integrated Sensor Array",
+      "qty_sold": 4,
+      "revenue": 199560000.0,
+      "cost": 185844599.99999997,
+      "profit": 4525662.000000037
+    },
+    {
+      "type_id": 14210,
+      "name": "Dread Guristas Medium Graviton Smartbomb",
+      "qty_sold": 1,
+      "revenue": 46720000.0,
+      "cost": 40049249.99999999,
+      "profit": 4519294.000000007
+    },
+    {
+      "type_id": 25593,
+      "name": "Smashed Trigger Unit",
+      "qty_sold": 11654,
+      "revenue": 60600800.0,
+      "cost": 53328704.0,
+      "profit": 4481429.159999996
+    },
+    {
+      "type_id": 16670,
+      "name": "Crystalline Carbonide",
+      "qty_sold": 742353,
+      "revenue": 59633216.49,
+      "cost": 52477230.511199996,
+      "profit": 4409876.359435506
+    },
+    {
+      "type_id": 41058,
+      "name": "Shadow Serpentis Heavy Stasis Grappler",
+      "qty_sold": 1,
+      "revenue": 103800000.0,
+      "cost": 94670999.99999999,
+      "profit": 4349010.000000015
+    },
+    {
+      "type_id": 34562,
+      "name": "Svipul",
+      "qty_sold": 1,
+      "revenue": 57290000.0,
+      "cost": 50415200.0,
+      "profit": 4236595.5
+    },
+    {
+      "type_id": 14065,
+      "name": "Shadow Serpentis Thermal Armor Hardener",
+      "qty_sold": 1,
+      "revenue": 23910000.0,
+      "cost": 18622649.999999996,
+      "profit": 4186294.5000000037
+    },
+    {
+      "type_id": 14061,
+      "name": "Shadow Serpentis Explosive Armor Hardener",
+      "qty_sold": 4,
+      "revenue": 44800000.0,
+      "cost": 38555819.99999999,
+      "profit": 4181140.0000000075
+    },
+    {
+      "type_id": 23868,
+      "name": "'Warhammer' Large EMP Smartbomb",
+      "qty_sold": 1,
+      "revenue": 99990000.0,
+      "cost": 91525349.99999999,
+      "profit": 3860110.500000015
+    },
+    {
+      "type_id": 25599,
+      "name": "Charred Micro Circuit",
+      "qty_sold": 78241,
+      "revenue": 46623061.8,
+      "cost": 41028294.384,
+      "profit": 3447775.4201099947
+    },
+    {
+      "type_id": 60472,
+      "name": "Exigent Medium Drone Navigation Mutaplasmid",
+      "qty_sold": 18,
+      "revenue": 307800000.0,
+      "cost": 290706299.99999994,
+      "profit": 2919510.0000000503
+    },
+    {
+      "type_id": 18985,
+      "name": "Coreli A-Type Small Remote Armor Repairer",
+      "qty_sold": 3,
+      "revenue": 139680000.0,
+      "cost": 130398749.99999997,
+      "profit": 2848986.0000000224
+    },
+    {
+      "type_id": 19187,
+      "name": "Pithum C-Type Medium Shield Booster",
+      "qty_sold": 1,
+      "revenue": 72690000.0,
+      "cost": 66943049.99999999,
+      "profit": 2399575.5000000075
+    },
+    {
+      "type_id": 31414,
+      "name": "Medium Semiconductor Memory Cell II",
+      "qty_sold": 1,
+      "revenue": 21460000.0,
+      "cost": 18089999.999999996,
+      "profit": 2381767.0000000037
+    },
+    {
+      "type_id": 49774,
+      "name": "Perun Heavy Mutadaptive Remote Armor Repairer",
+      "qty_sold": 1,
+      "revenue": 31180000.0,
+      "cost": 27396299.999999996,
+      "profit": 2347861.0000000037
+    },
+    {
+      "type_id": 14104,
+      "name": "Shadow Serpentis 100MN Afterburner",
+      "qty_sold": 1,
+      "revenue": 44050000.0,
+      "cost": 39767849.99999999,
+      "profit": 2253647.5000000075
+    },
+    {
+      "type_id": 13980,
+      "name": "Dark Blood Kinetic Armor Hardener",
+      "qty_sold": 3,
+      "revenue": 22794000.0,
+      "cost": 19675889.999999996,
+      "profit": 2068446.3000000017
+    },
+    {
+      "type_id": 25595,
+      "name": "Alloyed Tritanium Bar",
+      "qty_sold": 10446,
+      "revenue": 25843404.0,
+      "cost": 22742195.52,
+      "profit": 1911119.7258
+    },
+    {
+      "type_id": 33453,
+      "name": "Dread Guristas Rapid Heavy Missile Launcher",
+      "qty_sold": 1,
+      "revenue": 27460000.0,
+      "cost": 24320999.999999996,
+      "profit": 1874467.0000000037
+    },
+    {
+      "type_id": 91857,
+      "name": "Corax Navy Issue",
+      "qty_sold": 1,
+      "revenue": 19310000.0,
+      "cost": 16622699.999999998,
+      "profit": 1798074.5000000019
+    },
+    {
+      "type_id": 13974,
+      "name": "True Sansha Explosive Armor Hardener",
+      "qty_sold": 7,
+      "revenue": 100030000.0,
+      "cost": 93776549.99999999,
+      "profit": 1647068.5000000112
+    },
+    {
+      "type_id": 42205,
+      "name": "Mid-grade Asklepian Beta",
+      "qty_sold": 1,
+      "revenue": 50990000.0,
+      "cost": 47023949.99999999,
+      "profit": 1617960.5000000075
+    },
+    {
+      "type_id": 25597,
+      "name": "Damaged Artificial Neural Network",
+      "qty_sold": 30255,
+      "revenue": 15066405.6,
+      "cost": 13258436.928,
+      "profit": 1114160.6941199992
+    },
+    {
+      "type_id": 31926,
+      "name": "Caldari Navy Medium Shield Extender",
+      "qty_sold": 1,
+      "revenue": 14100000.0,
+      "cost": 12408000.0,
+      "profit": 1042695.0
+    },
+    {
+      "type_id": 49728,
+      "name": "Gravid Heat Sink Mutaplasmid",
+      "qty_sold": 5,
+      "revenue": 27965000.0,
+      "cost": 25758149.999999996,
+      "profit": 919061.7500000037
+    },
+    {
+      "type_id": 47701,
+      "name": "Gravid Stasis Webifier Mutaplasmid",
+      "qty_sold": 3,
+      "revenue": 16191000.0,
+      "cost": 14550389.999999996,
+      "profit": 895014.4500000011
+    },
+    {
+      "type_id": 14152,
+      "name": "Dark Blood Heavy Energy Nosferatu",
+      "qty_sold": 2,
+      "revenue": 15569000.0,
+      "cost": 14164469.999999998,
+      "profit": 687577.5500000017
+    },
+    {
+      "type_id": 25589,
+      "name": "Malfunctioning Shield Emitter",
+      "qty_sold": 12298,
+      "revenue": 8469751.5,
+      "cost": 7453381.32,
+      "profit": 626338.123425
+    },
+    {
+      "type_id": 31794,
+      "name": "Small Core Defense Field Extender II",
+      "qty_sold": 2,
+      "revenue": 5360000.0,
+      "cost": 4716800.0,
+      "profit": 396372.0
+    },
+    {
+      "type_id": 25591,
+      "name": "Contaminated Lorentz Fluid",
+      "qty_sold": 73,
+      "revenue": 5005610.0,
+      "cost": 4404936.8,
+      "profit": 370164.85950000025
+    },
+    {
+      "type_id": 33985,
+      "name": "Prototype Hyperspatial Accelerator",
+      "qty_sold": 5,
+      "revenue": 354200000.0,
+      "cost": 337780500.0,
+      "profit": 108590.0
+    },
+    {
+      "type_id": 14146,
+      "name": "True Sansha Capacitor Power Relay",
+      "qty_sold": 10,
+      "revenue": 615520000.0,
+      "cost": 587894849.9999999,
+      "profit": -719545.9999999255
+    },
+    {
+      "type_id": 17895,
+      "name": "High-Tech Manufacturing Tools",
+      "qty_sold": 17,
+      "revenue": 55709000.0,
+      "cost": 56004629.99999999,
+      "profit": -2861029.4499999937
+    },
+    {
+      "type_id": 14136,
+      "name": "True Sansha Power Diagnostic System",
+      "qty_sold": 2,
+      "revenue": 47960000.0,
+      "cost": 48641999.99999999,
+      "profit": -2890557.9999999925
+    },
+    {
+      "type_id": 47891,
+      "name": "Chaotic Exotic Filament",
+      "qty_sold": 1,
+      "revenue": 22260000.0,
+      "cost": 24230549.999999996,
+      "profit": -2995622.9999999963
+    },
+    {
+      "type_id": 13957,
+      "name": "Dark Blood Large Armor Repairer",
+      "qty_sold": 5,
+      "revenue": 352170000.0,
+      "cost": 338986500.0,
+      "profit": -3033928.5
+    },
+    {
+      "type_id": 14049,
+      "name": "Shadow Serpentis Multispectrum Coating",
+      "qty_sold": 13,
+      "revenue": 137150000.0,
+      "cost": 135222749.99999997,
+      "profit": -4388507.499999976
+    },
+    {
+      "type_id": 4302,
+      "name": "Oracle",
+      "qty_sold": 7,
+      "revenue": 457170000.0,
+      "cost": 440742749.99999994,
+      "profit": -4625428.499999948
+    },
+    {
+      "type_id": 13998,
+      "name": "Domination Multispectrum Shield Hardener",
+      "qty_sold": 1,
+      "revenue": 96250000.0,
+      "cost": 97967399.99999999,
+      "profit": -6149712.499999985
+    },
+    {
+      "type_id": 18973,
+      "name": "Core X-Type EM Armor Hardener",
+      "qty_sold": 1,
+      "revenue": 183800000.0,
+      "cost": 181603499.99999997,
+      "profit": -6267489.99999997
+    },
+    {
+      "type_id": 14114,
+      "name": "Domination 500MN Microwarpdrive",
+      "qty_sold": 2,
+      "revenue": 93160000.0,
+      "cost": 95856899.99999999,
+      "profit": -6986917.999999985
+    },
+    {
+      "type_id": 96128,
+      "name": "Medium Federation Navy Synchronizer",
+      "qty_sold": 2,
+      "revenue": 117960000.0,
+      "cost": 120579899.99999999,
+      "profit": -8051957.999999985
+    },
+    {
+      "type_id": 45597,
+      "name": "Loki Defensive - Adaptive Defense Node",
+      "qty_sold": 3,
+      "revenue": 104640000.0,
+      "cost": 107906849.99999997,
+      "profit": -8085521.999999978
+    },
+    {
+      "type_id": 14230,
+      "name": "Dread Guristas Co-Processor",
+      "qty_sold": 5,
+      "revenue": 216750000.0,
+      "cost": 215572499.99999997,
+      "profit": -8803837.499999963
+    },
+    {
+      "type_id": 22108,
+      "name": "Mid-grade Crystal Beta",
+      "qty_sold": 1,
+      "revenue": 30970000.0,
+      "cost": 38742749.99999999,
+      "profit": -9198918.499999993
+    },
+    {
+      "type_id": 40662,
+      "name": "Capital Energy Neutralizer II",
+      "qty_sold": 4,
+      "revenue": 514000000.0,
+      "cost": 499685999.99999994,
+      "profit": -9355699.99999994
+    },
+    {
+      "type_id": 14262,
+      "name": "Dark Blood Stasis Webifier",
+      "qty_sold": 17,
+      "revenue": 1696600000.0,
+      "cost": 1629366299.9999995,
+      "profit": -10894729.999999717
+    },
+    {
+      "type_id": 19227,
+      "name": "Pithum A-Type Thermal Shield Amplifier",
+      "qty_sold": 9,
+      "revenue": 289780000.0,
+      "cost": 288043049.99999994,
+      "profit": -11607418.999999966
+    },
+    {
+      "type_id": 19029,
+      "name": "Corelum C-Type Medium Armor Repairer",
+      "qty_sold": 5,
+      "revenue": 296390000.0,
+      "cost": 300042749.99999994,
+      "profit": -17301509.499999963
+    },
+    {
+      "type_id": 19033,
+      "name": "Corelum A-Type Medium Armor Repairer",
+      "qty_sold": 2,
+      "revenue": 509600000.0,
+      "cost": 503705999.99999994,
+      "profit": -17573079.99999994
+    },
+    {
+      "type_id": 42206,
+      "name": "Mid-grade Asklepian Gamma",
+      "qty_sold": 5,
+      "revenue": 312450000.0,
+      "cost": 325469249.99999994,
+      "profit": -27407572.499999963
+    },
+    {
+      "type_id": 18933,
+      "name": "Corpus X-Type EM Armor Hardener",
+      "qty_sold": 15,
+      "revenue": 2690400000.0,
+      "cost": 2598025499.9999995,
+      "profit": -31518419.999999553
+    },
+    {
+      "type_id": 52915,
+      "name": "Ultratidal Entropic Disintegrator I",
+      "qty_sold": 1,
+      "revenue": 103700000.0,
+      "cost": 133664999.99999999,
+      "profit": -34740384.999999985
+    },
+    {
+      "type_id": 19119,
+      "name": "Corpus X-Type Heavy Energy Nosferatu",
+      "qty_sold": 6,
+      "revenue": 283500000.0,
+      "cost": 307168199.99999994,
+      "profit": -36723374.999999955
+    },
+    {
+      "type_id": 47700,
+      "name": "Unstable Stasis Webifier Mutaplasmid",
+      "qty_sold": 5,
+      "revenue": 745000000.0,
+      "cost": 766312499.9999999,
+      "profit": -55619749.99999985
+    },
+    {
+      "type_id": 28801,
+      "name": "Mid-grade Nomad Omega",
+      "qty_sold": 1,
+      "revenue": 897500000.0,
+      "cost": 913745999.9999999,
+      "profit": -57575874.99999988
+    },
+    {
+      "type_id": 18831,
+      "name": "Centum C-Type Multispectrum Energized Membrane",
+      "qty_sold": 8,
+      "revenue": 987200000.0,
+      "cost": 1024295999.9999999,
+      "profit": -82556559.99999988
+    },
+    {
+      "type_id": 97955,
+      "name": "Compact Imperial Navy Stasis Webifier",
+      "qty_sold": 57,
+      "revenue": 2333010000.0,
+      "cost": 2407115699.9999995,
+      "profit": -181540810.4999995
+    }
+  ],
+  "last_sync": "2026-11-26 22:57:39 UTC"
+}

@@ -19,8 +19,10 @@ from services.ledgers import (
     compute_line_sizing as v1_compute_line_sizing,
 )
 
-STRATEGY_CONFIG_FILE = "data/strategy_config.json"
-DEFAULT_ACTIVE_VERSION = "v2"
+from constants import (
+    DEFAULT_ACTIVE_VERSION,
+    STRATEGY_CONFIG_FILE
+)
 
 
 @dataclass(frozen=True)

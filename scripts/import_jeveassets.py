@@ -20,15 +20,18 @@ import pandas as pd
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from services.sde import connect_analytics
-CSV_PATH = "data/jeveassets_transactions.csv"
+
+from constants import (
+    JEVEASSETS_CSV_PATH
+)
 
 def import_transactions():
-    if not os.path.exists(CSV_PATH):
-        print(f"[!] File not found: {CSV_PATH}")
+    if not os.path.exists(JEVEASSETS_CSV_PATH):
+        print(f"[!] File not found: {JEVEASSETS_CSV_PATH}")
         return False
 
-    print(f"[*] Reading {CSV_PATH}...")
-    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig", on_bad_lines="skip")
+    print(f"[*] Reading {JEVEASSETS_CSV_PATH}...")
+    df = pd.read_csv(JEVEASSETS_CSV_PATH, encoding="utf-8-sig", on_bad_lines="skip")
     print(f"[*] Total rows in export: {len(df):,}")
 
     # Standardize column headers

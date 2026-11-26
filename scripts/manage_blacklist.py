@@ -5,12 +5,18 @@ Temporary Blacklist Management Tool
 Add, list, update, and remove items or groups from the temporary exclusion registry.
 """
 
+import argparse
 import os
 import json
-import argparse
+import sys
+
 from datetime import datetime, timezone, timedelta
 
-BLACKLIST_FILE = "data/temporary_blacklist.json"
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from constants import (
+    BLACKLIST_FILE
+)
 
 def load_data():
     if not os.path.exists(BLACKLIST_FILE):
