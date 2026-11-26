@@ -11,8 +11,9 @@ from services.ledgers import (
     select_desk_candidates,
 )
 
-DESK_ORDER = ("hold", "tactical", "evergreen")
-
+from constants import (
+    DESK_ORDER
+)
 
 def _load_universe_as_of(con: duckdb.DuckDBPyConnection, as_of_date) -> pd.DataFrame:
     """Reconstructs the exact point-in-time market universe using only candles <= as_of_date."""
