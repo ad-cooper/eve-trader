@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
 
-from services.blacklist import load_active_blacklist
+from services.exclusions import load_active_blacklist
 from services.ledgers import (
     DESK_PROFILES,
     DeskProfile,

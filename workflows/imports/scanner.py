@@ -1,7 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from services.blacklist import load_active_blacklist
+from services.exclusions import load_active_blacklist
+from services.exclusions import (
+    sql_excluded_market_groups_clause,
+    sql_non_expired_description_clause,
+)
 from services.esi import (
     JITA_STATION_ID,
     create_esi_session as create_session,
@@ -144,9 +148,8 @@ def _get_jita_high_velocity_candidates(
             AND t.typeID NOT IN ({excl_tids})
             AND c.categoryName IN ({allowed_cats})
             AND COALESCE(mt.metaGroupID, 1) NOT IN ({excl_metas})
-            AND COALESCE(t.marketGroupID, 0) NOT IN (2487, 1661)
-            AND LOWER(COALESCE(t.description, '')) NOT LIKE '%cease to function%'
-            AND LOWER(COALESCE(t.description, '')) NOT LIKE '%will expire%'
+            AND {sql_excluded_market_groups_clause("t.marketGroupID")}
+            AND {sql_non_expired_description_clause("t.description")}
         """
 
         rows = con.execute(f"""

@@ -12,7 +12,7 @@ def test_all_services_import_cleanly():
     """Imports every module in services/ to catch NameError, ImportError, or circular imports at load time."""
     service_modules = [
         "services.accounting",
-        "services.blacklist",
+        "services.exclusions",
         "services.esi",
         "services.ledgers",
         "services.market",

@@ -19,7 +19,10 @@ from services.sde import connect_analytics
 
 from services.storage import read_json
 
-from services.blacklist import load_active_blacklist
+from services.exclusions import (
+    sql_excluded_market_groups_clause,
+    sql_non_expired_description_clause,
+)
 from services.ledgers import (
     DESK_PROFILES,
     IncumbentState,
@@ -140,7 +143,7 @@ def load_incumbent_positions() -> tuple[dict, dict, dict, dict]:
 
 
 def load_market_universe():
-    query = """
+    query = f"""
     WITH metrics_180d AS (
         SELECT 
             type_id,
@@ -224,10 +227,8 @@ def load_market_universe():
     JOIN sde.invCategories c ON g.categoryID = c.categoryID
     WHERE t.published = 1
       AND t.marketGroupID IS NOT NULL
-      AND COALESCE(t.marketGroupID, 0) NOT IN (2487, 1661)
-      AND LOWER(COALESCE(t.description, '')) NOT LIKE '%cease to function%'
-      AND LOWER(COALESCE(t.description, '')) NOT LIKE '%will expire%'
-      AND LOWER(COALESCE(t.description, '')) NOT LIKE '%expired%';
+      AND {sql_excluded_market_groups_clause("t.marketGroupID")}
+      AND {sql_non_expired_description_clause("t.description")}
     """
     with connect_analytics(read_only=True, attach_sde=True) as con:
         df = con.execute(query).df()
@@ -389,7 +390,6 @@ def generate_desk_ledger(
     strat = get_strategy_version(strategy_version)
     scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
     active_buys, active_sells, asset_qtys, prior_desks = load_incumbent_positions()
-    bl_items, bl_groups, bl_meta = load_active_blacklist()
 
     incumbents = resolve_desk_incumbents(
         df=df,
@@ -404,9 +404,6 @@ def generate_desk_ledger(
         df=df,
         claimed_ids=claimed_ids,
         incumbents=incumbents,
-        bl_items=bl_items,
-        bl_groups=bl_groups,
-        bl_meta=bl_meta,
         losing_tids=load_recent_losing_tids(),
     )
     candidates, desk_params = strat.select_candidates(

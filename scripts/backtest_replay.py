@@ -28,7 +28,7 @@ from services.accounting import (
     calc_net_proceeds,
     calc_projected_margin,
 )
-from services.blacklist import load_active_blacklist
+from services.exclusions import load_active_blacklist
 from services.ledgers import (
     DESK_PROFILES,
     IncumbentState,

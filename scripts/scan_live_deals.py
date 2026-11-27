@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from services.esi import ESI_BASE_URL, REGION_THE_FORGE, JITA_STATION_ID, create_esi_session
 from services.sde import connect_analytics
-from services.blacklist import load_active_blacklist
+from services.exclusions import load_active_blacklist
 from services.ledgers import is_item_blacklisted
 from services.market import evaluate_deal_opportunity
 

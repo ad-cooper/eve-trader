@@ -14,7 +14,7 @@ from services.esi import (
     load_cached_assets,
     fetch_character_assets,
 )
-from services.blacklist import load_active_blacklist
+from services.exclusions import load_active_blacklist
 from services.market import get_cost_basis_map, get_hold_desk_params
 from services.sde import resolve_type_ids
 from services.accounting import (

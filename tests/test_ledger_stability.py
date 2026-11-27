@@ -187,7 +187,6 @@ def test_cross_desk_exclusivity_across_waterfall(monkeypatch):
     ])
 
     monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {501: "hold", 502: "evergreen"}))
-    monkeypatch.setattr(gen_led, "load_active_blacklist", lambda: (set(), set(), {}))
     monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
     monkeypatch.setattr(gen_led, "persist_desk_ledger", lambda *args, **kwargs: None)
 
@@ -214,7 +213,7 @@ def test_orphaned_active_buy_orders_are_surfaced_on_original_desk(monkeypatch):
     must surface it on its historical desk rather than letting it vanish from the UI.
     """
     import services.sde as sde_mod
-    import services.blacklist as bl_mod
+    import services.exclusions as bl_mod
 
     monkeypatch.setattr(
         sde_mod,
@@ -222,7 +221,6 @@ def test_orphaned_active_buy_orders_are_surfaced_on_original_desk(monkeypatch):
         lambda tids: {999: {"name": "Orphaned Tactical Module", "desk": "TACTICAL", "target_buy": 80_000_000.0, "target_sell": 95_000_000.0}},
     )
     monkeypatch.setattr(sde_mod, "resolve_type_ids", lambda tids: {999: "Orphaned Tactical Module"})
-    monkeypatch.setattr(bl_mod, "load_active_blacklist", lambda: (set(), set(), {}))
 
     eg, tac, hld = [], [], []
     buys = {"999": {"price": 80_000_000.0, "volume_remain": 3, "escrow": 240_000_000.0}}
@@ -299,7 +297,6 @@ def test_multi_ledger_cap_aware_roi_optimization(monkeypatch):
     assert list(eg_cands["type_id"])[0] == 702
 
     monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {}))
-    monkeypatch.setattr(gen_led, "load_active_blacklist", lambda: (set(), set(), {}))
     monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
     monkeypatch.setattr(gen_led, "persist_desk_ledger", lambda *args, **kwargs: None)
 

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import os
 import math
 import pandas as pd
+from services.exclusions import build_static_exclusion_mask, is_item_excluded, load_active_blacklist
 from services.storage import read_json, read_csv_records, load_market_prices_cache
 from services.esi import get_14d_average_volume
 from services.accounting import (
@@ -241,37 +242,47 @@ def build_universe_exclusion_mask(
     df: pd.DataFrame,
     claimed_ids: set[int],
     incumbents: IncumbentState,
-    bl_items: set[str],
-    bl_groups: set[str],
-    bl_meta: dict,
+    bl_items: set[str] | None = None,
+    bl_groups: set[str] | None = None,
+    bl_meta: dict | None = None,
     losing_tids: set[int] | None = None,
+    extra_excluded_categories: tuple[str, ...] = (),
 ) -> pd.Series:
     """Builds the boolean eligibility mask separating permanent/seasonal exclusions from desk screening."""
-    mask = ~df["type_id"].isin(claimed_ids)
-    mask &= ~df["group_name"].isin(bl_groups)
-    mask &= ~df["item_name"].isin(bl_items)
-
-    bl_patterns = [
-        pat for pat, meta in bl_meta.items()
-        if str(meta.get("type", "")).lower() == "pattern"
-    ]
-    if bl_patterns:
-        combined_pat = "|".join(f"(?:{p})" for p in bl_patterns)
-        mask &= ~df["item_name"].str.contains(combined_pat, case=False, regex=True, na=False)
-
-    mask &= ~df["category_name"].isin(["Personalization", "SKINs", "Special Edition Assets", "Apparel"])
-    mask &= ~df["item_name"].str.contains("Modified|Voucher|Token|Certificate", regex=True)
-
-    if losing_tids:
-        protected = set(incumbents.active_sells.keys()) | incumbents.significant_assets
-        mask &= ~df["type_id"].isin(losing_tids - protected)
-
-    is_sticky_series = df["type_id"].isin(incumbents.desk_sticky_ids)
-    mask &= (
-        (df["price_m_7d"] >= (df["price_m_30d"] * 0.78))
-        | (is_sticky_series & (df["price_m_7d"] >= (df["price_m_30d"] * 0.68)))
+    keep = build_static_exclusion_mask(
+        df=df,
+        bl_items=bl_items,
+        bl_groups=bl_groups,
+        bl_meta=bl_meta,
+        extra_excluded_categories=extra_excluded_categories,
     )
-    return mask
+
+    sticky_ids = set(incumbents.desk_sticky_ids or ()) if incumbents else set()
+    tids = df["type_id"] if "type_id" in df.columns else None
+
+    if claimed_ids and tids is not None:
+        keep &= ~tids.isin(claimed_ids)
+
+    if losing_tids and tids is not None:
+        protected = (
+            set((incumbents.active_sells or {}).keys())
+            | set(incumbents.significant_assets or ())
+            | sticky_ids
+        )
+        blocked_losers = set(losing_tids) - protected
+        if blocked_losers:
+            keep &= ~tids.isin(blocked_losers)
+
+    if "price_m_7d" in df.columns and "price_m_30d" in df.columns:
+        valid_30d = df["price_m_30d"] > 0
+        valid_7d = df["price_m_7d"] > 0
+        ratio = df["price_m_7d"] / df["price_m_30d"].replace(0, float("nan"))
+        dip_mask = (valid_30d & valid_7d & (ratio < 0.78)) | (valid_30d & (~valid_7d | (ratio < 0.68)))
+        if tids is not None and sticky_ids:
+            dip_mask &= ~tids.isin(sticky_ids)
+        keep &= ~dip_mask
+
+    return keep
 
 
 def compute_candidate_pricing(
@@ -467,19 +478,24 @@ def get_desk_claimed_type_ids(include_active_orders: bool = True) -> set[int]:
     return tids
 
 
-def is_item_blacklisted(name: str, group_name: str, bl_items: set, bl_groups: set, bl_meta: dict) -> bool:
+def is_item_blacklisted(
+    name: str,
+    group_name: str,
+    bl_items: set,
+    bl_groups: set,
+    bl_meta: dict,
+) -> bool:
     """Checks exact item/group exclusions plus active regex patterns from temporary_blacklist.json."""
-    if name in bl_items or group_name in bl_groups:
-        return True
-    import re
-    for pat, meta in (bl_meta or {}).items():
-        if str(meta.get("type", "")).lower() == "pattern":
-            try:
-                if re.search(pat, name, flags=re.IGNORECASE):
-                    return True
-            except re.error:
-                continue
-    return False
+    return is_item_excluded(
+        name=name,
+        group_name=group_name,
+        category_name="",
+        bl_items=bl_items,
+        bl_groups=bl_groups,
+        bl_meta=bl_meta,
+        check_default_categories=False,
+        check_default_name_regex=False,
+    )
 
 
 def load_desk_csv(filename: str) -> list[dict]:
@@ -795,7 +811,6 @@ def _inject_orphaned_buys(eg: list, tac: list, hld: list, buys: dict, market_pri
         }
         prox_pct = round((float(live_ask) / last_sell) * 100.0, 1) if (live_ask and last_sell > 0) else None
         diff_pct = round(((float(live_ask) - last_sell) / last_sell) * 100.0, 1) if (live_ask and last_sell > 0) else 0.0
-        from services.blacklist import load_active_blacklist
         bl_items, _, _ = load_active_blacklist()
         item_name = name_map.get(tid_int, f"Type {tid_int}")
         cancel_floor = get_desk_profile(desk_key).cancel_floor

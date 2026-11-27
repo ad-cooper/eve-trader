@@ -137,7 +137,6 @@ def test_side_by_side_v1_and_v2_shadow_isolation_and_ai_registration(tmp_path, m
     monkeypatch.setattr(gen_led, "OUTPUT_DIR", str(tmp_path / "ledgers"))
     monkeypatch.setattr(gen_led, "SQLITE_PATH", "")
     monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {}))
-    monkeypatch.setattr(gen_led, "load_active_blacklist", lambda: (set(), set(), {}))
     monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
 
     def mock_persist(desk_type, ledger_rows, allocated_cap, budget, sticky_kept, strategy_version="v1", snapshot_time=None):

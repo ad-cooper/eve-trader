@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import scripts.generate_ledgers as gen_led
-import services.blacklist as bl_mod
+import services.exclusions as bl_mod
 import services.sde as sde_mod
 import services.strategy_versions as strat_mod
 

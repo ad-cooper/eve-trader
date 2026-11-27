@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 import scripts.generate_ledgers as gen_led
-import services.blacklist as bl_mod
+import services.exclusions as bl_mod
 import services.sde as sde_mod
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "ledger_golden"
