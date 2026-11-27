@@ -5,6 +5,13 @@ import pandas as pd
 from services.exclusions import build_static_exclusion_mask, is_item_excluded, load_active_blacklist
 from services.storage import read_json, read_csv_records, load_market_prices_cache
 from services.esi import get_14d_average_volume
+from services.desk_config import (
+    DeskPricingConfig,
+    DeskProfile,
+    DESK_PROFILES,
+    LiveOrderPricing as lcfg
+
+)
 from services.accounting import (
     calc_unit_cost,
     calc_net_proceeds,
@@ -19,109 +26,12 @@ from constants import (
     ORDERS_CACHE_FILE
 )
 
-@dataclass(frozen=True)
-class DeskProfile:
-    name: str
-    ratio: float
-    vol_pct: float
-    max_line_cap: float
-    min_line_cap: float
-    min_margin: float             # Universe screening & target buy ceiling (%)
-    live_min_margin: float        # Live order bump & missing-buy audit floor (%)
-    sticky_margin_floor: float    # Incumbent retention floor during rebuild (%)
-    cancel_floor: float           # Active buy order sunk-fee cancel threshold (%)
-    max_hold_days: int            # Inventory advisor time-stop horizon (days)
-    take_profit_days: int         # Early take-profit minimum holding days
-    take_profit_roi: float        # Early take-profit / Evergreen undercut floor (%)
-    sort_col: str
-    price_col: str
-    min_price_m: float
-    max_price_m: float
-    min_turnover_m: float
-    min_spread_pct: float
-    min_dump_freq_pct: float = 0.0
-    min_daily_vol: float = 0.0
-    min_history_days: int = 0
-    max_vwap_ratio_180d: float | None = None
-    excluded_categories: tuple[str, ...] = ()
-
-
-DESK_PROFILES: dict[str, DeskProfile] = {
-    "hold": DeskProfile(
-        name="hold",
-        ratio=0.20,
-        vol_pct=0.06,
-        max_line_cap=1.5e9,
-        min_line_cap=150.0e6,
-        min_margin=20.0,
-        live_min_margin=20.0,
-        sticky_margin_floor=10.0,
-        cancel_floor=10.0,
-        max_hold_days=21,
-        take_profit_days=4,
-        take_profit_roi=8.0,
-        sort_col="upside_pct",
-        price_col="price_m_180d",
-        min_price_m=15.0,
-        max_price_m=2500.0,
-        min_turnover_m=10.0,
-        min_spread_pct=8.0,
-        min_history_days=60,
-        max_vwap_ratio_180d=0.90,
-        excluded_categories=("Skill",),
-    ),
-    "tactical": DeskProfile(
-        name="tactical",
-        ratio=0.45,
-        vol_pct=0.15,
-        max_line_cap=1.5e9,
-        min_line_cap=100.0e6,
-        min_margin=9.0,
-        live_min_margin=9.0,
-        sticky_margin_floor=4.5,
-        cancel_floor=4.5,
-        max_hold_days=10,
-        take_profit_days=3,
-        take_profit_roi=4.5,
-        sort_col="swing_score",
-        price_col="price_m_30d",
-        min_price_m=3.0,
-        max_price_m=2500.0,
-        min_turnover_m=25.0,
-        min_spread_pct=13.5,
-        min_dump_freq_pct=35.0,
-    ),
-    "evergreen": DeskProfile(
-        name="evergreen",
-        ratio=0.35,
-        vol_pct=0.22,
-        max_line_cap=1.2e9,
-        min_line_cap=100.0e6,
-        min_margin=7.0,
-        live_min_margin=7.0,
-        sticky_margin_floor=2.0,
-        cancel_floor=2.0,
-        max_hold_days=3,
-        take_profit_days=0,
-        take_profit_roi=2.0,
-        sort_col="profit_velocity",
-        price_col="price_m_30d",
-        min_price_m=1.0,
-        max_price_m=2500.0,
-        min_turnover_m=45.0,
-        min_spread_pct=13.0,
-        min_daily_vol=3.0,
-    ),
-}
-
-
 def get_desk_profile(desk_type: str | None) -> DeskProfile:
     """Case-insensitive lookup for a DeskProfile, defaulting to 'evergreen'."""
     key = str(desk_type or "evergreen").strip().lower()
     if key not in DESK_PROFILES:
         return DESK_PROFILES["evergreen"]
     return DESK_PROFILES[key]
-
 
 def select_desk_candidates(
     df: pd.DataFrame,
@@ -134,6 +44,8 @@ def select_desk_candidates(
 ) -> tuple[pd.DataFrame, dict]:
     """Filters, scores, and ranks universe candidates for a desk using its DeskProfile."""
     cfg = cfg or (profile or DESK_PROFILES[desk_type])
+    scfg = cfg.selection
+    min_bid_share, max_bid_share = cfg.bid_share_bounds
     is_sticky_series = df["type_id"].isin(desk_sticky_ids)
 
     desk_mask = (
@@ -152,7 +64,7 @@ def select_desk_candidates(
     if cfg.max_vwap_ratio_180d is not None:
         desk_mask &= df["price_m_30d"] <= (df["price_m_180d"] * cfg.max_vwap_ratio_180d)
     if "bid_share_30d" in df.columns and desk_type in ("tactical", "evergreen"):
-        desk_mask &= df["bid_share_30d"].fillna(0.35) >= 0.12
+        desk_mask &= df["bid_share_30d"].fillna(scfg.default_bid_share_30d) >= scfg.min_bid_share_30d
 
     candidates = df[base_mask & (desk_mask | is_sticky_series)].copy()
     candidates["passes_desk"] = desk_mask.loc[candidates.index]
@@ -160,23 +72,33 @@ def select_desk_candidates(
 
     max_cap_m = (cfg.max_line_cap * scale_factor) / 1e6
     bid_share_series = (
-        candidates["bid_share_30d"].fillna(0.35).clip(lower=0.05, upper=0.95)
+        candidates["bid_share_30d"].fillna(scfg.default_bid_share_30d).clip(lower=min_bid_share, upper=max_bid_share)
         if "bid_share_30d" in candidates.columns
-        else 1.0
+        else scfg.fallback_bid_share_30d
     )
     deployable_m = (candidates["daily_turnover_m"] * bid_share_series * cfg.vol_pct).clip(upper=max_cap_m)
-    net_spread = (candidates["avg_spread_30d"] - 5.35).clip(lower=0.0)
+    net_spread = (candidates["avg_spread_30d"] - scfg.edge_baseline_pct).clip(lower=0.0)
+    log_weight_base = scfg.log_turnover_weight_base
 
     if desk_type == "hold":
         raw_upside = (
-            ((candidates["price_m_180d"] * 0.96) - candidates["price_m_30d"])
+            ((candidates["price_m_180d"] * scfg.hold_target_vwap180_mult) - candidates["price_m_30d"])
             / candidates["price_m_30d"]
             * 100.0
         )
-        momentum_guard = (candidates["price_m_7d"] / candidates["price_m_30d"]).clip(lower=0.75, upper=1.05)
-        candidates["upside_pct"] = raw_upside * momentum_guard * (1.0 + candidates["daily_turnover_m"].clip(lower=0.0).map(math.log1p))
+        mom_low, mom_high = scfg.momentum_guard_bounds
+        momentum_guard = (candidates["price_m_7d"] / candidates["price_m_30d"]).clip(lower=mom_low, upper=mom_high)
+        candidates["upside_pct"] = (
+            raw_upside
+            * momentum_guard
+            * (log_weight_base + candidates["daily_turnover_m"].clip(lower=0.0).map(math.log1p))
+        )
     elif desk_type == "tactical":
-        candidates["swing_score"] = candidates["dump_freq_pct"] * net_spread * (1.0 + deployable_m.clip(lower=0.0).map(math.log1p))
+        candidates["swing_score"] = (
+            candidates["dump_freq_pct"]
+            * net_spread
+            * (log_weight_base + deployable_m.clip(lower=0.0).map(math.log1p))
+        )
     else:
         candidates["profit_velocity"] = deployable_m * net_spread
 
@@ -274,16 +196,18 @@ def build_universe_exclusion_mask(
             keep &= ~tids.isin(blocked_losers)
 
     if "price_m_7d" in df.columns and "price_m_30d" in df.columns:
+        dip_cfg = DESK_PROFILES["evergreen"].selection
         valid_30d = df["price_m_30d"] > 0
         valid_7d = df["price_m_7d"] > 0
         ratio = df["price_m_7d"] / df["price_m_30d"].replace(0, float("nan"))
-        dip_mask = (valid_30d & valid_7d & (ratio < 0.78)) | (valid_30d & (~valid_7d | (ratio < 0.68)))
+        dip_mask = (valid_30d & valid_7d & (ratio < dip_cfg.dip_ratio_7d_30d)) | (
+            valid_30d & (~valid_7d | (ratio < dip_cfg.sticky_dip_ratio_7d_30d))
+        )
         if tids is not None and sticky_ids:
             dip_mask &= ~tids.isin(sticky_ids)
         keep &= ~dip_mask
 
     return keep
-
 
 def compute_candidate_pricing(
     row: pd.Series,
@@ -296,6 +220,9 @@ def compute_candidate_pricing(
     Computes target_buy, target_sell, unit economics, and net_margin for a single candidate.
     Returns None if the candidate fails live-book or desk pricing guards.
     """
+    profile = DESK_PROFILES.get(desk_type, DESK_PROFILES["evergreen"])
+    pcfg = getattr(profile, "pricing", None) or DESK_PROFILES["evergreen"].pricing
+
     tid = int(row["type_id"])
     has_buy = tid in incumbents.active_buys
     has_sell = tid in incumbents.active_sells
@@ -304,7 +231,7 @@ def compute_candidate_pricing(
     vwap_30d = row["price_m_30d"] * 1e6
     vwap_180d = row["price_m_180d"] * 1e6
     vwap_7d = row["price_m_7d"] * 1e6
-    p20_low_30d = (row.get("p20_low_m_30d") or row["price_m_30d"] * 0.94) * 1e6
+    p20_low_30d = (row.get("p20_low_m_30d") or row["price_m_30d"] * pcfg.fallback_low_ratio) * 1e6
     dump_freq = float(row["dump_freq_pct"])
 
     live_ask = p_info.get("lowest_ask")
@@ -316,42 +243,58 @@ def compute_candidate_pricing(
 
     p_current = live_ask if (live_ask and live_ask > 0) else (vwap_7d if vwap_7d > 0 else vwap_30d)
     drift = abs(p_current - vwap_30d) / vwap_30d if vwap_30d > 0 else 0.0
-    stability_score = max(0.70, min(1.0, 1.0 - (1.2 * drift) - (0.2 * (dump_freq / 100.0))))
+    stability_score = max(
+        pcfg.stability_min,
+        min(
+            pcfg.stability_max,
+            1.0 - (pcfg.stability_drift_weight * drift) - (pcfg.stability_dump_weight * (dump_freq / 100.0)),
+        ),
+    )
 
     if has_buy:
         competitive_bid = float(incumbents.active_buys[tid]["price"])
     elif live_top_buy and live_top_buy > 0:
-        competitive_bid = live_top_buy + 0.01
+        competitive_bid = live_top_buy + pcfg.tick_increment
     else:
-        competitive_bid = min(p20_low_30d, p_current * 0.92)
+        competitive_bid = min(p20_low_30d, p_current * pcfg.fallback_bid_ratio)
 
     if desk_type == "hold":
-        if not is_sticky and live_ask and live_ask >= (vwap_180d * 0.90):
+        if (
+            not is_sticky
+            and live_ask
+            and pcfg.max_live_ask_vwap180_ratio is not None
+            and live_ask >= (vwap_180d * pcfg.max_live_ask_vwap180_ratio)
+        ):
             return None
-        t_sell = min(vwap_180d * 0.960, vwap_30d * 1.220)
+        t_sell = min(vwap_180d * pcfg.sell_vwap180_mult, vwap_30d * pcfg.sell_vwap30_mult)
         t_buy = competitive_bid
         if not has_buy and live_ask and live_ask > 0:
-            t_buy = min(t_buy, live_ask * 0.94)
+            t_buy = min(t_buy, live_ask * pcfg.buy_cap_ratio)
 
     elif desk_type == "tactical":
-        stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
-        baseline_sell = vwap_30d * 1.045
+        stabilized_ask = p_current * (
+            pcfg.stabilized_ask_base_weight + pcfg.stabilized_ask_score_weight * stability_score
+        )
+        baseline_sell = vwap_30d * pcfg.sell_vwap30_mult
         if live_ask and float(live_ask) > 0:
-            baseline_sell = min(baseline_sell, float(live_ask) * 1.25)
-        t_sell = (0.50 * stabilized_ask) + (0.50 * baseline_sell)
+            baseline_sell = min(baseline_sell, float(live_ask) * pcfg.sell_ask_cap_mult)
+        t_sell = (pcfg.sell_stabilized_weight * stabilized_ask) + (pcfg.sell_baseline_weight * baseline_sell)
         t_buy = competitive_bid
         if not has_buy and live_ask and live_ask > 0:
-            t_buy = min(t_buy, live_ask * 0.95)
+            t_buy = min(t_buy, live_ask * pcfg.buy_cap_ratio)
 
     else:  # evergreen
-        stabilized_ask = p_current * (0.95 + 0.05 * stability_score)
-        baseline_sell = vwap_30d * 1.035
+        stabilized_ask = p_current * (
+            pcfg.stabilized_ask_base_weight + pcfg.stabilized_ask_score_weight * stability_score
+        )
+        baseline_sell = vwap_30d * pcfg.sell_vwap30_mult
         if live_ask and float(live_ask) > 0:
-            baseline_sell = min(baseline_sell, float(live_ask) * 1.25)
-        t_sell = min((0.45 * stabilized_ask) + (0.55 * baseline_sell), vwap_30d * 1.065)
+            baseline_sell = min(baseline_sell, float(live_ask) * pcfg.sell_ask_cap_mult)
+        blended_sell = (pcfg.sell_stabilized_weight * stabilized_ask) + (pcfg.sell_baseline_weight * baseline_sell)
+        t_sell = min(blended_sell, vwap_30d * pcfg.sell_vwap30_cap_mult)
         t_buy = competitive_bid
         if not has_buy:
-            ceil_guard = (live_ask * 0.98) if live_ask else (t_sell * 0.98)
+            ceil_guard = (live_ask * pcfg.buy_cap_ratio) if live_ask else (t_sell * pcfg.buy_cap_ratio)
             t_buy = min(t_buy, ceil_guard)
 
     if has_sell and float(incumbents.active_sells[tid].get("price", 0.0)) > 0:
@@ -374,7 +317,6 @@ def compute_candidate_pricing(
         "dump_freq": dump_freq,
     }
 
-
 def compute_line_sizing(
     row: pd.Series,
     pricing: dict,
@@ -388,6 +330,10 @@ def compute_line_sizing(
     Applies margin floors, per-line ISK caps, sticky quantity preservation, and budget clamping.
     Returns None if the candidate should be skipped.
     """
+    desk_name = str(desk_params.get("name") or "")
+    profile = DESK_PROFILES.get(desk_name, DESK_PROFILES["evergreen"])
+    min_bid_share, max_bid_share = profile.bid_share_bounds
+
     tid = int(row["type_id"])
     has_buy = tid in incumbents.active_buys
     has_sell = tid in incumbents.active_sells
@@ -412,11 +358,10 @@ def compute_line_sizing(
 
     raw_bid_share = row.get("bid_share_30d")
     if raw_bid_share is not None and not (isinstance(raw_bid_share, float) and math.isnan(raw_bid_share)):
-        bid_share = max(0.05, min(0.95, float(raw_bid_share)))
+        bid_share = max(min_bid_share, min(max_bid_share, float(raw_bid_share)))
     else:
         bid_share = 1.0
 
-    desk_name = str(desk_params.get("name") or "")
     effective_bid_vol = row["daily_vol_30d"] * (bid_share if desk_name != "hold" else 1.0)
     raw_qty = max(1, int(effective_bid_vol * vol_pct))
     cap_qty = max(1, int(max_line_cap / cost_unit)) if cost_unit > 0 else 1
@@ -438,7 +383,7 @@ def compute_line_sizing(
 
     capital_line = cost_unit * qty
 
-    effective_min_cap = (min_line_cap * 0.35) if is_sticky else min_line_cap
+    effective_min_cap = (min_line_cap * profile.sticky_min_cap_ratio) if is_sticky else min_line_cap
     if not has_buy and capital_line < effective_min_cap:
         return None
 
@@ -457,7 +402,6 @@ def compute_line_sizing(
         "capital": capital_line,
         "profit": net_profit_unit * qty,
     }
-
 
 def get_desk_claimed_type_ids(include_active_orders: bool = True) -> set[int]:
     """Returns all type_ids currently managed by Jita desks (CSVs + active Jita orders)."""
@@ -518,8 +462,6 @@ def load_sniper_deals() -> list:
     data = read_json("ledgers/sniper_deals.json", default=[])
     return data if isinstance(data, list) else data.get("deals", [])
 
-
-
 def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_buy: float, sells: dict) -> tuple:
     """Determines target buy, target sell, and recommended quantity per desk strategy."""
     csv_buy = float(item.get("target_buy", 0.0))
@@ -527,38 +469,55 @@ def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_
     tid = str(item.get("type_id", ""))
     qty = int(item.get("qty", 1))
 
+    profile = get_desk_profile(desk_type)
+    lcfg = getattr(profile, "live_pricing", None) or LiveOrderPricing()
+    tick = lcfg.tick_increment
+
     if desk_type == "evergreen":
         if live_ask and live_ask > 0:
-            spot_sell = live_ask - 0.01
-            blended_sell = (0.55 * spot_sell) + (0.45 * csv_sell) if (csv_sell > 0 and spot_sell < csv_sell) else spot_sell
-            t_sell = min(blended_sell, csv_sell * 1.15) if csv_sell > 0 else spot_sell
+            spot_sell = live_ask - tick
+            blended_sell = (
+                (lcfg.spot_sell_weight * spot_sell) + (lcfg.csv_sell_weight * csv_sell)
+                if (csv_sell > 0 and spot_sell < csv_sell)
+                else spot_sell
+            )
+            t_sell = (
+                min(blended_sell, csv_sell * lcfg.csv_sell_cap_mult)
+                if (csv_sell > 0 and lcfg.csv_sell_cap_mult is not None)
+                else spot_sell
+            )
         else:
             t_sell = csv_sell
-        max_buy = calc_max_profitable_buy(t_sell, min_margin_pct=get_desk_profile("evergreen").live_min_margin)
-        t_buy = min(live_top_buy + 0.01, max_buy) if (live_top_buy and live_top_buy > 0) else min(csv_buy, max_buy)
-        ceil_guard = (live_ask * 0.98) if live_ask else (t_sell * 0.98)
-        t_buy = min(t_buy, ceil_guard)
+        max_buy = calc_max_profitable_buy(t_sell, min_margin_pct=profile.live_min_margin)
+        t_buy = min(live_top_buy + tick, max_buy) if (live_top_buy and live_top_buy > 0) else min(csv_buy, max_buy)
+        if lcfg.buy_ceil_ratio is not None:
+            ceil_guard = (live_ask * lcfg.buy_ceil_ratio) if live_ask else (t_sell * lcfg.buy_ceil_ratio)
+            t_buy = min(t_buy, ceil_guard)
 
     elif desk_type == "tactical":
-        t_sell = (0.50 * (live_ask - 0.01)) + (0.50 * csv_sell) if (live_ask and live_ask > 0) else csv_sell
-        max_buy = calc_max_profitable_buy(t_sell, min_margin_pct=get_desk_profile("tactical").live_min_margin)
-        t_buy = min(live_top_buy + 0.01, max_buy) if (live_top_buy and live_top_buy > 0) else min(csv_buy, max_buy)
-        ceil_guard = (live_ask * 0.95) if live_ask else (t_sell * 0.95)
-        t_buy = min(t_buy, ceil_guard)
+        t_sell = (
+            (lcfg.spot_sell_weight * (live_ask - tick)) + (lcfg.csv_sell_weight * csv_sell)
+            if (live_ask and live_ask > 0)
+            else csv_sell
+        )
+        max_buy = calc_max_profitable_buy(t_sell, min_margin_pct=profile.live_min_margin)
+        t_buy = min(live_top_buy + tick, max_buy) if (live_top_buy and live_top_buy > 0) else min(csv_buy, max_buy)
+        if lcfg.buy_ceil_ratio is not None:
+            ceil_guard = (live_ask * lcfg.buy_ceil_ratio) if live_ask else (t_sell * lcfg.buy_ceil_ratio)
+            t_buy = min(t_buy, ceil_guard)
 
     else:  # hold
-        hold_cfg = get_desk_profile("hold")
-        t_sell = (live_ask - 0.01) if (tid in sells and live_ask and live_ask > csv_sell) else csv_sell
+        t_sell = (live_ask - tick) if (tid in sells and live_ask and live_ask > csv_sell) else csv_sell
         t_buy = csv_buy
         if live_top_buy and live_top_buy > 0:
-            t_buy = min(live_top_buy + 0.01, t_buy)
-        if live_ask and live_ask > 0:
-            t_buy = min(t_buy, live_ask * 0.88)
+            t_buy = min(live_top_buy + tick, t_buy)
+        if live_ask and live_ask > 0 and lcfg.buy_ceil_ratio is not None:
+            t_buy = min(t_buy, live_ask * lcfg.buy_ceil_ratio)
         cost_unit = calc_unit_cost(t_buy)
         if tid in sells:
             qty = int(item.get("qty", 1))
         else:
-            qty = max(1, int(round(hold_cfg.max_line_cap / cost_unit))) if cost_unit > 0 else 1
+            qty = max(1, int(round(profile.max_line_cap / cost_unit))) if cost_unit > 0 else 1
 
     return round(t_buy, 2), round(t_sell, 2), qty
 
@@ -618,6 +577,9 @@ def evaluate_order_action(
     return "CANCEL_CEILING", "CEILING REACHED (CANCEL)"
 
 def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: dict, sells: dict) -> list:
+    profile = get_desk_profile(desk_type)
+    lcfg = getattr(profile, "live_pricing", None) or LiveOrderPricing()
+
     for item in items:
         item["desk_type"] = desk_type
         tid = str(item.get("type_id", ""))
@@ -650,7 +612,7 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             item["my_price"] = b["price"]
             item["my_qty"] = b["volume_remain"]
             item["escrow"] = float(b.get("escrow", item.get("capital", 0.0)))
-            item["price_synced"] = abs(b["price"] - t_buy) / t_buy < 0.01 if t_buy > 0 else True
+            item["price_synced"] = abs(b["price"] - t_buy) / t_buy < lcfg.price_sync_tolerance if t_buy > 0 else True
             dump_f = float(item.get("dump_freq", 0.0))
             from services.strategy_versions import get_active_strategy_version, get_strategy_version
             active_ver = get_active_strategy_version()
@@ -686,21 +648,23 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             item["my_price"] = None
             item["my_qty"] = 0
             item["price_synced"] = False
-
             if desk_type == "hold":
                 prox = item.get("proximity_pct")
                 margin = item.get("net_margin", 0.0)
                 cost_unit = item["cost_unit"]
                 profit_unit = item["profit_unit"]
 
-                if prox is not None and 60.0 <= prox <= 92.0 and margin >= 20.0:
-                    hold_cfg = get_desk_profile("hold")
+                if (
+                    prox is not None
+                    and lcfg.hold_prime_prox_min <= prox <= lcfg.hold_prime_prox_max
+                    and margin >= lcfg.hold_prime_min_margin
+                ):
                     vol = get_14d_average_volume(int(tid)) if tid.isdigit() else -1.0
                     item["avg_daily_vol"] = vol
 
-                    base_qty = max(1, int(round(hold_cfg.max_line_cap / cost_unit))) if cost_unit > 0 else 1
+                    base_qty = max(1, int(round(profile.max_line_cap / cost_unit))) if cost_unit > 0 else 1
                     if vol > 0:
-                        vol_cap = max(1, int(round(vol * hold_cfg.vol_pct)))
+                        vol_cap = max(1, int(round(vol * profile.vol_pct)))
                         final_qty = min(base_qty, vol_cap)
                     else:
                         final_qty = min(base_qty, max(1, int(item.get("qty", 1))))
@@ -709,17 +673,21 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
                     item["capital"] = round(cost_unit * final_qty, 2)
                     item["profit"] = round(profit_unit * final_qty, 2)
 
-                    if 0 <= vol < 2.5 and final_qty <= 1 and item["capital"] < 500_000_000.0:
+                    if (
+                        0 <= vol < lcfg.hold_low_vol_threshold
+                        and final_qty <= 1
+                        and item["capital"] < lcfg.hold_low_vol_max_capital
+                    ):
                         item["action_code"] = "PATIENT"
                         item["action_text"] = "LOW VELOCITY"
                     else:
                         item["action_code"] = "PRIME_DIP"
                         item["action_text"] = "PRIME DIP"
 
-                elif prox is not None and prox < 60.0:
+                elif prox is not None and prox < lcfg.hold_prime_prox_min:
                     item["action_code"] = "PATIENT"
                     item["action_text"] = "DEEP CRASH"
-                elif prox is not None and prox > 92.0:
+                elif prox is not None and prox > lcfg.hold_prime_prox_max:
                     item["action_code"] = "PATIENT"
                     item["action_text"] = "NEAR PEAK"
                 else:
@@ -731,14 +699,12 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
                 allow_new_buy = str(raw_allow).strip().lower() not in ("false", "0", "no")
                 eff_live_sell = min(t_sell, float(live_ask)) if (live_ask and float(live_ask) > 0) else t_sell
                 eff_live_margin = calc_projected_margin(t_buy, eff_live_sell) if t_buy > 0 else 0.0
-                if not allow_new_buy or eff_live_margin < desk_cfg.live_min_margin:
+                if not allow_new_buy or eff_live_margin < profile.live_min_margin:
                     item["action_code"] = "PATIENT"
                     item["action_text"] = f"DO NOT BUY ({eff_live_margin:.1f}% LIVE)"
                 else:
                     item["action_code"] = "UNPLACED"
                     item["action_text"] = "READY TO PLACE"
-
-    # Hold Desk curation: active orders + Top 8 Prime Dips
     if desk_type == "hold":
         active_items = [it for it in items if it.get("char_status") != "UNPLACED"]
         unplaced_prime = [
@@ -746,13 +712,12 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             if it.get("char_status") == "UNPLACED" and it.get("action_code") == "PRIME_DIP"
         ]
         unplaced_prime.sort(key=lambda x: -x.get("profit", 0.0))
-        return active_items + unplaced_prime[:8]
+        return active_items + unplaced_prime[: lcfg.hold_prime_dip_limit]
 
     return items
 
 _DESK_ANNOTATION_CACHE = None
 _DESK_CACHE_TIME = 0.0
-
 
 def _inject_orphaned_buys(eg: list, tac: list, hld: list, buys: dict, market_prices: dict):
     """Surfaces active buy orders whose items rotated out of all CSV ledgers so they can be cancelled."""

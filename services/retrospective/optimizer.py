@@ -8,8 +8,10 @@ from pathlib import Path
 import pandas as pd
 
 from services.exclusions import load_active_blacklist
+from services.desk_config import (
+    DESK_PROFILES
+)
 from services.ledgers import (
-    DESK_PROFILES,
     DeskProfile,
     IncumbentState,
     build_universe_exclusion_mask,

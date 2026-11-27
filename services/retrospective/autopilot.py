@@ -4,7 +4,9 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.ledgers import DESK_PROFILES
+from services.desk_config import (
+    DESK_PROFILES
+)
 from services.retrospective.optimizer import (
     _sanitize_json,
     run_local_retrospective,

@@ -23,8 +23,13 @@ from services.exclusions import (
     sql_excluded_market_groups_clause,
     sql_non_expired_description_clause,
 )
-from services.ledgers import (
+from services.desk_config import (
+    BUDGET_FILL_STOP_RATIO,
     DESK_PROFILES,
+    UNIVERSE_QUERY_CONFIG,
+    UniverseQueryConfig
+)
+from services.ledgers import (
     IncumbentState,
     resolve_desk_incumbents,
     build_universe_exclusion_mask,
@@ -142,66 +147,65 @@ def load_incumbent_positions() -> tuple[dict, dict, dict, dict]:
     return buys, sells, assets, prior_desks
 
 
-def load_market_universe():
+def load_market_universe(qcfg: UniverseQueryConfig = UNIVERSE_QUERY_CONFIG):
+    bid_share_expr = (
+        f"CASE WHEN highest > lowest "
+        f"THEN LEAST({qcfg.bid_share_max}, GREATEST({qcfg.bid_share_min}, "
+        f"(highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest))) "
+        f"ELSE {qcfg.bid_share_fallback} END"
+    )
+    dump_cond_expr = (
+        f"(average - lowest) / NULLIF(average, 0) >= {qcfg.dump_drop_threshold} "
+        f"AND ("
+        f"CASE WHEN highest > lowest "
+        f"THEN (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest) "
+        f"ELSE {qcfg.bid_share_fallback} END"
+        f") >= {qcfg.dump_min_bid_share}"
+    )
+
     query = f"""
     WITH metrics_180d AS (
-        SELECT 
+        SELECT
             type_id,
             COUNT(*) AS total_history_days,
             MAX(average) AS high_180d,
             SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_180d
         FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL 180 DAY FROM forge_market_history) AND volume > 0
+        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.history_lookback_days} DAY FROM forge_market_history) AND volume > 0
         GROUP BY type_id
     ),
     metrics_30d AS (
         SELECT
-            COUNT(*) AS active_days_30d, 
+            COUNT(*) AS active_days_30d,
             type_id,
             AVG(volume) AS daily_vol_30d,
             SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_30d,
             AVG((highest - lowest) / NULLIF(average, 0)) * 100.0 AS avg_spread_30d,
-            SUM(volume * CASE WHEN highest > lowest THEN LEAST(0.95, GREATEST(0.02, (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest))) ELSE 0.25 END) / NULLIF(SUM(volume), 0) AS bid_share_30d,
-            SUM(
-                volume * CASE
-                    WHEN highest > lowest THEN LEAST(0.95, GREATEST(0.02, (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest)))
-                    ELSE 0.25
-                END
-            ) / NULLIF(SUM(volume), 0) AS bid_share_30d,
-            (COUNT(
-                CASE WHEN (average - lowest) / NULLIF(average, 0) >= 0.045
-                      AND (
-                          CASE WHEN highest > lowest
-                               THEN (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest)
-                               ELSE 0.25
-                          END
-                      ) >= 0.25
-                     THEN 1
-                END
-            ) * 100.0 / COUNT(*)) AS dump_freq_pct
+            SUM(volume * ({bid_share_expr})) / NULLIF(SUM(volume), 0) AS bid_share_30d,
+            (COUNT(CASE WHEN {dump_cond_expr} THEN 1 END) * 100.0 / COUNT(*)) AS dump_freq_pct
         FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history) AND volume > 0
+        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.medium_lookback_days} DAY FROM forge_market_history) AND volume > 0
         GROUP BY type_id
     ),
     metrics_7d AS (
-        SELECT 
+        SELECT
             type_id,
             SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_7d,
             MIN(lowest) AS min_low_7d
         FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL 7 DAY FROM forge_market_history) AND volume > 0
+        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.short_lookback_days} DAY FROM forge_market_history) AND volume > 0
         GROUP BY type_id
     ),
     metrics_floors AS (
         SELECT
             type_id,
-            QUANTILE_CONT(CASE WHEN date >= (SELECT MAX(date) - INTERVAL 14 DAY FROM forge_market_history) THEN lowest END, 0.25) AS min_low_14d,
-            QUANTILE_CONT(lowest, 0.20) AS p20_low_30d
+            QUANTILE_CONT(CASE WHEN date >= (SELECT MAX(date) - INTERVAL {qcfg.floor_lookback_days} DAY FROM forge_market_history) THEN lowest END, {qcfg.min_low_quantile}) AS min_low_14d,
+            QUANTILE_CONT(lowest, {qcfg.p20_low_quantile}) AS p20_low_30d
         FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history) AND volume > 0
+        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.medium_lookback_days} DAY FROM forge_market_history) AND volume > 0
         GROUP BY type_id
     )
-    SELECT 
+    SELECT
         m.type_id,
         t.typeName AS item_name,
         g.groupName AS group_name,
@@ -214,7 +218,7 @@ def load_market_universe():
         f.min_low_14d / 1e6 AS min_low_m_14d,
         f.p20_low_30d / 1e6 AS p20_low_m_30d,
         m.daily_vol_30d,
-        COALESCE(m.bid_share_30d, 0.35) AS bid_share_30d,
+        COALESCE(m.bid_share_30d, {qcfg.default_bid_share_30d}) AS bid_share_30d,
         m.dump_freq_pct,
         m.avg_spread_30d,
         (m.daily_vol_30d * (m.vwap_30d / 1e6)) AS daily_turnover_m
@@ -233,7 +237,6 @@ def load_market_universe():
     with connect_analytics(read_only=True, attach_sde=True) as con:
         df = con.execute(query).df()
     return df
-
 
 def load_recent_losing_tids(min_loss_isk: float = 1_000_000.0) -> set[int]:
     if not os.path.exists("ledgers/performance_cache.json"):
@@ -302,7 +305,7 @@ def allocate_desk_rows(
             "supply_class": str(row.get("supply_class") or "LEGACY_V1"),
         })
 
-        if allocated_cap >= (budget * 0.995):
+        if allocated_cap >= (budget * BUDGET_FILL_STOP_RATIO):
             break
 
     return ledger_rows, allocated_cap, new_claimed_ids, sticky_kept

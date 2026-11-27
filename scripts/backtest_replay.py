@@ -29,8 +29,10 @@ from services.accounting import (
     calc_projected_margin,
 )
 from services.exclusions import load_active_blacklist
+from services.desk_config import (
+    DESK_PROFILES
+)
 from services.ledgers import (
-    DESK_PROFILES,
     IncumbentState,
     get_desk_profile,
     build_universe_exclusion_mask,

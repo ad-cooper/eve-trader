@@ -20,7 +20,9 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import services.ledgers as led_mod
+from services.desk_config import (
+    DESK_PROFILES
+)
 from services.strategy_versions import (
     StrategyVersion,
     register_strategy_version,
@@ -42,17 +44,17 @@ def _register_tuned_v2_candidate(name: str, profile_overrides: dict[str, dict]) 
 
     def _with_overrides(fn):
         def wrapped(*args, **kwargs):
-            saved = {k: dataclasses.replace(v) for k, v in led_mod.DESK_PROFILES.items()}
+            saved = {k: dataclasses.replace(v) for k, v in DESK_PROFILES.items()}
             try:
                 for desk, updates in profile_overrides.items():
-                    if desk in led_mod.DESK_PROFILES:
-                        led_mod.DESK_PROFILES[desk] = dataclasses.replace(
-                            led_mod.DESK_PROFILES[desk], **updates
+                    if desk in DESK_PROFILES:
+                        DESK_PROFILES[desk] = dataclasses.replace(
+                            DESK_PROFILES[desk], **updates
                         )
                 return fn(*args, **kwargs)
             finally:
-                led_mod.DESK_PROFILES.clear()
-                led_mod.DESK_PROFILES.update(saved)
+                DESK_PROFILES.clear()
+                DESK_PROFILES.update(saved)
         return wrapped
 
     register_strategy_version(
