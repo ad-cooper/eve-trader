@@ -17,24 +17,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from services.esi import ESI_BASE_URL, REGION_THE_FORGE, JITA_STATION_ID, create_esi_session
 from services.analytics_db import open_analytics_connection
-from services.exclusions import is_item_excluded, load_active_blacklist
+from services.exclusions import is_item_excluded, load_active_blacklist, matches_sniper_banned_name_substring
 from services.market import evaluate_deal_opportunity
-
-BANNED_NAME_PATTERNS = [
-    "' Modified ",
-    "Mutaplasmid",
-    "Accelerator",
-    "Background",
-    "Filament",
-    "Blueprint",
-    "Skin",
-]
-
-
-def is_banned_item(name: str) -> bool:
-    low = name.lower()
-    return any(pat.lower() in low for pat in BANNED_NAME_PATTERNS)
-
 
 def get_candidate_universe(scan_limit: int = 1200) -> dict[int, dict]:
     candidates: dict[int, dict] = {}
@@ -70,7 +54,7 @@ def get_candidate_universe(scan_limit: int = 1200) -> dict[int, dict]:
 
     bl_items, bl_groups, bl_meta = load_active_blacklist()
     for tid, name, daily_vol, median_30d in rows:
-        if is_banned_item(name) or is_item_blacklisted(name, "", bl_items, bl_groups, bl_meta):
+        if matches_sniper_banned_name_substring(name) or is_item_excluded(name, "", bl_items, bl_groups, bl_meta):
             continue
         candidates[int(tid)] = {
             "type_id": int(tid),

@@ -25,6 +25,20 @@ EXCLUDED_CATEGORY_NAMES: tuple[str, ...] = (
 )
 EXCLUDED_NAME_REGEX: str = r"Modified|Voucher|Token|Certificate"
 
+SNIPER_BANNED_NAME_SUBSTRINGS: tuple[str, ...] = (
+    "' Modified ",
+    "Mutaplasmid",
+    "Accelerator",
+    "Background",
+    "Filament",
+    "Blueprint",
+    "Skin",
+)
+
+def matches_sniper_banned_name_substring(name: str) -> bool:
+    """Returns True if `name` contains any configured banned item substring."""
+    low = str(name or "").lower()
+    return any(pat.lower() in low for pat in BANNED_NAME_SUBSTRINGS)
 
 def sql_excluded_market_groups_clause(col: str = "t.marketGroupID") -> str:
     ids_csv = ", ".join(str(int(gid)) for gid in EXCLUDED_MARKET_GROUP_IDS)

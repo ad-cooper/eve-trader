@@ -211,7 +211,7 @@ def _get_jita_high_velocity_candidates(
     for tid, name, raw_vol, gid, gname, d_units, d_isk in rows:
         name_s = str(name)
         grp_s = str(gname)
-        if is_item_blacklisted(name_s, grp_s, bl_items, bl_groups, bl_meta):
+        if is_item_excluded(name_s, grp_s, bl_items, bl_groups, bl_meta):
             continue
         m3 = PACKAGED_SHIP_M3.get(int(gid), float(raw_vol or 0.01))
         meta[int(tid)] = {
