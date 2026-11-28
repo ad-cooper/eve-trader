@@ -87,9 +87,11 @@ def select_desk_candidates(
             * (log_weight_base + candidates["daily_turnover_m"].clip(lower=0.0).map(math.log1p))
         )
     elif desk_type == "tactical":
+        turnover_factor = (candidates["daily_turnover_m"] / 1000.0).clip(lower=0.1, upper=5.0)
         candidates["swing_score"] = (
             candidates["dump_freq_pct"]
             * net_spread
+            * turnover_factor
             * (log_weight_base + deployable_m.clip(lower=0.0).map(math.log1p))
         )
     else:
