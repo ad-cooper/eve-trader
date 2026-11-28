@@ -1,7 +1,10 @@
+import duckdb
 import os
 import re
+
 from contextlib import contextmanager
-import duckdb
+
+from services.analytics_db import open_analytics_connection
 from constants import (
     DUCKDB_PATH,
     SQLITE_PATH
@@ -32,14 +35,10 @@ def resolve_type_ids(type_ids: list[int]) -> dict[int, str]:
     clean_ids = sorted({int(t) for t in (type_ids or []) if str(t).isdigit()})
     if not clean_ids:
         return {}
-    try:
-        with open_analytics_connection(read_only=True, attach_sde=True) as con:
-            id_str = ",".join(str(t) for t in clean_ids)
-            rows = con.execute(f"SELECT typeID, typeName FROM sde.invTypes WHERE typeID IN ({id_str})").fetchall()
-            return {int(r[0]): str(r[1]) for r in rows}
-    except Exception:
-        return {}
-
+    with open_analytics_connection(read_only=True, attach_sde=True) as con:
+        id_str = ",".join(str(t) for t in clean_ids)
+        rows = con.execute(f"SELECT typeID, typeName FROM sde.invTypes WHERE typeID IN ({id_str})").fetchall()
+        return {int(r[0]): str(r[1]) for r in rows}
 
 def resolve_type_names(names: list[str], case_insensitive: bool = False) -> dict[str, int]:
     """Maps SDE typeName -> integer typeID."""

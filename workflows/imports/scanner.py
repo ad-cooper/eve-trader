@@ -138,7 +138,7 @@ def _get_jita_high_velocity_candidates(
     plus any extra_tids with proven local staging burn rates.
     """
     bl_items, bl_groups, bl_meta = load_active_blacklist()
-    with connect_analytics(read_only=True, attach_sde=True) as con:
+    with open_analytics_connection(read_only=True, attach_sde=True) as con:
         allowed_cats = ",".join(f"'{c}'" for c in ALLOWED_SDE_CATEGORIES)
         excl_metas = ",".join(str(m) for m in EXCLUDED_META_GROUPS)
         excl_tids = ",".join(str(t) for t in EXCLUDED_TYPE_IDS)

@@ -3,7 +3,7 @@ from services.storage import read_json, write_json
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict, deque
 from services.esi import fetch_wallet_transactions
-
+from services.sde import resolve_type_ids
 from constants import (
     BUY_SCC_SURCHARGE,
     PERF_CACHE_FILE,
@@ -206,9 +206,6 @@ def match_fifo_lots(
 
     return closed_lots
 
-
-from services.sde import resolve_type_ids as get_item_names
-
 def calculate_performance():
     transactions = fetch_wallet_transactions()
     if not transactions:
@@ -216,7 +213,7 @@ def calculate_performance():
 
     transactions.sort(key=lambda x: x["date"])
     type_ids = [tx["type_id"] for tx in transactions]
-    name_map = get_item_names(type_ids)
+    name_map = resolve_type_ids(type_ids)
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=30)

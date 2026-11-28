@@ -20,6 +20,9 @@ import duckdb
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from contextlib import contextmanager
+import services.analytics_db as analytics_db
+
 import scripts.generate_ledgers as gen_led
 import services.exclusions as bl_mod
 import services.sde as sde_mod
@@ -294,18 +297,23 @@ def main(history_days: int = 195) -> None:
     dst_sq.close()
 
     # 2. SWITCH PATHS, CONNECTIONS & JSON LOADERS TO FIXTURE INPUTS, THEN CALL load_market_universe()
-    @context_manager
-    def _fixture_connect_analytics(read_only: bool = False, attach_sde: bool = True):
+    @contextmanager
+    def _fixture_open_analytics_connection(read_only: bool = False, attach_sde: bool = True):
         os.makedirs(inputs_dir, exist_ok=True)
         con = duckdb.connect(str(fixture_duck), read_only=read_only)
-        if attach_sde and fixture_sqlite.exists():
-            con.execute(f"ATTACH '{fixture_sqlite}' AS sde (TYPE SQLITE);")
-        yield con
+        try:
+            if attach_sde and fixture_sqlite.exists():
+                con.execute(f"ATTACH '{fixture_sqlite}' AS sde (TYPE SQLITE);")
+            yield con
+        finally:
+            con.close()
 
     gen_led.SQLITE_PATH = str(fixture_sqlite)
     gen_led.DUCKDB_PATH = str(fixture_duck)
     sde_mod.SQLITE_PATH = str(fixture_sqlite)
     sde_mod.DUCKDB_PATH = str(fixture_duck)
+    analytics_db.DUCKDB_PATH = str(fixture_duck)
+    analytics_db.SQLITE_PATH = str(fixture_sqlite)
     bl_mod.BLACKLIST_FILE = str(inputs_dir / "temporary_blacklist.json")
 
     telemetry = json.loads((inputs_dir / "market_prices_cache.json").read_text(encoding="utf-8"))
@@ -314,7 +322,8 @@ def main(history_days: int = 195) -> None:
     perf_data = json.loads((inputs_dir / "performance_cache.json").read_text(encoding="utf-8"))
     bl_tuple = bl_mod.load_active_blacklist()
 
-    orig_gen_connect = analytics_db.open_analytics_connection
+    orig_analytics_conn = analytics_db.open_analytics_connection
+    orig_gen_conn = getattr(gen_led, "open_analytics_connection", None)
     orig_read_json = gen_led.read_json
     orig_load_bl = gen_led.load_active_blacklist
     orig_get_ver_out_dir = strat_mod.get_version_output_dir
@@ -331,7 +340,9 @@ def main(history_days: int = 195) -> None:
             return telemetry
         return orig_read_json(path, default=default)
 
-    gen_led.connect_analytics = _fixture_connect_analytics
+    analytics_db.open_analytics_connection = _fixture_open_analytics_connection
+    if orig_gen_conn is not None:
+        gen_led.open_analytics_connection = _fixture_open_analytics_connection
     gen_led.read_json = _fixture_read_json
     gen_led.load_active_blacklist = lambda: bl_tuple
 
@@ -356,7 +367,9 @@ def main(history_days: int = 195) -> None:
                 snapshot_time=FIXED_SNAPSHOT,
             )
     finally:
-        gen_led.connect_analytics = orig_gen_connect
+        analytics_db.open_analytics_connection = orig_analytics_conn
+        if orig_gen_conn is not None:
+            gen_led.open_analytics_connection = orig_gen_conn
         gen_led.read_json = orig_read_json
         gen_led.load_active_blacklist = orig_load_bl
         strat_mod.get_version_output_dir = orig_get_ver_out_dir

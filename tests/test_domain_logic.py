@@ -525,3 +525,20 @@ def test_missing_buys_uses_hold_recovery_target_and_skips_buried_margin_caps(mon
     assert res["items"][0]["type_id"] == 6001
     assert res["items"][0]["recommended_buy"] == 145_200_000.0
     assert res["items"][0]["squeezed"] is False
+
+def test_performance_item_name_resolution_diagnostic(monkeypatch, tmp_path):
+    import services.sde as sde_mod
+
+    # 1. Check raw SDE resolution for sample IDs from your performance table
+    sample_ids = [11558, 13920, 13924, 13960]
+    resolved = sde_mod.resolve_type_ids(sample_ids)
+    print("resolve_type_ids result:", resolved)
+
+    assert resolved, (
+        "resolve_type_ids returned empty; check open_analytics_connection(read_only=True, attach_sde=True) "
+        "and whether sde.invTypes is attached/populated."
+    )
+    for tid in sample_ids:
+        assert tid in resolved and resolved[tid] and not str(resolved[tid]).startswith("Type "), (
+            f"Missing or fallback name for type_id={tid}: {resolved.get(tid)!r}"
+        )
