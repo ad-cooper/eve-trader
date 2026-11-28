@@ -3,7 +3,9 @@ import json
 import pandas as pd
 
 from constants import (
-    MARKET_CACHE_FILE
+    LEDGER_DIR,
+    MARKET_CACHE_FILE,
+    ORDERS_CACHE_FILE
 )
 
 def read_json(path: str, default=None):
@@ -39,9 +41,24 @@ def read_csv_records(path: str) -> list[dict]:
     except Exception:
         return []
 
-
-
-
 def load_market_prices_cache() -> dict:
     """Safely loads the cached live market prices JSON."""
     return read_json(MARKET_CACHE_FILE, default={})
+
+def load_sniper_deals() -> list:
+    data = read_json("ledgers/sniper_deals.json", default=[])
+    return data if isinstance(data, list) else data.get("deals", [])
+
+
+def load_desk_csv(filename: str) -> list[dict]:
+    return read_csv_records(os.path.join(LEDGER_DIR, filename))
+
+def load_all_desk_ledgers() -> dict[str, list[dict]]:
+    return {
+        "evergreen": load_desk_csv("evergreen_ledger.csv"),
+        "tactical": load_desk_csv("tactical_ledger.csv"),
+        "hold": load_desk_csv("hold_ledger.csv"),
+    }
+
+def load_cached_orders() -> dict:
+    return read_json(ORDERS_CACHE_FILE, default={"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0})

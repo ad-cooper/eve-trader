@@ -2,28 +2,21 @@ import math
 import os
 import pandas as pd
 
-from constants import (
-    LEDGER_DIR,
-    MARKET_CACHE_FILE,
-    ORDERS_CACHE_FILE,
-    OUTPUT_DIR,
-)
 from services.accounting import (
     calc_line_financials,
-    calc_max_profitable_buy,
     calc_net_proceeds,
     calc_projected_margin,
     calc_unit_cost,
 )
-from services.desk import (
-    Desk,
-    IncumbentState,
-    resolve_desk_incumbents
+from services.desk import Desk, IncumbentState, resolve_desk_incumbents
+from services.desk_config import DESK_PROFILES, DeskProfile
+from services.storage import (
+    load_desk_csv,
+    load_market_prices_cache, 
+    load_cached_orders,
+    read_csv_records, 
+    read_json
 )
-from services.desk_config import DESK_PROFILES, DeskProfile, LiveOrderPricing
-from services.esi import get_14d_average_volume
-from services.exclusions import build_static_exclusion_mask, is_item_excluded, load_active_blacklist
-from services.storage import load_market_prices_cache, read_csv_records, read_json
 
 def _resolve_desk_context(
     desk: Desk | str | None = None,
@@ -40,6 +33,7 @@ def _resolve_desk_context(
     resolved_type = str(raw_type or "evergreen").strip().lower()
     resolved_profile = cfg or profile or Desk.get_desk_profile(resolved_type)
     return resolved_type, resolved_profile
+
 
 def select_desk_candidates(
     df: pd.DataFrame,
@@ -317,6 +311,7 @@ def compute_line_sizing(
         "profit": net_profit_unit * qty,
     }
 
+
 def get_desk_claimed_type_ids(include_active_orders: bool = True) -> set[int]:
     """Returns all type_ids currently managed by Jita desks (CSVs + active Jita orders)."""
     tids: set[int] = set()
@@ -335,47 +330,4 @@ def get_desk_claimed_type_ids(include_active_orders: bool = True) -> set[int]:
                     tids.add(int(k))
     return tids
 
-
-def is_item_blacklisted(
-    name: str,
-    group_name: str,
-    bl_items: set,
-    bl_groups: set,
-    bl_meta: dict,
-) -> bool:
-    """Checks exact item/group exclusions plus active regex patterns from temporary_blacklist.json."""
-    return is_item_excluded(
-        name=name,
-        group_name=group_name,
-        category_name="",
-        bl_items=bl_items,
-        bl_groups=bl_groups,
-        bl_meta=bl_meta,
-        check_default_categories=False,
-        check_default_name_regex=False,
-    )
-
-
-def load_desk_csv(filename: str) -> list[dict]:
-    return read_csv_records(os.path.join(LEDGER_DIR, filename))
-
-
-def load_all_desk_ledgers() -> dict[str, list[dict]]:
-    return {
-        "evergreen": load_desk_csv("evergreen_ledger.csv"),
-        "tactical": load_desk_csv("tactical_ledger.csv"),
-        "hold": load_desk_csv("hold_ledger.csv"),
-    }
-
-
-def load_cached_orders() -> dict:
-    return read_json(ORDERS_CACHE_FILE, default={"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0})
-
-
-def load_sniper_deals() -> list:
-    data = read_json("ledgers/sniper_deals.json", default=[])
-    return data if isinstance(data, list) else data.get("deals", [])
-
-
-
-
+get_desk_profile = Desk.get_desk_profile

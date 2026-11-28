@@ -15,7 +15,8 @@ from services.esi import (
     resolve_primary_character,
     resolve_role_character,
 )
-from services.ledgers import get_desk_claimed_type_ids, is_item_blacklisted
+from services.exclusions import is_item_excluded
+from services.ledgers import get_desk_claimed_type_ids
 from services.market import ensure_jita_asks, fetch_station_asks_bulk
 from services.sde import PACKAGED_SHIP_M3, resolve_sde_items
 from services.analytics_db import open_analytics_connection

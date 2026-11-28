@@ -4,18 +4,20 @@ from services.accounting import (
     eve_tick,
     round_down_eve,
     calc_net_proceeds,
-    calc_unit_cost,
-    TOTAL_EXIT_FEE as EXIT_FEE_JITA,
+    calc_unit_cost
 )
 from services.desk import Desk
 from services.esi import (
     load_cached_assets,
     fetch_character_assets,
     fetch_character_orders,
-    JITA_STATION_ID,
     create_esi_session as create_session,
 )
-from services.ledgers import ORDERS_CACHE_FILE
+from constants import (
+    JITA_STATION_ID,
+    ORDERS_CACHE_FILE,
+    TOTAL_EXIT_FEE as EXIT_FEE_JITA
+)
 from services.sde import (
     parse_eve_item_lines as parse_multisell_export_text,
     resolve_type_names,
