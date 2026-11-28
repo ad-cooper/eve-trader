@@ -1,20 +1,17 @@
 import math
-import os
 import pandas as pd
 
 from services.accounting import (
-    calc_line_financials,
     calc_net_proceeds,
     calc_projected_margin,
     calc_unit_cost,
 )
-from services.desk import Desk, IncumbentState, resolve_desk_incumbents
+from services.desk import Desk, IncumbentState
 from services.desk_config import DESK_PROFILES, DeskProfile
 from services.storage import (
     load_desk_csv,
     load_market_prices_cache, 
     load_cached_orders,
-    read_csv_records, 
     read_json
 )
 

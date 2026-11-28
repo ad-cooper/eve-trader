@@ -3,12 +3,11 @@ import time
 from services.accounting import (
     calc_line_financials,
     calc_max_profitable_buy,
-    calc_net_proceeds,
     calc_projected_margin,
     calc_unit_cost,
 )
 from services.desk import Desk
-from services.desk_config import DeskProfile, LiveOrderPricing
+from services.desk_config import LiveOrderPricing
 from services.esi import get_14d_average_volume
 from services.exclusions import load_active_blacklist
 from services.storage import (

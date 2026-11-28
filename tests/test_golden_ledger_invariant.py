@@ -8,8 +8,10 @@ import duckdb
 import pandas as pd
 import pytest
 
+import constants
 import services.analytics_db as analytics_db
 import scripts.generate_ledgers as gen_led
+import services.storage
 import services.exclusions as bl_mod
 import services.sde as sde_mod
 
@@ -85,7 +87,7 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     fixture_perf = json.loads((work_dir / "inputs" / "performance_cache.json").read_text(encoding="utf-8"))
     fixture_telemetry = json.loads((work_dir / "inputs" / "market_prices_cache.json").read_text(encoding="utf-8"))
 
-    orig_read_json = gen_led.read_json
+    orig_read_json = services.storage.read_json
 
     def _fixture_read_json(path, default=None):
         p = str(path)
@@ -103,9 +105,9 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     monkeypatch.setattr(gen_led, "SQLITE_PATH", str(fixture_sqlite))
     monkeypatch.setattr(gen_led, "DUCKDB_PATH", str(temp_duck))
     monkeypatch.setattr(gen_led, "OUTPUT_DIR", str(actual_out))
-    monkeypatch.setattr(gen_led, "MARKET_CACHE_FILE", str(work_dir / "inputs" / "market_prices_cache.json"))
+    monkeypatch.setattr(constants, "MARKET_CACHE_FILE", str(work_dir / "inputs" / "market_prices_cache.json"))
     monkeypatch.setattr(analytics_db, "open_analytics_connection", _open_analytics_connection)
-    monkeypatch.setattr(gen_led, "read_json", _fixture_read_json)
+    monkeypatch.setattr(services.storage, "read_json", _fixture_read_json)
     monkeypatch.setattr("services.ledgers.read_json", _fixture_read_json)
     monkeypatch.setattr(sde_mod, "SQLITE_PATH", str(fixture_sqlite))
     monkeypatch.setattr(sde_mod, "DUCKDB_PATH", str(temp_duck))

@@ -1,7 +1,6 @@
 import pandas as pd
-from services.desk import Desk
+from services.desk import Desk, resolve_desk_incumbents
 from services.ledgers import (
-    resolve_desk_incumbents,
     select_desk_candidates,
     compute_candidate_pricing,
     compute_line_sizing,

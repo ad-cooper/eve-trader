@@ -23,15 +23,11 @@ from constants import (
     DEFAULT_FALLBACK_BUDGET,
     DESK_ORDER,
     DUCKDB_PATH,
-    MARKET_CACHE_FILE,
     OUTPUT_DIR,
     SQLITE_PATH,
 )
-from services.desk import Desk
-from services.desk_config import BUDGET_FILL_STOP_RATIO, DESK_PROFILES
-from services.ledgers import (
-    IncumbentState
-)
+from services.desk import Desk, IncumbentState
+from services.desk_config import BUDGET_FILL_STOP_RATIO
 from services.market_universe import (
     build_universe_exclusion_mask,
     load_market_universe    
@@ -39,7 +35,6 @@ from services.market_universe import (
 from services.market import (
     load_cached_market_telemetry
 )
-from services.storage import read_json
 from services.strategy_versions import (
     StrategyVersion,
     get_active_strategy_version,
