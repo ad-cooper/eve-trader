@@ -62,3 +62,21 @@ def load_all_desk_ledgers() -> dict[str, list[dict]]:
 
 def load_cached_orders() -> dict:
     return read_json(ORDERS_CACHE_FILE, default={"buys": {}, "sells": {}, "count": 0, "total_escrow": 0.0})
+
+def get_desk_claimed_type_ids(include_active_orders: bool = True) -> set[int]:
+    """Returns all type_ids currently managed by Jita desks (CSVs + active Jita orders)."""
+    tids: set[int] = set()
+    for fname in ("evergreen_ledger.csv", "tactical_ledger.csv", "hold_ledger.csv"):
+        for row in load_desk_csv(fname):
+            if row.get("type_id"):
+                try:
+                    tids.add(int(row["type_id"]))
+                except (ValueError, TypeError):
+                    pass
+    if include_active_orders:
+        orders = load_cached_orders() or {}
+        for bucket in ("buys", "sells"):
+            for k in (orders.get(bucket) or {}).keys():
+                if str(k).isdigit():
+                    tids.add(int(k))
+    return tids
