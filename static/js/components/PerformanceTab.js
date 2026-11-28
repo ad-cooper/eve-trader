@@ -88,16 +88,18 @@ export function PerformanceTab({ performance }) {
 
   const k = performance?.kpis || {};
 
-  const filteredItems = useMemo(() => {
+const filteredItems = useMemo(() => {
     let items = (performance?.items || []).filter(it => Math.abs(it.profit) >= minThreshold);
     if (filterMode === 'winners') {
       items = items
         .filter(it => it.profit > 0)
-        .sort((a, b) => (a.name || a.type_name || '').localeCompare(b.name || b.type_name || ''));
+        .sort((a, b) => b.profit - a.profit);
     } else if (filterMode === 'losers') {
-      items = items.filter(it => it.profit < 0).sort((a, b) => a.profit - b.profit);
+      items = items
+        .filter(it => it.profit < 0)
+        .sort((a, b) => a.profit - b.profit);
     } else {
-      items = [...items].sort((a, b) => (a.name || a.type_name || '').localeCompare(b.name || b.type_name || ''));
+      items = [...items].sort((a, b) => b.profit - a.profit);
     }
     return items;
   }, [performance, filterMode, minThreshold]);
