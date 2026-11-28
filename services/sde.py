@@ -45,24 +45,20 @@ def resolve_type_names(names: list[str], case_insensitive: bool = False) -> dict
     clean_names = sorted({str(n).strip() for n in (names or []) if str(n).strip()})
     if not clean_names:
         return {}
-    try:
-        with open_analytics_connection(read_only=True, attach_sde=True) as con:
-            if case_insensitive:
-                quoted = ",".join("'" + n.lower().replace("'", "''") + "'" for n in clean_names)
-                rows = con.execute(
-                    f"SELECT typeID, typeName FROM sde.invTypes WHERE LOWER(typeName) IN ({quoted})"
-                ).fetchall()
-                by_lower = {str(r[1]).lower(): int(r[0]) for r in rows}
-                return {n: by_lower[n.lower()] for n in clean_names if n.lower() in by_lower}
-            else:
-                quoted = ",".join("'" + n.replace("'", "''") + "'" for n in clean_names)
-                rows = con.execute(
-                    f"SELECT typeID, typeName FROM sde.invTypes WHERE typeName IN ({quoted})"
-                ).fetchall()
-                return {str(r[1]): int(r[0]) for r in rows}
-    except Exception:
-        return {}
-
+    with open_analytics_connection(read_only=True, attach_sde=True) as con:
+        if case_insensitive:
+            quoted = ",".join("'" + n.lower().replace("'", "''") + "'" for n in clean_names)
+            rows = con.execute(
+                f"SELECT typeID, typeName FROM sde.invTypes WHERE LOWER(typeName) IN ({quoted})"
+            ).fetchall()
+            by_lower = {str(r[1]).lower(): int(r[0]) for r in rows}
+            return {n: by_lower[n.lower()] for n in clean_names if n.lower() in by_lower}
+        else:
+            quoted = ",".join("'" + n.replace("'", "''") + "'" for n in clean_names)
+            rows = con.execute(
+                f"SELECT typeID, typeName FROM sde.invTypes WHERE typeName IN ({quoted})"
+            ).fetchall()
+            return {str(r[1]): int(r[0]) for r in rows}
 
 def resolve_sde_items(
     names: list[str] | None = None,
@@ -79,35 +75,32 @@ def resolve_sde_items(
 
     by_tid: dict[int, dict] = {}
     by_name: dict[str, dict] = {}
-    try:
-        with open_analytics_connection(read_only=True, attach_sde=True) as con:
-            clauses = []
-            if clean_names:
-                in_names = ",".join("'" + n.lower().replace("'", "''") + "'" for n in clean_names)
-                clauses.append(f"LOWER(t.typeName) IN ({in_names})")
-            if clean_tids:
-                in_tids = ",".join(str(t) for t in clean_tids)
-                clauses.append(f"t.typeID IN ({in_tids})")
+    with open_analytics_connection(read_only=True, attach_sde=True) as con:
+        clauses = []
+        if clean_names:
+            in_names = ",".join("'" + n.lower().replace("'", "''") + "'" for n in clean_names)
+            clauses.append(f"LOWER(t.typeName) IN ({in_names})")
+        if clean_tids:
+            in_tids = ",".join(str(t) for t in clean_tids)
+            clauses.append(f"t.typeID IN ({in_tids})")
 
-            rows = con.execute(f"""
-                SELECT t.typeID, t.typeName, t.volume, t.groupID, COALESCE(g.groupName, '')
-                FROM sde.invTypes t
-                LEFT JOIN sde.invGroups g ON t.groupID = g.groupID
-                WHERE ({' OR '.join(clauses)})
-            """).fetchall()
+        rows = con.execute(f"""
+            SELECT t.typeID, t.typeName, t.volume, t.groupID, COALESCE(g.groupName, '')
+            FROM sde.invTypes t
+            LEFT JOIN sde.invGroups g ON t.groupID = g.groupID
+            WHERE ({' OR '.join(clauses)})
+        """).fetchall()
 
-            for tid, tname, raw_vol, gid, gname in rows:
-                rec = {
-                    "type_id": int(tid),
-                    "name": str(tname),
-                    "unit_m3": get_packaged_m3(gid, raw_vol),
-                    "group_id": int(gid) if gid is not None else 0,
-                    "group_name": str(gname),
-                }
-                by_tid[int(tid)] = rec
-                by_name[str(tname).lower()] = rec
-    except Exception:
-        pass
+        for tid, tname, raw_vol, gid, gname in rows:
+            rec = {
+                "type_id": int(tid),
+                "name": str(tname),
+                "unit_m3": get_packaged_m3(gid, raw_vol),
+                "group_id": int(gid) if gid is not None else 0,
+                "group_name": str(gname),
+            }
+            by_tid[int(tid)] = rec
+            by_name[str(tname).lower()] = rec
 
     return by_tid, by_name
 
@@ -120,42 +113,38 @@ def get_latest_ledger_targets(type_ids: list[int]) -> dict[int, dict]:
     clean_ids = sorted({int(t) for t in (type_ids or []) if str(t).isdigit()})
     if not clean_ids:
         return {}
-    try:
-        with open_analytics_connection(read_only=True, attach_sde=False) as con:
-            has_table = con.execute(
-                "SELECT count(*) FROM information_schema.tables WHERE table_name = 'ledger_history'"
-            ).fetchone()[0]
-            if has_table == 0:
-                return {}
-            id_str = ",".join(str(t) for t in clean_ids)
-            rows = con.execute(f"""
-                WITH RankedHistory AS (
-                    SELECT
-                        type_id,
-                        name,
-                        desk_type,
-                        target_buy,
-                        target_sell,
-                        ROW_NUMBER() OVER(PARTITION BY type_id ORDER BY snapshot_time DESC) AS rn
-                    FROM ledger_history
-                    WHERE type_id IN ({id_str})
-                )
-                SELECT type_id, name, desk_type, target_buy, target_sell
-                FROM RankedHistory
-                WHERE rn = 1;
-            """).fetchall()
-            return {
-                int(r[0]): {
-                    "name": str(r[1]),
-                    "desk": str(r[2]).upper(),
-                    "target_buy": float(r[3] or 0.0),
-                    "target_sell": float(r[4] or 0.0),
-                }
-                for r in rows
+    with open_analytics_connection(read_only=True, attach_sde=False) as con:
+        has_table = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'ledger_history'"
+        ).fetchone()[0]
+        if has_table == 0:
+            return {}
+        id_str = ",".join(str(t) for t in clean_ids)
+        rows = con.execute(f"""
+            WITH RankedHistory AS (
+                SELECT
+                    type_id,
+                    name,
+                    desk_type,
+                    target_buy,
+                    target_sell,
+                    ROW_NUMBER() OVER(PARTITION BY type_id ORDER BY snapshot_time DESC) AS rn
+                FROM ledger_history
+                WHERE type_id IN ({id_str})
+            )
+            SELECT type_id, name, desk_type, target_buy, target_sell
+            FROM RankedHistory
+            WHERE rn = 1;
+        """).fetchall()
+        return {
+            int(r[0]): {
+                "name": str(r[1]),
+                "desk": str(r[2]).upper(),
+                "target_buy": float(r[3] or 0.0),
+                "target_sell": float(r[4] or 0.0),
             }
-    except Exception:
-        return {}
-
+            for r in rows
+        }
 
 def parse_eve_item_lines(raw_text: str) -> list[dict]:
     """

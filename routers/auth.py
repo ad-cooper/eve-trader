@@ -1,8 +1,8 @@
 import threading
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, RedirectResponse
-
-from services.esi import get_auth_url, exchange_auth_code, fetch_character_orders
+from services.esi import fetch_character_orders
+from services.sso import get_auth_url, exchange_auth_code
 from services.accounting import calculate_performance
 from workflows.scheduler import refresh_import_opportunities_job
 

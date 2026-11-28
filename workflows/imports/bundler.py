@@ -3,10 +3,7 @@ import math
 import os
 
 from services.esi import (
-    create_esi_session as create_session,
-    fetch_character_locations_stock,
-    resolve_primary_character,
-    resolve_role_character,
+    create_esi_session as create_session
 )
 from services.market import ensure_jita_asks
 from services.sde import parse_eve_item_lines as _parse_eve_item_lines, resolve_sde_items

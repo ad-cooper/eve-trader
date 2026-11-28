@@ -91,19 +91,13 @@ class Desk:
     def claimed_ids_from_csv(self) -> set[int]:
         if not os.path.exists(self.ledger_path):
             return set()
-        try:
-            df = pd.read_csv(self.ledger_path)
-            return set(df["type_id"].dropna().astype(int).tolist())
-        except Exception:
-            return set()
+        df = pd.read_csv(self.ledger_path)
+        return set(df["type_id"].dropna().astype(int).tolist())
 
     def existing_state(self) -> tuple[list[int], float]:
         if not os.path.exists(self.ledger_path):
             return [], 0.0
-        try:
-            df_existing = pd.read_csv(self.ledger_path)
-        except Exception:
-            return [], 0.0
+        df_existing = pd.read_csv(self.ledger_path)
         if df_existing.empty or "type_id" not in df_existing.columns:
             return [], 0.0
         ids = df_existing["type_id"].dropna().astype(int).tolist()
@@ -144,12 +138,9 @@ class Desk:
         for dname in DESK_PROFILES:
             prior_path = os.path.join(self.ledger_dir, f"{dname}_ledger.csv")
             if os.path.exists(prior_path):
-                try:
-                    pdf = pd.read_csv(prior_path)
-                    for tid in pdf["type_id"].dropna().astype(int).tolist():
-                        prior_desks[int(tid)] = dname
-                except Exception:
-                    pass
+                pdf = pd.read_csv(prior_path)
+                for tid in pdf["type_id"].dropna().astype(int).tolist():
+                    prior_desks[int(tid)] = dname
 
         self._positions_cache = (buys, sells, assets, prior_desks)
         return self._positions_cache

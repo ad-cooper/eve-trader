@@ -4,20 +4,23 @@ import time
 import base64
 import urllib.parse
 import requests
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from services.sso import (
+    get_valid_access_token,
+    load_sso_tokens
+)
 from services.storage import read_json, write_json
 
 from constants import (
     ASSETS_CACHE_FILE,
     CALLBACK_URL,
     CLIENT_ID,
-    CLIENT_SECRET,
     ESI_BASE_URL,
     ESI_HEADERS,
     EVE_AUTH_URL,
-    EVE_TOKEN_URL,
     HISTORY_CACHE_FILE,
     ORDERS_CACHE_FILE,
     JITA_STATION_ID,
@@ -26,11 +29,51 @@ from constants import (
     PERIMETER_SYSTEM_ID,
     REGION_THE_FORGE,
     SCOPES,
-    SSO_TOKEN_FILE,
     WALLET_CACHE_FILE,
     WALLET_TX_CACHE_FILE
 )
 
+_ESI_SESSION: requests.Session | None = None
+_ESI_SESSION_LOCK = threading.Lock()
+
+def _esi_request_json(
+    method: str,
+    url: str,
+    *,
+    session: requests.Session | None = None,
+    headers: dict | None = None,
+    params: dict | None = None,
+    json_payload: object = None,
+    data: dict | None = None,
+    timeout: float | tuple[float, float] = 10.0,
+    context: str = "",
+    response_type: str = "json",
+):
+    client = session if session is not None else get_esi_session()
+    req_headers = dict(ESI_HEADERS)
+    if headers:
+        req_headers.update(headers)
+    label = context or url
+    try:
+        res = client.request(
+            method=method.upper(),
+            url=url,
+            headers=req_headers,
+            params=params,
+            json=json_payload,
+            data=data,
+            timeout=timeout,
+        )
+        if res.status_code != 200:
+            print(f"[!] ESI {method.upper()} HTTP {res.status_code} ({label}): {res.text[:200]}")
+            return None
+        if response_type == "text":
+            return res.text
+        return res.json()
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        print(f"[!] ESI {method.upper()} failed ({label}): {exc}")
+        return None
+    
 def create_esi_session() -> requests.Session:
     session = requests.Session()
     retries = Retry(total=2, backoff_factor=0.2, status_forcelist=[500, 502, 503, 504])
@@ -39,237 +82,23 @@ def create_esi_session() -> requests.Session:
     session.headers.update({"User-Agent": "EVE-Desk-ESIClient/2.0"})
     return session
 
+def get_esi_session() -> requests.Session:
+    """Returns a shared module-level ESI session, initializing it lazily."""
+    global _ESI_SESSION
+    if _ESI_SESSION is not None:
+        return _ESI_SESSION
+    with _ESI_SESSION_LOCK:
+        if _ESI_SESSION is None:
+            _ESI_SESSION = create_esi_session()
+    return _ESI_SESSION
 
-def get_auth_url(state: str = "primary") -> str:
-    params = {
-        "response_type": "code",
-        "redirect_uri": CALLBACK_URL,
-        "client_id": CLIENT_ID,
-        "scope": SCOPES,
-        "state": state or "primary",
-    }
-    return f"{EVE_AUTH_URL}?{urllib.parse.urlencode(params)}"
-
-def get_basic_auth_header():
-    creds = f"{CLIENT_ID}:{CLIENT_SECRET}"
-    return {"Authorization": f"Basic {base64.b64encode(creds.encode('utf-8')).decode('utf-8')}"}
-
-def decode_jwt_payload(token: str) -> dict:
-    parts = token.split(".")
-    if len(parts) < 2:
-        return {}
-    payload = parts[1] + "=" * (-len(parts[1]) % 4)
-    return json.loads(base64.urlsafe_b64decode(payload))
-
-def _read_sso_array() -> list[dict]:
-    if not os.path.exists(SSO_TOKEN_FILE):
-        return []
-    try:
-        with open(SSO_TOKEN_FILE, "r") as f:
-            raw = json.load(f)
-        if isinstance(raw, list):
-            return [x for x in raw if isinstance(x, dict)]
-        if isinstance(raw, dict):
-            nested = raw.pop("characters", None)
-            arr = [raw] if raw.get("refresh_token") else []
-            if isinstance(nested, dict):
-                arr.extend(v for v in nested.values() if isinstance(v, dict))
-            return arr
-    except Exception:
-        pass
-    return []
-
-def load_sso_tokens(character_name: str = None):
-    arr = _read_sso_array()
-    if not arr:
-        return None
-    if not character_name:
-        return arr[0]
-    target = character_name.strip().lower()
-    for entry in arr:
-        if str(entry.get("character_name", "")).strip().lower() == target:
-            return entry
-    return None
-
-def save_sso_tokens(tokens: dict, character_name: str = None):
-    os.makedirs("ledgers", exist_ok=True)
-    arr = _read_sso_array()
-    target_id = tokens.get("character_id")
-    target_name = (character_name or tokens.get("character_name") or "").strip().lower()
-
-    updated = False
-    for idx, entry in enumerate(arr):
-        same_id = target_id and entry.get("character_id") == target_id
-        same_name = target_name and str(entry.get("character_name", "")).strip().lower() == target_name
-        if same_id or same_name:
-            arr[idx] = {**entry, **tokens}
-            updated = True
-            break
-
-    if not updated:
-        arr.append(dict(tokens))
-
-    with open(SSO_TOKEN_FILE, "w") as f:
-        json.dump(arr, f, indent=2)
-
-def get_valid_access_token(character_name: str = None):
-    tokens = load_sso_tokens(character_name)
-    if not tokens or "refresh_token" not in tokens:
-        return None
-
-    # Check if existing access token is still valid (with 90s safety margin)
-    existing_acc = tokens.get("access_token")
-    if existing_acc:
-        try:
-            claims = decode_jwt_payload(existing_acc)
-            exp = claims.get("exp", 0)
-            if exp > (time.time() + 90):
-                return existing_acc
-        except Exception:
-            pass
-    headers = {
-        **get_basic_auth_header(),
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Host": "login.eveonline.com"
-    }
-    data = {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}
-    label = character_name or tokens.get("character_name") or "primary"
-    try:
-        res = requests.post(EVE_TOKEN_URL, data=data, headers=headers, timeout=10)
-        if res.status_code == 200:
-            new_data = res.json()
-            tokens["access_token"] = new_data["access_token"]
-            tokens["refresh_token"] = new_data.get("refresh_token", tokens["refresh_token"])
-            save_sso_tokens(tokens, character_name)
-            return tokens["access_token"]
-        else:
-            print(f"[!] Token Refresh Rejected ({label}): HTTP {res.status_code} - {res.text}")
-    except Exception as e:
-        print(f"[!] Token refresh failed ({label}): {str(e)}")
-    return None
-
-def get_character_auth(character_name: str = None) -> tuple[str | None, int | None]:
-    """Returns (valid_access_token, character_id) for a pilot in the ledgers/sso_token.json array."""
-    tokens = load_sso_tokens(character_name)
-    if not tokens:
-        return None, None
-    access_token = get_valid_access_token(character_name)
-    char_id = tokens.get("character_id") or tokens.get("CharacterID")
-    if not char_id and access_token:
-        claims = decode_jwt_payload(access_token)
-        sub = claims.get("sub", "")
-        if ":" in sub:
-            char_id = int(sub.split(":")[-1])
-            tokens["character_id"] = char_id
-            if not tokens.get("character_name") and claims.get("name"):
-                tokens["character_name"] = claims["name"]
-            save_sso_tokens(tokens, character_name)
-    return access_token, int(char_id) if char_id else None
-
-
-
-
-def exchange_auth_code(code: str, role: str = "primary") -> dict:
-    """Exchanges an EVE SSO auth code for tokens, supporting both primary (index 0) and secondary roles."""
-    if not CLIENT_SECRET or CLIENT_SECRET == "YOUR_CLIENT_SECRET_HERE":
-        print("[!] CRITICAL: EVE_CLIENT_SECRET is missing or set to placeholder in docker-compose.yml!")
-        return {}
-
-    headers = {
-        **get_basic_auth_header(),
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Host": "login.eveonline.com",
-    }
-    data = {"grant_type": "authorization_code", "code": code}
-
-    try:
-        res = requests.post(EVE_TOKEN_URL, data=data, headers=headers, timeout=12)
-        if res.status_code != 200:
-            print(f"[!] CCP Token Exchange Rejected ({role}): HTTP {res.status_code} - {res.text}")
-            return {}
-
-        tokens = res.json()
-        claims = decode_jwt_payload(tokens["access_token"])
-        sub = claims.get("sub", "")
-        char_id = int(sub.split(":")[-1]) if ":" in sub else None
-        char_name = claims.get("name", "Unknown Pilot")
-
-        bundle = {
-            "access_token": tokens["access_token"],
-            "refresh_token": tokens["refresh_token"],
-            "token_type": tokens.get("token_type", "Bearer"),
-            "expires_at": time.time() + float(tokens.get("expires_in", 1199)),
-            "character_id": char_id,
-            "character_name": char_name,
-            "role": role or "primary",
-        }
-
-        if role and role != "primary":
-            os.makedirs("ledgers", exist_ok=True)
-            arr = _read_sso_array()
-            primary = arr[0] if arr else None
-            kept = [primary] if primary else []
-            for item in arr[1:]:
-                cname = str(item.get("character_name") or "")
-                if role == "cj6mt" and (
-                    item.get("role") == "cj6mt"
-                    or cname.lower() == "skie ankora"
-                    or cname.lower() == char_name.lower()
-                ):
-                    continue
-                kept.append(item)
-            if primary and str(primary.get("character_name") or "").lower() == char_name.lower():
-                kept[0] = {**primary, **bundle, "role": "primary"}
-            else:
-                kept.append(bundle)
-            with open(SSO_TOKEN_FILE, "w", encoding="utf-8") as f:
-                json.dump(kept, f, indent=2)
-            print(f"[+] Linked {role} character: {char_name} (ID: {char_id})")
-        else:
-            save_sso_tokens(bundle)
-            print(f"[+] Successfully authenticated primary pilot: {char_name} (ID: {char_id})")
-
-        return bundle
-    except Exception as e:
-        print(f"[!] Exception during token exchange: {str(e)}")
-    return {}
-
-
-def resolve_primary_character() -> tuple[str | None, str | None, int | None]:
-    """Resolves (character_name, valid_access_token, character_id) for the primary pilot."""
-    tokens = load_sso_tokens()
-    if not tokens:
-        return None, None, None
-    cname = tokens.get("character_name")
-    tok, cid = get_character_auth(cname)
-    return cname, tok, cid
-
-
-def resolve_role_character(role: str = "cj6mt", default_name: str = "Skie Ankora") -> tuple[str, str, int]:
-    """Resolves (character_name, valid_access_token, character_id) for a secondary role (e.g. C-J6MT seller)."""
-    target_name = default_name
-    arr = _read_sso_array()
-    if arr:
-        primary_name = str(arr[0].get("character_name") or "")
-        tagged = [x for x in arr if x.get("role") == role and x.get("character_name")]
-        if tagged:
-            target_name = str(tagged[-1]["character_name"])
-        else:
-            others = [
-                str(x["character_name"])
-                for x in arr[1:]
-                if x.get("character_name") and str(x["character_name"]) != primary_name
-            ]
-            if others:
-                target_name = others[-1]
-
-    token, char_id = get_character_auth(target_name)
-    if not token or not char_id:
-        raise RuntimeError(
-            f"Unable to load or refresh '{target_name}' token from {SSO_TOKEN_FILE}. "
-            f"Click 'C-J6MT Seller (Switch)' in the Imports tab or visit /sso/login?role={role}"
-        )
-    return target_name, token, int(char_id)
+def reset_esi_session() -> None:
+    """Closes and clears the cached session (useful in tests or after network resets)."""
+    global _ESI_SESSION
+    with _ESI_SESSION_LOCK:
+        if _ESI_SESSION is not None:
+            _ESI_SESSION.close()
+            _ESI_SESSION = None
 
 def resolve_character_equity(
     orders_cache_paths: tuple[str, ...] = ("ledgers/character_orders.json", "data/character_orders.json"),
@@ -315,29 +144,29 @@ def fetch_character_orders():
     token = get_valid_access_token()
     if not token:
         return None
-
-    url = f"{ESI_BASE_URL}/characters/{tokens['character_id']}/orders/?datasource=tranquility"
-    try:
-        res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=12)
-        if res.status_code == 200:
-            raw = res.json()
-            buys, sells = {}, {}
-            escrow = 0.0
-            for o in raw:
-                tid = o["type_id"]
-                info = {"order_id": o["order_id"], "price": o["price"], "volume_remain": o["volume_remain"], "volume_total": o.get("volume_total", o["volume_remain"]), "escrow": float(o.get("escrow") or (o["price"] * o["volume_remain"]))}
-                if o.get("is_buy_order"):
-                    buys[tid] = info
-                    escrow += o.get("escrow", o["price"] * o["volume_remain"])
-                else:
-                    sells[tid] = info
-            cache = {"buys": buys, "sells": sells, "count": len(raw), "total_escrow": escrow}
-            with open(ORDERS_CACHE_FILE, "w") as f:
-                json.dump(cache, f, indent=2)
-            return cache
-    except Exception as e:
-        print(f"[!] Order fetch failed: {str(e)}")
-    return None
+    url = f"{ESI_BASE_URL}/characters/{tokens['character_id']}/orders/"
+    res = _esi_request_json(
+        "GET",
+        url,
+        params={"datasource": "tranquility"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    if not res:
+        return None
+    buys, sells = {}, {}
+    escrow = 0.0
+    for o in res:
+        tid = o["type_id"]
+        info = {"order_id": o["order_id"], "price": o["price"], "volume_remain": o["volume_remain"], "volume_total": o.get("volume_total", o["volume_remain"]), "escrow": float(o.get("escrow") or (o["price"] * o["volume_remain"]))}
+        if o.get("is_buy_order"):
+            buys[tid] = info
+            escrow += o.get("escrow", o["price"] * o["volume_remain"])
+        else:
+            sells[tid] = info
+    cache = {"buys": buys, "sells": sells, "count": len(res), "total_escrow": escrow}
+    with open(ORDERS_CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+    return cache
 
 _MEM_WALLET_BAL_CACHE: dict = {"character_id": None, "timestamp": 0.0, "balance": 0.0}
 _MEM_WALLET_TX_CACHE: dict = {"character_id": None, "timestamp": 0.0, "transactions": []}
@@ -390,14 +219,23 @@ def fetch_wallet_balance(force_refresh: bool = False) -> float:
         token = get_valid_access_token()
         if not token:
             return None
-        url = f"{ESI_BASE_URL}/characters/{cid}/wallet/?datasource=tranquility"
+        url = f"{ESI_BASE_URL}/characters/{cid}/wallet/"
+        res = _esi_request_json(
+            "GET",
+            url,
+            params={"datasource": "tranquility"},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+            context=f"wallet_balance cid={cid}",
+            response_type="text",
+        )
+        if res is None:
+            return None
         try:
-            res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
-            if res.status_code == 200:
-                return float(res.text)
-        except Exception as e:
-            print(f"[!] Wallet balance fetch failed: {e}")
-        return None
+            return float(res.strip())
+        except ValueError as exc:
+            print(f"[!] Non-numeric wallet balance for cid={cid}: {res[:80]!r} ({exc})")
+            return None
 
     val = _cached_esi_get(
         _MEM_WALLET_BAL_CACHE, WALLET_CACHE_FILE, cid, 300, "balance", 0.0, _fetch, force_refresh=force_refresh
@@ -416,14 +254,14 @@ def fetch_wallet_transactions(force_refresh: bool = False, max_age_seconds: int 
         token = get_valid_access_token()
         if not token:
             return None
-        url = f"{ESI_BASE_URL}/characters/{cid}/wallet/transactions/?datasource=tranquility"
-        try:
-            res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
-            if res.status_code == 200:
-                return res.json()
-        except Exception as e:
-            print(f"[!] Wallet transactions fetch failed: {e}")
-        return None
+        url = f"{ESI_BASE_URL}/characters/{cid}/wallet/transactions/"
+        res = _esi_request_json(
+            "GET",
+            url,
+            params={"datasource": "tranquility"},
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        return res
 
     return _cached_esi_get(
         _MEM_WALLET_TX_CACHE, WALLET_TX_CACHE_FILE, cid, max_age_seconds, "transactions", [], _fetch, force_refresh=force_refresh
@@ -440,22 +278,18 @@ def fetch_character_assets():
     char_id = tokens["character_id"]
     all_assets = []
     page = 1
-
-    while True:
-        url = f"{ESI_BASE_URL}/characters/{char_id}/assets/?datasource=tranquility&page={page}"
-        try:
-            res = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=12)
-            if res.status_code == 200:
-                data = res.json()
-                if not data:
-                    break
-                all_assets.extend(data)
-                page += 1
-            else:
-                break
-        except Exception:
+    url = f"{ESI_BASE_URL}/characters/{char_id}/assets/"
+    while res := _esi_request_json(
+        "GET",
+        url,
+        params={"datasource": "tranquility", "page": page},
+        headers={"Authorization": f"Bearer {token}"},
+        context=f"fetch_character_assets() cid={char_id} page={page}",
+    ):
+        if not isinstance(res, list):
             break
-
+        all_assets.extend(res)
+        page += 1
     if not all_assets:
         return []
 
@@ -485,26 +319,18 @@ def load_cached_assets(max_age_seconds: int = 300, force: bool = False, *args, *
     if force:
         return []
     if os.path.exists(ASSETS_CACHE_FILE):
-        try:
-            import time
-            mtime = os.path.getmtime(ASSETS_CACHE_FILE)
-            if (time.time() - mtime) > max_age_seconds:
-                return []
-            with open(ASSETS_CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
+        import time
+        mtime = os.path.getmtime(ASSETS_CACHE_FILE)
+        if (time.time() - mtime) > max_age_seconds:
+            return []
+        with open(ASSETS_CACHE_FILE, "r") as f:
+            return json.load(f)
 
 # ==========================================
 
 # ==========================================
 # MARKET HISTORY & VOLUME GUARD
 # ==========================================
-
-
-import threading
 
 _MEM_HISTORY_CACHE = None
 _HISTORY_CACHE_LOCK = threading.Lock()
@@ -515,18 +341,14 @@ def _load_history_cache():
         if _MEM_HISTORY_CACHE is not None:
             return _MEM_HISTORY_CACHE
         if os.path.exists(HISTORY_CACHE_FILE):
-            try:
-                with open(HISTORY_CACHE_FILE, "r") as f:
-                    _MEM_HISTORY_CACHE = json.load(f)
-                    return _MEM_HISTORY_CACHE
-            except Exception:
-                pass
+            with open(HISTORY_CACHE_FILE, "r") as f:
+                _MEM_HISTORY_CACHE = json.load(f)
+                return _MEM_HISTORY_CACHE
         _MEM_HISTORY_CACHE = {}
         return _MEM_HISTORY_CACHE
 
 def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
     """Fetches Jita daily market history from ESI, cached in-memory and on disk."""
-    import time, requests
     now = time.time()
     cache = _load_history_cache()
 
@@ -535,23 +357,23 @@ def fetch_market_history(type_id: int, region_id: int = 10000002) -> list:
     if entry and (now - entry.get("timestamp", 0) < 43200):
         return entry.get("history", [])
 
-    url = f"https://esi.evetech.net/latest/markets/{region_id}/history/?datasource=tranquility&type_id={type_id}"
-    try:
-        res = requests.get(url, headers=ESI_HEADERS, timeout=(3.05, 8.0))
-        if res.status_code == 200:
-            history = res.json()
-            with _HISTORY_CACHE_LOCK:
-                cache[str(type_id)] = {"timestamp": now, "history": history}
-                snapshot = dict(cache)
-            tmp_file = f"{HISTORY_CACHE_FILE}.{threading.get_ident()}.tmp"
-            with open(tmp_file, "w") as f:
-                json.dump(snapshot, f)
-            os.replace(tmp_file, HISTORY_CACHE_FILE)
-            return history
-        else:
-            print(f"[!] ESI history HTTP {res.status_code} for type {type_id}")
-    except Exception as e:
-        print(f"[!] History fetch timeout/error for type {type_id}: {e}")
+    url = f"{ESI_BASE_URL}/markets/{region_id}/history/"
+    history = _esi_request_json(
+        "GET",
+        url,
+        params={"datasource": "tranquility", "type_id": type_id},
+        timeout=(3.05, 8.0),
+        context=f"fetch_market_history() region={region_id} type_id={type_id}",
+    )
+    if isinstance(history, list):
+        with _HISTORY_CACHE_LOCK:
+            cache[str(type_id)] = {"timestamp": now, "history": history}
+            snapshot = dict(cache)
+        tmp_file = f"{HISTORY_CACHE_FILE}.{threading.get_ident()}.tmp"
+        with open(tmp_file, "w") as f:
+            json.dump(snapshot, f)
+        os.replace(tmp_file, HISTORY_CACHE_FILE)
+        return history
 
     return entry.get("history", []) if entry else []
 
@@ -565,7 +387,6 @@ def get_14d_average_volume(type_id: int, region_id: int = 10000002) -> float:
         return 0.0
     total_vol = sum(day.get("volume", 0) for day in recent)
     return round(total_vol / len(recent), 2)
-
 
 def fetch_character_locations_stock(
     character_id: int | None,
@@ -585,25 +406,21 @@ def fetch_character_locations_stock(
     headers = {"Authorization": f"Bearer {access_token}"}
     all_assets = []
     page = 1
-    while True:
-        try:
-            r = requests.get(
-                f"{ESI_BASE_URL}/characters/{character_id}/assets/?datasource=tranquility&page={page}",
-                headers=headers,
-                timeout=10,
-            )
-            if r.status_code != 200:
-                break
-            rows = r.json()
-            if not rows:
-                break
-            all_assets.extend(rows)
-            total_pages = int(r.headers.get("X-Pages", 1))
-            if page >= total_pages:
-                break
-            page += 1
-        except Exception:
+    assets_url = f"{ESI_BASE_URL}/characters/{character_id}/assets/"
+    while rows := _esi_request_json(
+        "GET",
+        assets_url,
+        headers=headers,
+        params={"datasource": "tranquility", "page": page},
+        timeout=10,
+        context=f"locations_stock_assets cid={character_id} page={page}",
+    ):
+        if not isinstance(rows, list):
             break
+        all_assets.extend(rows)
+        if len(rows) < 1000:
+            break
+        page += 1
 
     parent_map = {
         int(a["item_id"]): int(a["location_id"])
@@ -633,14 +450,18 @@ def fetch_character_locations_stock(
         entry = result[matched_loc].setdefault(tid, {"hangar_qty": 0, "sell_qty": 0, "my_lowest_sell": None})
         entry["hangar_qty"] += qty
 
-    try:
-        r_ord = requests.get(
-            f"{ESI_BASE_URL}/characters/{character_id}/orders/?datasource=tranquility",
-            headers=headers,
-            timeout=10,
-        )
-        if r_ord.status_code == 200:
-            for o in r_ord.json():
+    orders_url = f"{ESI_BASE_URL}/characters/{character_id}/orders/"
+    orders_data = _esi_request_json(
+        "GET",
+        orders_url,
+        headers=headers,
+        params={"datasource": "tranquility"},
+        timeout=10,
+        context=f"locations_stock_orders cid={character_id}",
+    )
+    if isinstance(orders_data, list):
+        try:
+            for o in orders_data:
                 loc = int(o.get("location_id") or 0)
                 if loc not in target_locs or o.get("is_buy_order"):
                     continue
@@ -651,21 +472,25 @@ def fetch_character_locations_stock(
                 entry["sell_qty"] += vol
                 if price > 0 and (entry["my_lowest_sell"] is None or price < entry["my_lowest_sell"]):
                     entry["my_lowest_sell"] = price
-    except Exception:
-        pass
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"[!] Malformed character orders payload in locations_stock for cid={character_id}: {exc}")
 
     return result
-
 
 def fetch_structure_order_book(structure_id: int, access_token: str) -> tuple[dict, list[dict]]:
     """
     Downloads all pages of a player structure's market via ESI and returns:
       (aggregated_book_by_type_id, raw_orders_list)
     """
-    headers = {"Authorization": f"Bearer {access_token}"}
-    first = requests.get(
-        f"{ESI_BASE_URL}/markets/structures/{structure_id}/?datasource=tranquility&page=1",
-        headers=headers,
+    client = get_esi_session()
+    req_headers = dict(ESI_HEADERS)
+    req_headers["Authorization"] = f"Bearer {access_token}"
+    url = f"{ESI_BASE_URL}/markets/structures/{structure_id}/"
+
+    first = client.get(
+        url,
+        headers=req_headers,
+        params={"datasource": "tranquility", "page": 1},
         timeout=10,
     )
     first.raise_for_status()
@@ -674,12 +499,16 @@ def fetch_structure_order_book(structure_id: int, access_token: str) -> tuple[di
 
     if total_pages > 1:
         def get_page(p: int):
-            r = requests.get(
-                f"{ESI_BASE_URL}/markets/structures/{structure_id}/?datasource=tranquility&page={p}",
-                headers=headers,
+            rows = _esi_request_json(
+                "GET",
+                url,
+                session=client,
+                headers=req_headers,
+                params={"datasource": "tranquility", "page": p},
                 timeout=10,
+                context=f"structure_book sid={structure_id} page={p}",
             )
-            return r.json() if r.status_code == 200 else []
+            return rows if isinstance(rows, list) else []
 
         with ThreadPoolExecutor(max_workers=8) as ex:
             for rows in ex.map(get_page, range(2, total_pages + 1)):
@@ -757,19 +586,16 @@ def _fetch_region_type_orders(
     region_id: int = REGION_THE_FORGE,
     timeout: float = 8.0,
 ) -> list[dict]:
-    client = session or requests
-    url = (
-        f"{ESI_BASE_URL}/markets/{region_id}/orders/"
-        f"?datasource=tranquility&order_type={order_type}&type_id={type_id}"
+    url = f"{ESI_BASE_URL}/markets/{region_id}/orders/"
+    data = _esi_request_json(
+        "GET",
+        url,
+        session=session,
+        params={"datasource": "tranquility", "order_type": order_type, "type_id": type_id},
+        timeout=timeout,
+        context=f"region={region_id} type_id={type_id} order_type={order_type}",
     )
-    try:
-        res = client.get(url, headers=ESI_HEADERS, timeout=timeout)
-        if res.status_code == 200:
-            data = res.json()
-            return data if isinstance(data, list) else []
-    except Exception:
-        pass
-    return []
+    return data if isinstance(data, list) else []
 
 def fetch_station_book_top(
     type_id: int,
@@ -795,19 +621,22 @@ def fetch_universe_names(ids: list[int]) -> dict[int, str]:
     clean_ids = sorted({int(i) for i in (ids or []) if i})
     if not clean_ids:
         return {}
+    url = f"{ESI_BASE_URL}/universe/names/"
+    data = _esi_request_json(
+        "POST",
+        url,
+        params={"datasource": "tranquility"},
+        json_payload=clean_ids,
+        timeout=6,
+        context=f"universe/names count={len(clean_ids)}",
+    )
+    if not isinstance(data, list):
+        return {}
     try:
-        res = requests.post(
-            f"{ESI_BASE_URL}/universe/names/?datasource=tranquility",
-            json=clean_ids,
-            headers=ESI_HEADERS,
-            timeout=6,
-        )
-        if res.status_code == 200:
-            return {int(entry["id"]): str(entry["name"]) for entry in res.json()}
-    except Exception:
-        pass
-    return {}
-
+        return {int(entry["id"]): str(entry["name"]) for entry in data}
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"[!] Malformed /universe/names/ payload: {exc}")
+        return {}
 
 def get_30d_average_volume(type_id: int, region_id: int = REGION_THE_FORGE) -> float:
     """Calculates average daily regional volume over the past 30 days using cached ESI history."""
@@ -819,7 +648,6 @@ def get_30d_average_volume(type_id: int, region_id: int = REGION_THE_FORGE) -> f
         return 0.0
     return round(sum(float(day.get("volume", 0)) for day in recent) / 30.0, 2)
 
-
 def fetch_jita_book_depth(type_id: int, daily_vol_30d: float = 10.0) -> tuple[int, float, dict]:
     """
     Fetches live Jita 4-4 top buy and depth-weighted sell book stats for `type_id`
@@ -827,12 +655,18 @@ def fetch_jita_book_depth(type_id: int, daily_vol_30d: float = 10.0) -> tuple[in
     """
     from services.strategy_versions import compute_book_depth_stats
 
-    url = f"{ESI_BASE_URL}/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=all&type_id={type_id}"
+    url = f"{ESI_BASE_URL}/markets/{REGION_THE_FORGE}/orders/"
+    orders = _esi_request_json(
+        "GET",
+        url,
+        params={"datasource": "tranquility", "order_type": "all", "type_id": type_id},
+        timeout=8,
+        context=f"book_depth type_id={type_id}",
+    )
+    if not isinstance(orders, list):
+        return type_id, 0.0, compute_book_depth_stats([], daily_vol_30d)
+
     try:
-        res = requests.get(url, timeout=8)
-        if res.status_code != 200:
-            return type_id, 0.0, compute_book_depth_stats([], daily_vol_30d)
-        orders = res.json()
         jita_buys = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and o.get("is_buy_order")]
         jita_sells = [
             (o["price"], o.get("volume_remain", 1))
@@ -841,5 +675,6 @@ def fetch_jita_book_depth(type_id: int, daily_vol_30d: float = 10.0) -> tuple[in
         ]
         top_buy = max(jita_buys) if jita_buys else 0.0
         return type_id, top_buy, compute_book_depth_stats(jita_sells, daily_vol_30d)
-    except Exception:
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"[!] Malformed book depth payload for type_id={type_id}: {exc}")
         return type_id, 0.0, compute_book_depth_stats([], daily_vol_30d)

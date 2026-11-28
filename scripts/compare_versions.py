@@ -32,10 +32,7 @@ def load_version_ledgers(version: str) -> dict[str, pd.DataFrame]:
     for desk in DESK_ORDER:
         path = os.path.join(out_dir, f"{desk}_ledger.csv")
         if os.path.exists(path):
-            try:
-                frames[desk] = pd.read_csv(path)
-            except Exception:
-                frames[desk] = pd.DataFrame()
+            frames[desk] = pd.read_csv(path)
         else:
             frames[desk] = pd.DataFrame()
     return frames

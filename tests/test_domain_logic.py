@@ -111,31 +111,39 @@ def test_jita_buy_order_reachability_filtering():
 
 def test_wallet_transactions_cache_avoids_duplicate_esi_calls(monkeypatch, tmp_path):
     import services.esi as esi_mod
+    import services.sso as sso_mod
 
     cache_file = tmp_path / "wallet_tx.json"
     monkeypatch.setattr(esi_mod, "WALLET_TX_CACHE_FILE", str(cache_file))
     monkeypatch.setattr(esi_mod, "_MEM_WALLET_TX_CACHE", {"character_id": None, "timestamp": 0.0, "transactions": []})
-    monkeypatch.setattr(esi_mod, "load_sso_tokens", lambda *a, **kw: {"character_id": 123456})
-    monkeypatch.setattr(esi_mod, "get_valid_access_token", lambda *a, **kw: "valid_token")
 
-    http_calls = []
+    fake_tokens = lambda *a, **kw: {"character_id": 123456}
+    fake_token = lambda *a, **kw: "valid_token"
+    monkeypatch.setattr(sso_mod, "load_sso_tokens", fake_tokens)
+    monkeypatch.setattr(sso_mod, "get_valid_access_token", fake_token)
+    monkeypatch.setattr(esi_mod, "load_sso_tokens", fake_tokens)
+    monkeypatch.setattr(esi_mod, "get_valid_access_token", fake_token)
+
+    request_calls = []
 
     class DummyResp:
         status_code = 200
+        text = ""
+
         def json(self):
             return [{"transaction_id": 1, "type_id": 34, "quantity": 100, "unit_price": 5.0, "is_buy": True}]
 
-    def fake_get(url, headers=None, timeout=15):
-        http_calls.append(url)
-        return DummyResp()
+    class DummySession:
+        def request(self, method, url, *args, **kwargs):
+            request_calls.append((method, url, kwargs.get("params"), kwargs.get("headers")))
+            return DummyResp()
 
-    monkeypatch.setattr(esi_mod.requests, "get", fake_get)
+    monkeypatch.setattr(esi_mod, "get_esi_session", lambda: DummySession())
 
     first = esi_mod.fetch_wallet_transactions()
     second = esi_mod.fetch_wallet_transactions()
     assert len(first) == 1 and second == first
-    assert len(http_calls) == 1
-
+    assert len(request_calls) == 1
 
 def test_update_ledger_market_prices_uses_bulk_asks_and_targeted_esi(monkeypatch, tmp_path):
     import services.market as mkt_mod

@@ -7,11 +7,12 @@ from services.exclusions import (
     sql_non_expired_description_clause,
 )
 from services.esi import (
-    JITA_STATION_ID,
     create_esi_session as create_session,
     fetch_character_locations_stock,
     fetch_structure_order_book,
     get_30d_average_volume,
+)
+from services.sso import (
     resolve_primary_character,
     resolve_role_character,
 )
@@ -24,7 +25,8 @@ from services.storage import get_desk_claimed_type_ids, read_json, write_json
 from workflows.imports.freight import calc_courier_freight, calc_hisec_optimal_split
 
 from constants import (
-    IMPORT_CACHE_FILE
+    IMPORT_CACHE_FILE,
+    JITA_STATION_ID
 )
 
 IMPORT_DESTINATIONS = [

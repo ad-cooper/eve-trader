@@ -1,6 +1,5 @@
 import math
 
-
 def calc_hisec_single_contract(m3: float, collateral: float, warps: int = 35, lowsec_warps: int = 0) -> tuple[str, float]:
     """
     Exact single-contract reward for highsec haulage:
