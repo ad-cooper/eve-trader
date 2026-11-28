@@ -11,6 +11,7 @@ from services.desk_config import LiveOrderPricing
 from services.esi import get_14d_average_volume
 from services.exclusions import load_active_blacklist
 from services.storage import (
+    load_all_desk_ledgers,
     load_cached_orders,
     load_desk_csv,
     load_market_prices_cache
@@ -366,22 +367,20 @@ _DESK_CACHE_TIME = 0.0
 
 def get_annotated_desks():
     global _DESK_ANNOTATION_CACHE, _DESK_CACHE_TIME
-    import time
     now = time.time()
     if _DESK_ANNOTATION_CACHE is not None and (now - _DESK_CACHE_TIME) < 5.0:
         return _DESK_ANNOTATION_CACHE
-    evergreen = load_desk_csv("evergreen_ledger.csv")
-    tactical = load_desk_csv("tactical_ledger.csv")
-    hold = load_desk_csv("hold_ledger.csv")
-    my_orders = load_cached_orders()
-    market_prices = load_market_prices_cache()
+
+    ledgers = load_all_desk_ledgers()
+    my_orders = load_cached_orders() or {}
+    market_prices = load_market_prices_cache() or {}
 
     buys = my_orders.get("buys", {})
     sells = my_orders.get("sells", {})
 
-    eg = annotate_desk_items(evergreen, "evergreen", market_prices, buys, sells)
-    tac = annotate_desk_items(tactical, "tactical", market_prices, buys, sells)
-    hld = annotate_desk_items(hold, "hold", market_prices, buys, sells)
+    eg = annotate_desk_items(ledgers.get("evergreen", []), "evergreen", market_prices, buys, sells)
+    tac = annotate_desk_items(ledgers.get("tactical", []), "tactical", market_prices, buys, sells)
+    hld = annotate_desk_items(ledgers.get("hold", []), "hold", market_prices, buys, sells)
     _inject_orphaned_buys(eg, tac, hld, buys, market_prices)
 
     _DESK_ANNOTATION_CACHE = (eg, tac, hld)
