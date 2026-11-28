@@ -294,12 +294,13 @@ def main(history_days: int = 195) -> None:
     dst_sq.close()
 
     # 2. SWITCH PATHS, CONNECTIONS & JSON LOADERS TO FIXTURE INPUTS, THEN CALL load_market_universe()
+    @context_manager
     def _fixture_connect_analytics(read_only: bool = False, attach_sde: bool = True):
         os.makedirs(inputs_dir, exist_ok=True)
         con = duckdb.connect(str(fixture_duck), read_only=read_only)
         if attach_sde and fixture_sqlite.exists():
             con.execute(f"ATTACH '{fixture_sqlite}' AS sde (TYPE SQLITE);")
-        return con
+        yield con
 
     gen_led.SQLITE_PATH = str(fixture_sqlite)
     gen_led.DUCKDB_PATH = str(fixture_duck)
@@ -313,7 +314,7 @@ def main(history_days: int = 195) -> None:
     perf_data = json.loads((inputs_dir / "performance_cache.json").read_text(encoding="utf-8"))
     bl_tuple = bl_mod.load_active_blacklist()
 
-    orig_gen_connect = gen_led.connect_analytics
+    orig_gen_connect = analytics_db.open_analytics_connection
     orig_read_json = gen_led.read_json
     orig_load_bl = gen_led.load_active_blacklist
     orig_get_ver_out_dir = strat_mod.get_version_output_dir

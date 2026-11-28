@@ -15,7 +15,7 @@ from services.strategy_versions import (
     v2_evaluate_order_action,
     v2_evaluate_sell_collision,
 )
-
+from services.desk import Desk
 
 def _sample_universe() -> pd.DataFrame:
     return pd.DataFrame([
@@ -136,16 +136,23 @@ def test_side_by_side_v1_and_v2_shadow_isolation_and_ai_registration(tmp_path, m
     monkeypatch.setattr("services.strategy_versions.STRATEGY_CONFIG_FILE", str(tmp_path / "strategy_config.json"))
     monkeypatch.setattr(gen_led, "OUTPUT_DIR", str(tmp_path / "ledgers"))
     monkeypatch.setattr(gen_led, "SQLITE_PATH", "")
-    monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {}))
-    monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
+    monkeypatch.setattr(Desk, "load_positions", lambda self, refresh=False: ({}, {}, {}, {}))
+    monkeypatch.setattr(gen_led, "load_recent_losing_typeids", lambda: set())
 
-    def mock_persist(desk_type, ledger_rows, allocated_cap, budget, sticky_kept, strategy_version="v1", snapshot_time=None):
-        out_dir = get_version_output_dir(strategy_version, base_dir=gen_led.OUTPUT_DIR)
+    def _mock_persist_ledger(
+        self,
+        ledger_rows,
+        allocated_cap,
+        budget,
+        sticky_kept,
+        snapshot_time=None,
+    ):
+        out_dir = get_version_output_dir(self.strategy_version, base_dir=gen_led.OUTPUT_DIR)
         os.makedirs(out_dir, exist_ok=True)
-        out_file = os.path.join(out_dir, f"{desk_type}_ledger.csv")
+        out_file = os.path.join(out_dir, f"{self.desk_type}_ledger.csv")
         pd.DataFrame(ledger_rows).to_csv(out_file, index=False)
 
-    monkeypatch.setattr(gen_led, "persist_desk_ledger", mock_persist)
+    monkeypatch.setattr(Desk, "persist_ledger", _mock_persist_ledger)
 
     df = _sample_universe()
     telemetry = {
@@ -204,8 +211,13 @@ def test_persist_desk_ledger_logs_strategy_version_to_duckdb(tmp_path, monkeypat
         }
     ]
     ts = datetime.datetime(2026, 11, 24, 18, 0, 0, tzinfo=datetime.timezone.utc)
-    gen_led.persist_desk_ledger("evergreen", rows, 55_275_000.0, 1_000_000_000.0, 0, strategy_version="v2", snapshot_time=ts)
-
+    desk = Desk(
+        desk_type="evergreen",
+        strategy_version="v2",
+        output_dir=str(tmp_path / "ledgers"),
+        db_path=str(db_path),
+    )
+    desk.persist_ledger(rows, 55_275_000.0, 1_000_000_000.0, 0, snapshot_time=ts)
     con = duckdb.connect(str(db_path), read_only=True)
     logged = con.execute("SELECT strategy_version, supply_class, type_id FROM ledger_history").fetchall()
     con.close()

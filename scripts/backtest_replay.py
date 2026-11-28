@@ -32,11 +32,11 @@ from services.exclusions import load_active_blacklist
 from services.desk_config import (
     DESK_PROFILES
 )
-from services.ledgers import (
+from services.desk import (
+    Desk,
     IncumbentState,
-    get_desk_profile,
-    build_universe_exclusion_mask,
 )
+from services.market_universe import build_universe_exclusion_mask
 from services.strategy_versions import (
     get_strategy_version,
     list_strategy_versions,
@@ -426,7 +426,7 @@ def simulate_version_on_date(
                 "type_id": tid,
                 "name": row["item_name"],
                 "supply_class": str(row.get("supply_class") or "LEGACY_V1"),
-                "natural_cycle_days": float(row.get("natural_cycle_days") or get_desk_profile(desk).max_hold_days),
+                "natural_cycle_days": float(row.get("natural_cycle_days") or Desk.get_desk_profile(desk).max_hold_days),
                 "qty": int(sizing["qty"]),
                 "target_buy": round(float(pricing["target_buy"]), 2),
                 "target_sell": round(float(pricing["target_sell"]), 2),
@@ -465,7 +465,7 @@ def diagnose_rejection_reason(
             return "EXCLUDED_7D_CRASH_GUARD"
         return "EXCLUDED_BLACKLIST_OR_CATEGORY"
 
-    cfg = get_desk_profile(desk)
+    cfg = Desk.get_desk_profile(desk)
     price_val = float(row[cfg.price_col])
     if not (cfg.min_price_m <= price_val <= cfg.max_price_m):
         return "PRICE_OUT_OF_RANGE"
@@ -572,7 +572,7 @@ def audit_missed_winners(
         if calc_projected_margin(t_buy, t_sell) < 6.5:
             continue
 
-        cfg = get_desk_profile(bench_desk)
+        cfg = Desk.get_desk_profile(bench_desk)
         price_m = float(row[cfg.price_col])
         if not (cfg.min_price_m <= price_m <= cfg.max_price_m) or float(row["daily_vol_30d"]) < 2.0:
             continue
@@ -686,7 +686,7 @@ def run_walkforward_replay(
                 enriched_for_audit = df_enr
 
             for p in picks:
-                cfg = get_desk_profile(p["desk_type"])
+                cfg = Desk.get_desk_profile(p["desk_type"])
                 hold_days = int(round(p["natural_cycle_days"])) if ver == "v2" else cfg.max_hold_days
                 sim = simulate_trade_trajectory(
                     future_bars=bars_map.get(p["type_id"], []),

@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
-from services.ledgers import get_annotated_desks, get_desk_profile
+from services.desk import Desk
+from services.order_advisor import get_annotated_desks
 from services.esi import fetch_jita_book_top
 from services.accounting import (
     BUY_SCC_SURCHARGE,
@@ -59,7 +60,7 @@ def audit_missing_buys(desk: str = "all") -> dict:
         top_buy, live_ask = books.get(tid, (0.0, 0.0))
 
         desk_key = str(r.get("desk_type") or desk).lower()
-        cfg = get_desk_profile(desk_key)
+        cfg = Desk.get_desk_profile(desk_key)
 
         # Hold desk captures cyclical dips to exit at 180d recovery target_sell; Evergreen/Tactical exit at live_ask
         if cfg.name == "hold" and target_sell > 0:

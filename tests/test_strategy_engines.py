@@ -1,12 +1,13 @@
 import pandas as pd
+from services.desk import Desk
 from services.ledgers import (
     resolve_desk_incumbents,
-    build_universe_exclusion_mask,
     select_desk_candidates,
     compute_candidate_pricing,
     compute_line_sizing,
 )
 from services.market import evaluate_deal_opportunity
+from services.market_universe import build_universe_exclusion_mask
 from workflows.sell_advisor import (
     _resolve_collision_strategy,
     _resolve_unlisted_strategy,
@@ -174,11 +175,9 @@ def test_hisec_freight_splitting_and_jf_bundling():
 
 
 def test_desk_profiles_fee_alignment_and_evergreen_floor():
-    from services.ledgers import get_desk_profile
-
-    hold = get_desk_profile("hold")
-    tac = get_desk_profile("tactical")
-    eg = get_desk_profile("evergreen")
+    hold = Desk.get_desk_profile("hold")
+    tac = Desk.get_desk_profile("tactical")
+    eg = Desk.get_desk_profile("evergreen")
 
     # Gross spread floors must exceed round-trip fees (~5.35%) + min_margin
     assert tac.min_spread_pct >= 13.5
@@ -211,11 +210,9 @@ def test_desk_profiles_fee_alignment_and_evergreen_floor():
 
 
 def test_desk_profiles_calibrated_bounds():
-    from services.ledgers import get_desk_profile
-
-    hold = get_desk_profile("hold")
-    tac = get_desk_profile("tactical")
-    eg = get_desk_profile("evergreen")
+    hold = Desk.get_desk_profile("hold")
+    tac = Desk.get_desk_profile("tactical")
+    eg = Desk.get_desk_profile("evergreen")
 
     assert hold.min_margin >= 20.0
     assert hold.max_vwap_ratio_180d <= 0.90

@@ -19,8 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from services.sde import connect_analytics
-
+from services.analytics_db import open_analytics_connection
 from constants import (
     JEVEASSETS_CSV_PATH
 )
@@ -67,7 +66,7 @@ def import_transactions():
         "source": "JEVEASSETS"
     })
 
-    with connect_analytics(read_only=False, attach_sde=False) as con:
+    with open_analytics_connection(read_only=False, attach_sde=False) as con:
         con.execute("""
         CREATE TABLE IF NOT EXISTS historical_wallet_buys (
             date TIMESTAMP,

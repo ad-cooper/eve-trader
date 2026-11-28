@@ -8,41 +8,16 @@ Order of Priority:
 3. Evergreen Desk (60% base + all remaining slack): Structural workhorses (24-48h).
 """
 
+import argparse
+import datetime
 import os
 import sys
-import argparse
+
 import pandas as pd
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from services.sde import connect_analytics
-
-from services.storage import read_json
-
-from services.exclusions import (
-    sql_excluded_market_groups_clause,
-    sql_non_expired_description_clause,
-)
-from services.desk_config import (
-    BUDGET_FILL_STOP_RATIO,
-    DESK_PROFILES,
-    UNIVERSE_QUERY_CONFIG,
-    UniverseQueryConfig
-)
-from services.ledgers import (
-    IncumbentState,
-    resolve_desk_incumbents,
-    build_universe_exclusion_mask,
-    select_desk_candidates,
-    compute_candidate_pricing,
-    compute_line_sizing,
-)
-from services.strategy_versions import (
-    get_strategy_version,
-    get_active_strategy_version,
-    list_strategy_versions,
-    get_version_output_dir,
-)
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from constants import (
     DEFAULT_FALLBACK_BUDGET,
@@ -50,207 +25,40 @@ from constants import (
     DUCKDB_PATH,
     MARKET_CACHE_FILE,
     OUTPUT_DIR,
-    SQLITE_PATH
+    SQLITE_PATH,
 )
-
-DESK_RATIOS = {k: cfg.ratio for k, cfg in DESK_PROFILES.items()}
-
+from services.desk import Desk
+from services.desk_config import BUDGET_FILL_STOP_RATIO, DESK_PROFILES
+from services.ledgers import (
+    IncumbentState
+)
+from services.market_universe import (
+    build_universe_exclusion_mask,
+    load_market_universe    
+)
+from services.market import (
+    load_cached_market_telemetry
+)
+from services.storage import read_json
+from services.strategy_versions import (
+    StrategyVersion,
+    get_active_strategy_version,
+    get_strategy_version,
+    list_strategy_versions,
+)
+from services.accounting import load_recent_losing_typeids
 
 def resolve_dynamic_budget(capital_arg: str) -> float:
-    """
-    Resolves total trading budget.
-    - If explicit number (e.g. '75.0', '120'): converts billions to ISK.
-    - If 'auto': queries live character wallet balance + active buy escrow.
-    """
+    """Resolves total trading budget from an explicit billion/ISK value or fallback."""
     if capital_arg and capital_arg.lower() != "auto":
         try:
             val = float(capital_arg)
             return val * 1e9 if val < 1000.0 else val
         except ValueError:
-            print(f"[!] Invalid capital argument '{capital_arg}', falling back to auto resolution.")
-
-    wallet = 0.0
-    escrow = 0.0
-
-    try:
-        from services.esi import fetch_wallet_balance, fetch_character_orders
-        wallet = float(fetch_wallet_balance() or 0.0)
-        orders = fetch_character_orders() or {}
-        escrow = float(orders.get("total_escrow", 0.0))
-    except Exception as e:
-        print(f"[!] Live ESI equity lookup failed: {e}")
-
-    if escrow <= 0.0:
-        for orders_path in ("ledgers/character_orders.json", "data/character_orders.json"):
-            c_orders = read_json(orders_path) or {}
-            cached_escrow = float(c_orders.get("total_escrow", 0.0))
-            if cached_escrow > 0:
-                print(f"[*] Recovered {cached_escrow/1e9:.2f}B ISK escrow from local cache ({orders_path})")
-                escrow = cached_escrow
-                break
-
-    if wallet <= 0.0:
-        for wallet_path in ("data/wallet_cache.json", "ledgers/wallet_cache.json"):
-            w_data = read_json(wallet_path) or {}
-            cached_wallet = float(w_data.get("balance", 0.0))
-            if cached_wallet > 0:
-                print(f"[*] Recovered {cached_wallet/1e9:.2f}B ISK wallet from local cache ({wallet_path})")
-                wallet = cached_wallet
-                break
-
-    total_equity = wallet + escrow
-    if total_equity > 1.0e9:
-        print(f"[*] Dynamic equity resolved: {wallet/1e9:.2f}B Liquid + {escrow/1e9:.2f}B Escrow = {total_equity/1e9:.2f}B ISK")
-        return total_equity
+            print(f"[!] Invalid capital argument '{capital_arg}', falling back to default.")
 
     print(f"[*] Using fallback budget: {DEFAULT_FALLBACK_BUDGET/1e9:.1f}B ISK")
     return DEFAULT_FALLBACK_BUDGET
-
-
-def load_cached_market_telemetry() -> dict:
-    return read_json(MARKET_CACHE_FILE, default={})
-
-
-def load_claimed_ids_from_csv(filename: str) -> set:
-    path = os.path.join(OUTPUT_DIR, filename)
-    if os.path.exists(path):
-        try:
-            df = pd.read_csv(path)
-            return set(df["type_id"].dropna().astype(int).tolist())
-        except Exception:
-            pass
-    return set()
-
-
-def load_incumbent_positions() -> tuple[dict, dict, dict, dict]:
-    """
-    Loads active buy orders, active sell orders, hangar asset quantities, and prior desk ownership
-    so rebuilds keep existing orders/inventory sticky instead of rotating them out.
-    """
-    buys, sells, assets, prior_desks = {}, {}, {}, {}
-
-    odata = read_json("ledgers/character_orders.json") or {}
-    buys = {int(k): v for k, v in (odata.get("buys") or {}).items() if str(k).isdigit()}
-    sells = {int(k): v for k, v in (odata.get("sells") or {}).items() if str(k).isdigit()}
-
-    adata = read_json("ledgers/character_assets.json")
-    if isinstance(adata, list):
-        for row in adata:
-            tid = row.get("type_id")
-            if tid is not None:
-                assets[int(tid)] = assets.get(int(tid), 0) + int(row.get("quantity", 1))
-
-    for dname in ("hold", "tactical", "evergreen"):
-        for tid in load_claimed_ids_from_csv(f"{dname}_ledger.csv"):
-            prior_desks[int(tid)] = dname
-
-    return buys, sells, assets, prior_desks
-
-
-def load_market_universe(qcfg: UniverseQueryConfig = UNIVERSE_QUERY_CONFIG):
-    bid_share_expr = (
-        f"CASE WHEN highest > lowest "
-        f"THEN LEAST({qcfg.bid_share_max}, GREATEST({qcfg.bid_share_min}, "
-        f"(highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest))) "
-        f"ELSE {qcfg.bid_share_fallback} END"
-    )
-    dump_cond_expr = (
-        f"(average - lowest) / NULLIF(average, 0) >= {qcfg.dump_drop_threshold} "
-        f"AND ("
-        f"CASE WHEN highest > lowest "
-        f"THEN (highest - LEAST(GREATEST(average, lowest), highest)) / (highest - lowest) "
-        f"ELSE {qcfg.bid_share_fallback} END"
-        f") >= {qcfg.dump_min_bid_share}"
-    )
-
-    query = f"""
-    WITH metrics_180d AS (
-        SELECT
-            type_id,
-            COUNT(*) AS total_history_days,
-            MAX(average) AS high_180d,
-            SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_180d
-        FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.history_lookback_days} DAY FROM forge_market_history) AND volume > 0
-        GROUP BY type_id
-    ),
-    metrics_30d AS (
-        SELECT
-            COUNT(*) AS active_days_30d,
-            type_id,
-            AVG(volume) AS daily_vol_30d,
-            SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_30d,
-            AVG((highest - lowest) / NULLIF(average, 0)) * 100.0 AS avg_spread_30d,
-            SUM(volume * ({bid_share_expr})) / NULLIF(SUM(volume), 0) AS bid_share_30d,
-            (COUNT(CASE WHEN {dump_cond_expr} THEN 1 END) * 100.0 / COUNT(*)) AS dump_freq_pct
-        FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.medium_lookback_days} DAY FROM forge_market_history) AND volume > 0
-        GROUP BY type_id
-    ),
-    metrics_7d AS (
-        SELECT
-            type_id,
-            SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap_7d,
-            MIN(lowest) AS min_low_7d
-        FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.short_lookback_days} DAY FROM forge_market_history) AND volume > 0
-        GROUP BY type_id
-    ),
-    metrics_floors AS (
-        SELECT
-            type_id,
-            QUANTILE_CONT(CASE WHEN date >= (SELECT MAX(date) - INTERVAL {qcfg.floor_lookback_days} DAY FROM forge_market_history) THEN lowest END, {qcfg.min_low_quantile}) AS min_low_14d,
-            QUANTILE_CONT(lowest, {qcfg.p20_low_quantile}) AS p20_low_30d
-        FROM forge_market_history
-        WHERE date >= (SELECT MAX(date) - INTERVAL {qcfg.medium_lookback_days} DAY FROM forge_market_history) AND volume > 0
-        GROUP BY type_id
-    )
-    SELECT
-        m.type_id,
-        t.typeName AS item_name,
-        g.groupName AS group_name,
-        c.categoryName AS category_name,
-        l.total_history_days,
-        m.active_days_30d,
-        l.vwap_180d / 1e6 AS price_m_180d,
-        m.vwap_30d / 1e6 AS price_m_30d,
-        w.vwap_7d / 1e6 AS price_m_7d,
-        f.min_low_14d / 1e6 AS min_low_m_14d,
-        f.p20_low_30d / 1e6 AS p20_low_m_30d,
-        m.daily_vol_30d,
-        COALESCE(m.bid_share_30d, {qcfg.default_bid_share_30d}) AS bid_share_30d,
-        m.dump_freq_pct,
-        m.avg_spread_30d,
-        (m.daily_vol_30d * (m.vwap_30d / 1e6)) AS daily_turnover_m
-    FROM metrics_30d m
-    JOIN metrics_7d w ON m.type_id = w.type_id
-    JOIN metrics_floors f ON m.type_id = f.type_id
-    JOIN metrics_180d l ON m.type_id = l.type_id
-    JOIN sde.invTypes t ON m.type_id = t.typeID
-    JOIN sde.invGroups g ON t.groupID = g.groupID
-    JOIN sde.invCategories c ON g.categoryID = c.categoryID
-    WHERE t.published = 1
-      AND t.marketGroupID IS NOT NULL
-      AND {sql_excluded_market_groups_clause("t.marketGroupID")}
-      AND {sql_non_expired_description_clause("t.description")}
-    """
-    with connect_analytics(read_only=True, attach_sde=True) as con:
-        df = con.execute(query).df()
-    return df
-
-def load_recent_losing_tids(min_loss_isk: float = 1_000_000.0) -> set[int]:
-    if not os.path.exists("ledgers/performance_cache.json"):
-        return set()
-    try:
-        with open("ledgers/performance_cache.json", "r", encoding="utf-8") as pf:
-            perf_items = json.load(pf).get("items", [])
-        return {
-            int(it["type_id"]) for it in perf_items
-            if float(it.get("profit", 0.0)) < -abs(min_loss_isk)
-        }
-    except Exception:
-        return set()
-
 
 def allocate_desk_rows(
     candidates: pd.DataFrame,
@@ -259,9 +67,8 @@ def allocate_desk_rows(
     market_telemetry: dict,
     desk_params: dict,
     incumbents: IncumbentState,
-    strategy_version: str = "v1",
+    strat: StrategyVersion,
 ) -> tuple[list[dict], float, list[int], int]:
-    strat = get_strategy_version(strategy_version)
     """Assembles ledger row dicts for ranked candidates up to the desk ISK budget."""
     ledger_rows: list[dict] = []
     allocated_cap = 0.0
@@ -311,75 +118,6 @@ def allocate_desk_rows(
     return ledger_rows, allocated_cap, new_claimed_ids, sticky_kept
 
 
-def persist_desk_ledger(
-    desk_type: str,
-    ledger_rows: list[dict],
-    allocated_cap: float,
-    budget: float,
-    sticky_kept: int,
-    strategy_version: str = "v1",
-    snapshot_time=None,
-) -> None:
-    """Writes the desk CSV ledger (active or shadow dir) and appends a version-tagged snapshot to DuckDB."""
-    out_dir = get_version_output_dir(strategy_version, base_dir=OUTPUT_DIR)
-    out_file = os.path.join(out_dir, f"{desk_type}_ledger.csv")
-    os.makedirs(out_dir, exist_ok=True)
-    df_ledger = pd.DataFrame(ledger_rows)
-    df_ledger.to_csv(out_file, index=False)
-    print(f"[+][{strategy_version}] Saved {len(ledger_rows)} lines to {out_file} ({sticky_kept} sticky | Allocated: {allocated_cap/1e9:.2f}B / {budget/1e9:.2f}B)")
-
-    if df_ledger.empty:
-        return
-
-    try:
-        import datetime
-        import duckdb
-        snap_ts = snapshot_time or datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
-        con = duckdb.connect(DUCKDB_PATH)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS ledger_history (
-                snapshot_time TIMESTAMP,
-                desk_type VARCHAR,
-                type_id INTEGER,
-                name VARCHAR,
-                qty INTEGER,
-                dump_freq DOUBLE,
-                target_buy DOUBLE,
-                target_sell DOUBLE,
-                net_margin DOUBLE,
-                capital DOUBLE,
-                profit DOUBLE,
-                strategy_version VARCHAR DEFAULT 'v1',
-                supply_class VARCHAR
-            );
-        """)
-        con.execute("ALTER TABLE ledger_history ADD COLUMN IF NOT EXISTS strategy_version VARCHAR DEFAULT 'v1'")
-        con.execute("ALTER TABLE ledger_history ADD COLUMN IF NOT EXISTS supply_class VARCHAR")
-
-        df_history = df_ledger.copy()
-        if "supply_class" not in df_history.columns:
-            df_history["supply_class"] = "LEGACY_V1"
-        df_history.insert(0, "desk_type", desk_type)
-        df_history.insert(0, "snapshot_time", snap_ts)
-        df_history["strategy_version"] = strategy_version
-
-        con.execute("""
-            INSERT INTO ledger_history (
-                snapshot_time, desk_type, type_id, name, qty, dump_freq,
-                target_buy, target_sell, net_margin, capital, profit,
-                strategy_version, supply_class
-            )
-            SELECT
-                snapshot_time, desk_type, type_id, name, qty, dump_freq,
-                target_buy, target_sell, net_margin, capital, profit,
-                strategy_version, supply_class
-            FROM df_history
-        """)
-        con.close()
-    except Exception as e:
-        print(f"[!] Failed to log {strategy_version} history to DuckDB: {e}")
-
-
 def generate_desk_ledger(
     df: pd.DataFrame,
     desk_type: str,
@@ -389,68 +127,48 @@ def generate_desk_ledger(
     total_portfolio: float = 50.0e9,
     strategy_version: str = "v1",
     snapshot_time=None,
-) -> tuple:
-    strat = get_strategy_version(strategy_version)
+    desk: Desk | None = None,
+    strat: StrategyVersion | None = None,
+) -> tuple[list[int], float]:
+    strat_obj = strat or get_strategy_version(strategy_version)
     scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
-    active_buys, active_sells, asset_qtys, prior_desks = load_incumbent_positions()
-
-    incumbents = resolve_desk_incumbents(
-        df=df,
+    desk_obj = desk or Desk(
         desk_type=desk_type,
-        claimed_ids=claimed_ids,
-        active_buys=active_buys,
-        active_sells=active_sells,
-        asset_qtys=asset_qtys,
-        prior_desks=prior_desks,
+        strategy_version=strategy_version,
+        output_dir=OUTPUT_DIR,
+        db_path=DUCKDB_PATH,
     )
+    incumbents = desk_obj.resolve_incumbents(df=df, claimed_ids=claimed_ids)
     base_mask = build_universe_exclusion_mask(
         df=df,
         claimed_ids=claimed_ids,
         incumbents=incumbents,
-        losing_tids=load_recent_losing_tids(),
+        losing_tids=load_recent_losing_typeids(),
     )
-    candidates, desk_params = strat.select_candidates(
+    candidates, desk_params = strat_obj.select_candidates(
         df,
-        desk_type,
+        desk_obj.desk_type,
         base_mask,
         incumbents.desk_sticky_ids,
         scale_factor,
     )
     ledger_rows, allocated_cap, new_claimed_ids, sticky_kept = allocate_desk_rows(
         candidates=candidates,
-        desk_type=desk_type,
+        desk_type=desk_obj.desk_type,
         budget=budget,
         market_telemetry=market_telemetry,
         desk_params=desk_params,
         incumbents=incumbents,
-        strategy_version=strategy_version,
+        strat=strat_obj,
     )
-    persist_desk_ledger(
-        desk_type,
-        ledger_rows,
-        allocated_cap,
-        budget,
-        sticky_kept,
-        strategy_version=strategy_version,
+    desk_obj.persist_ledger(
+        ledger_rows=ledger_rows,
+        allocated_cap=allocated_cap,
+        budget=budget,
+        sticky_kept=sticky_kept,
         snapshot_time=snapshot_time,
     )
     return new_claimed_ids, allocated_cap
-
-def load_existing_desk_state(desk_type: str, strategy_version: str = "v1") -> tuple[list[int], float]:
-    """Reads claimed type_ids and deployed capital from an existing desk CSV."""
-    out_dir = get_version_output_dir(strategy_version, base_dir=OUTPUT_DIR)
-    path = os.path.join(out_dir, f"{desk_type}_ledger.csv")
-    if not os.path.exists(path):
-        return [], 0.0
-    try:
-        df_existing = pd.read_csv(path)
-        if df_existing.empty:
-            return [], 0.0
-        ids = df_existing["type_id"].dropna().astype(int).tolist()
-        cap = float(df_existing["capital"].fillna(0.0).sum()) if "capital" in df_existing.columns else 0.0
-        return ids, cap
-    except Exception:
-        return [], 0.0
 
 
 def run_waterfall(
@@ -471,39 +189,52 @@ def run_waterfall(
 
     strat = get_strategy_version(strategy_version)
     df_enriched = strat.enrich_universe(df, SQLITE_PATH, DUCKDB_PATH)
+    desks = {
+        d: Desk(
+            desk_type=d,
+            strategy_version=strategy_version,
+            output_dir=OUTPUT_DIR,
+            db_path=DUCKDB_PATH,
+        )
+        for d in DESK_ORDER
+    }
 
     base_summary = " | ".join(
-        f"{d.capitalize()} {(total_budget * DESK_RATIOS[d])/1e9:.2f}B" for d in DESK_ORDER
+        f"{desks[d].desk_type.capitalize()} {(total_budget * desks[d].ratio)/1e9:.2f}B"
+        for d in DESK_ORDER
     )
     print(f"\n=== Running Dynamic Multi-Desk Waterfall [{strategy_version.upper()}] ({total_budget/1e9:.2f}B ISK Portfolio) ===")
     print(f"[*] Strategy: {strat.description}")
     print(f"[*] Base Allocation Targets: {base_summary}")
 
-    for desk in DESK_ORDER:
+    for desk_name in DESK_ORDER:
         if not (target_desks - set(outcomes.keys())):
             break
 
-        target_budget = (total_budget * DESK_RATIOS[desk]) + carried_slack
-        if carried_slack > 0 and desk in target_desks:
-            print(f"[*] Cascading {carried_slack/1e9:.2f}B ISK slack -> {desk.capitalize()} Target: {target_budget/1e9:.2f}B ISK")
+        desk_obj = desks[desk_name]
+        target_budget = (total_budget * desk_obj.ratio) + carried_slack
+        if carried_slack > 0 and desk_name in target_desks:
+            print(f"[*] Cascading {carried_slack/1e9:.2f}B ISK slack -> {desk_name.capitalize()} Target: {target_budget/1e9:.2f}B ISK")
 
-        if desk in target_desks:
+        if desk_name in target_desks:
             ids, deployed_cap = generate_desk_ledger(
                 df_enriched,
-                desk,
+                desk_name,
                 target_budget,
                 market_telemetry,
                 claimed_ids,
                 total_budget,
                 strategy_version=strategy_version,
                 snapshot_time=snapshot_time,
+                desk=desk_obj,
+                strat=strat,
             )
         else:
-            ids, deployed_cap = load_existing_desk_state(desk, strategy_version=strategy_version)
+            ids, deployed_cap = desk_obj.existing_state()
 
         claimed_ids.update(ids)
         carried_slack = max(0.0, target_budget - deployed_cap)
-        outcomes[desk] = (ids, deployed_cap)
+        outcomes[desk_name] = (ids, deployed_cap)
 
     total_deployed = sum(cap for _, cap in outcomes.values())
     counts_summary = ", ".join(f"{len(outcomes[d][0])} {d.capitalize()}" for d in DESK_ORDER if d in outcomes)
@@ -513,8 +244,6 @@ def run_waterfall(
 
 
 def main():
-    import datetime
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--desk", default="all", choices=["evergreen", "tactical", "hold", "all"])
     parser.add_argument("--capital", default="auto", help="Total portfolio capital in billions or 'auto' (e.g. 50.0, 89.5, 120.0, auto)")

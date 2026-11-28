@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from services.esi import ESI_BASE_URL, REGION_THE_FORGE, JITA_STATION_ID, create_esi_session
-from services.sde import connect_analytics
+from services.analytics_db import open_analytics_connection
 from services.exclusions import load_active_blacklist
 from services.ledgers import is_item_blacklisted
 from services.market import evaluate_deal_opportunity
@@ -41,7 +41,7 @@ def get_candidate_universe(scan_limit: int = 1200) -> dict[int, dict]:
     candidates: dict[int, dict] = {}
     rows = []
     try:
-        with connect_analytics(read_only=True, attach_sde=True) as con:
+        with open_analytics_connection(read_only=True, attach_sde=False) as con:
             rows = con.execute(f"""
                 WITH stats AS (
                     SELECT

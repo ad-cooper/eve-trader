@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import duckdb
 import pandas as pd
 
-from services.sde import connect_analytics
+from services.analytics_db import open_analytics_connection
 
 
 def _utc_now_naive() -> datetime:
@@ -190,7 +190,7 @@ def _persist_snapshot_and_prune(
 
 def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -> dict:
     """Diffs the current structure market scan against the previous scan in DuckDB."""
-    with connect_analytics(read_only=False, attach_sde=False) as con:
+    with open_analytics_connection(read_only=False, attach_sde=False) as con:
         init_diff_schema(con)
 
         now = _utc_now_naive()
@@ -270,7 +270,7 @@ def process_snapshot_diff(structure_id: int, raw_orders: List[Dict[str, Any]]) -
 def get_observed_staging_velocity(structure_id: int) -> dict:
     """Returns tracking coverage and observed 14d daily burn rates per type_id for the structure."""
     try:
-        with connect_analytics(read_only=True, attach_sde=False) as con:
+        with open_analytics_connection(read_only=True, attach_sde=False) as con:
             tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
             if "staging_snapshots_meta" not in tables:
                 return {"days_tracked": 0.0, "snapshot_count": 0, "by_type": {}}

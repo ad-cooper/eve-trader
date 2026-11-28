@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from services.ledgers import get_desk_profile, load_all_desk_ledgers, load_cached_orders, load_desk_csv
+from services.desk import Desk
+from services.ledgers import load_all_desk_ledgers, load_cached_orders, load_desk_csv
 from services.storage import read_json, write_json, load_market_prices_cache
 from services.accounting import calc_line_financials
 from services.esi import (
@@ -12,12 +13,20 @@ from services.esi import (
     fetch_jita_book_top,
     fetch_wallet_transactions,
 )
-from services.sde import connect_analytics, resolve_type_ids
+from services.sde import resolve_type_ids
+from services.analytics_db import (
+    query_historical_buys_by_names,
+    query_30d_vwap_by_type_ids,
+    query_earliest_buy_and_snapshot_dates
+)
 
 from constants import (
     JITA_STATION_ID,
     MARKET_CACHE_FILE
 )
+
+def load_cached_market_telemetry() -> dict:
+    return read_json(MARKET_CACHE_FILE, default={})
 
 def fetch_station_asks_bulk(session: requests.Session, station_id: int, tids: list[int]) -> dict[int, float]:
     """Bulk-fetches lowest sell prices for any NPC station (100 IDs/request) via Fuzzwork."""
@@ -154,39 +163,16 @@ def _query_historical_buys_db(type_ids: list[int], name_map: dict[int, str] | No
     if not type_ids:
         return {}
     resolved = name_map if name_map is not None else resolve_type_ids(type_ids)
-    name_to_tid = {v: k for k, v in resolved.items() if v}
-    if not name_to_tid:
+    names = [resolved.get(tid) for tid in type_ids if resolved.get(tid)]
+    if not names:
         return {}
 
+    by_name = query_historical_buys_by_names(names)
     out: dict[int, dict] = {}
-    try:
-        with connect_analytics(read_only=True, attach_sde=False) as con:
-            quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in name_to_tid.keys())
-            query = f"""
-            WITH ranked AS (
-                SELECT
-                    item_name,
-                    price,
-                    quantity,
-                    date,
-                    ROW_NUMBER() OVER (PARTITION BY item_name ORDER BY date DESC) AS rn
-                FROM historical_wallet_buys
-                WHERE item_name IN ({quoted_names})
-            )
-            SELECT
-                item_name,
-                ROUND(SUM(price * quantity) / SUM(quantity), 2) AS avg_price,
-                MIN(date) AS first_date
-            FROM ranked
-            WHERE rn <= 10
-            GROUP BY item_name;
-            """
-            for iname, avg_p, first_dt in con.execute(query).fetchall():
-                tid = name_to_tid.get(iname)
-                if tid:
-                    out[tid] = {"avg_price": float(avg_p or 0.0), "first_date": first_dt}
-    except Exception:
-        pass
+    for tid in type_ids:
+        iname = resolved.get(tid)
+        if iname and iname in by_name:
+            out[tid] = by_name[iname]
     return out
 
 
@@ -206,9 +192,10 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
 
     # 2. jEveAssets lifetime wallet buys in DuckDB
     unmatched_for_jeve = [tid for tid in type_ids if tid not in cost_map]
-    for tid, info in _query_historical_buys_db(unmatched_for_jeve).items():
-        if info["avg_price"] > 0:
-            cost_map[tid] = {"unit_cost": info["avg_price"], "source": "JEVEASSETS"}
+    if unmatched_for_jeve:
+        for tid, info in _query_historical_buys_db(unmatched_for_jeve).items():
+            if info["avg_price"] > 0:
+                cost_map[tid] = {"unit_cost": info["avg_price"], "source": "JEVEASSETS"}
 
     # 3. Historical ledger snapshots (target_buy)
     for tid in type_ids:
@@ -220,23 +207,10 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
     # 4. Fallback: 30d VWAP from DuckDB forge_market_history
     unmatched_tids = [tid for tid in type_ids if tid not in cost_map]
     if unmatched_tids:
-        try:
-            with connect_analytics(read_only=True, attach_sde=False) as con:
-                id_str = ",".join(str(int(t)) for t in set(unmatched_tids))
-                query = f"""
-                    SELECT
-                        type_id,
-                        SUM(average * volume) / NULLIF(SUM(volume), 0) AS vwap
-                    FROM forge_market_history
-                    WHERE type_id IN ({id_str}) AND date >= (SELECT MAX(date) - INTERVAL 30 DAY FROM forge_market_history)
-                    GROUP BY type_id;
-                """
-                vwap_rows = con.execute(query).fetchall()
-            for r in vwap_rows:
-                if r[1] and r[1] > 0:
-                    cost_map[r[0]] = {"unit_cost": float(r[1]), "source": "EST_VWAP"}
-        except Exception:
-            pass
+        vwap_by_tid = query_30d_vwap_by_type_ids(unmatched_tids)
+        for tid, vwap in vwap_by_tid.items():
+            if vwap and vwap > 0:
+                cost_map[tid] = {"unit_cost": float(vwap), "source": "EST_VWAP"}
 
     # 5. Unknown fallback
     for tid in type_ids:
@@ -244,7 +218,6 @@ def get_cost_basis_map(type_ids: list, history_map: dict) -> dict:
             cost_map[tid] = {"unit_cost": 0.0, "source": "UNKNOWN"}
 
     return cost_map
-
 
 def get_active_sell_orders_map() -> dict:
     """
@@ -293,7 +266,6 @@ def _parse_utc_dt(raw_dt) -> datetime | None:
             return None
     return dt_obj.replace(tzinfo=timezone.utc) if dt_obj.tzinfo is None else dt_obj
 
-
 def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = None) -> dict:
     """Builds holding-duration parameters for Hold and Tactical desk items."""
     if not type_ids:
@@ -311,7 +283,7 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
                 raw_d = str(r.get("date_acquired", "")).strip()
                 date_val = raw_d if raw_d and raw_d.lower() not in ("none", "nan") else None
                 raw_days = str(r.get("max_days", "")).strip()
-                default_max = get_desk_profile("tactical" if "tactical" in fname else "hold").max_hold_days
+                default_max = Desk.get_desk_profile("tactical" if "tactical" in fname else "hold").max_hold_days
                 days_val = int(raw_days) if raw_days.isdigit() else default_max
                 csv_meta[tid] = {"date_acquired": date_val, "max_days": days_val}
             except (ValueError, TypeError):
@@ -327,30 +299,16 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
 
     # 3. DuckDB historical buys & ledger snapshots
     db_hist_buys = _query_historical_buys_db(type_ids, name_map=name_map)
-    db_clean_buys: dict[str, object] = {}
-    db_snap_dates: dict[int, object] = {}
+    names_to_lookup = [name_map.get(tid) for tid in type_ids if name_map.get(tid)]
     try:
-        with connect_analytics(read_only=True, attach_sde=False) as con:
-            names_to_lookup = [name_map.get(tid) for tid in type_ids if name_map.get(tid)]
-            if names_to_lookup:
-                quoted_names = ",".join("'" + n.replace("'", "''") + "'" for n in names_to_lookup)
-                q_clean = f"SELECT item_name, MIN(tx_date) FROM clean_transactions WHERE tx_type = 'buy' AND item_name IN ({quoted_names}) GROUP BY item_name"
-                for iname, dt_val in con.execute(q_clean).fetchall():
-                    if dt_val:
-                        db_clean_buys[iname] = dt_val
-
-            id_str = ",".join(str(int(t)) for t in type_ids)
-            q_snap = f"SELECT type_id, MIN(snapshot_time) FROM ledger_history WHERE type_id IN ({id_str}) GROUP BY type_id"
-            for tid_row, snap_dt in con.execute(q_snap).fetchall():
-                if snap_dt:
-                    db_snap_dates[int(tid_row)] = snap_dt
+        db_clean_buys, db_snap_dates = query_earliest_buy_and_snapshot_dates(names_to_lookup, type_ids)
     except Exception:
-        pass
+        db_clean_buys, db_snap_dates = {}, {}
 
     for tid in type_ids:
         meta = csv_meta.get(tid, {})
         desk_from_hist = (history_map or {}).get(tid, {}).get("desk", "HOLD")
-        max_days = meta.get("max_days", get_desk_profile(desk_from_hist).max_hold_days)
+        max_days = meta.get("max_days", Desk.get_desk_profile(desk_from_hist).max_hold_days)
         date_acq = meta.get("date_acquired")
         item_name = name_map.get(tid, "")
 
@@ -384,7 +342,6 @@ def get_hold_desk_params(type_ids: list, name_map: dict, history_map: dict = Non
         }
 
     return hold_params
-
 
 def evaluate_deal_opportunity(meta: dict, sells: list[tuple[float, int]], top_buy: float | None) -> dict | None:
     """

@@ -7,6 +7,7 @@ from services.accounting import (
     calc_unit_cost,
     TOTAL_EXIT_FEE as EXIT_FEE_JITA,
 )
+from services.desk import Desk
 from services.esi import (
     load_cached_assets,
     fetch_character_assets,
@@ -14,7 +15,7 @@ from services.esi import (
     JITA_STATION_ID,
     create_esi_session as create_session,
 )
-from services.ledgers import get_desk_profile, ORDERS_CACHE_FILE
+from services.ledgers import ORDERS_CACHE_FILE
 from services.sde import (
     parse_eve_item_lines as parse_multisell_export_text,
     resolve_type_names,
@@ -85,8 +86,6 @@ def _resolve_collision_strategy(
     hold_meta: dict,
 ) -> tuple[str, str, float, dict]:
     """Pure rule engine for hangar items that already have an active sell order on the market."""
-    from services.ledgers import get_desk_profile
-
     active_qty = sum(o["volume_remain"] for o in active_orders)
     min_active_price = min((o["price"] for o in active_orders), default=0.0)
     total_stack_qty = active_qty + qty
@@ -101,7 +100,7 @@ def _resolve_collision_strategy(
     collision_reason = ""
 
     if desk_upper == "EVERGREEN":
-        eg_min_roi = get_desk_profile("evergreen").take_profit_roi
+        eg_min_roi = Desk.get_desk_profile("evergreen").take_profit_roi
         undercut_net = calc_net_proceeds(undercut_price) if lowest_ask else 0.0
         eff_cost = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
         still_profitable = (undercut_net >= eff_cost * (1.0 + eg_min_roi / 100.0)) if eff_cost > 0 else True
@@ -122,7 +121,7 @@ def _resolve_collision_strategy(
             rec_sell = round(min_active_price, 2)
 
     elif desk_upper == "TACTICAL":
-        tac_target_roi = get_desk_profile("tactical").min_margin
+        tac_target_roi = Desk.get_desk_profile("tactical").min_margin
         undercut_net = calc_net_proceeds(undercut_price) if lowest_ask else 0.0
         eff_cost = calc_unit_cost(unit_cost) if unit_cost > 0 else 0.0
         live_roi = ((undercut_net - eff_cost) / eff_cost * 100.0) if eff_cost > 0 else tac_target_roi
@@ -181,10 +180,8 @@ def _resolve_unlisted_strategy(
     hold_meta: dict,
 ) -> tuple[str, str, float]:
     """Pure rule engine for hangar items with no active sell order."""
-    from services.ledgers import get_desk_profile
-
     if desk == "EVERGREEN":
-        eg_cfg = get_desk_profile("evergreen")
+        eg_cfg = Desk.get_desk_profile("evergreen")
         days_held = hold_meta.get("days_held", 0)
         is_expired = hold_meta.get("is_expired", False) or (days_held >= eg_cfg.max_hold_days and days_held > 0)
         if lowest_ask and lowest_ask > 0.01:
@@ -202,7 +199,7 @@ def _resolve_unlisted_strategy(
         return ("TIME STOP (0d)" if is_expired else "FAST FLIP"), ("time_stop" if is_expired else "flip"), rec_sell
 
     if desk in ["TACTICAL", "HOLD"]:
-        desk_cfg = get_desk_profile(desk)
+        desk_cfg = Desk.get_desk_profile(desk)
         days_held = hold_meta.get("days_held", 0)
         is_expired = hold_meta.get("is_expired", False)
 

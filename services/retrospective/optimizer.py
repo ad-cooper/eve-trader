@@ -14,9 +14,9 @@ from services.desk_config import (
 from services.ledgers import (
     DeskProfile,
     IncumbentState,
-    build_universe_exclusion_mask,
 )
-from services.sde import connect_analytics
+from services.market_universe import build_universe_exclusion_mask
+from services.analytics_db import open_analytics_connection
 from services.retrospective.simulator import (
     DESK_ORDER,
     _load_forward_candles,
@@ -187,7 +187,7 @@ def run_local_retrospective(
         desk_sticky_ids=set(),
     )
 
-    with connect_analytics(read_only=True, attach_sde=True) as con:
+    with open_analytics_connection(read_only=True, attach_sde=False) as con:
         row = con.execute("SELECT MAX(date) FROM forge_market_history").fetchone()
         max_date = row[0] if row else None
         if max_date is None:

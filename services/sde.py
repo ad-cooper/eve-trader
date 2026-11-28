@@ -2,7 +2,6 @@ import os
 import re
 from contextlib import contextmanager
 import duckdb
-
 from constants import (
     DUCKDB_PATH,
     SQLITE_PATH
@@ -28,28 +27,13 @@ def get_packaged_m3(group_id: int | None, raw_volume: float | None) -> float:
     m3 = PACKAGED_SHIP_M3.get(gid, float(raw_volume or 0.01))
     return max(m3, 0.01)
 
-
-@contextmanager
-def connect_analytics(read_only: bool = True, attach_sde: bool = True):
-    """Context-managed DuckDB connection with optional read-only SQLite SDE attachment."""
-    if not read_only and os.path.dirname(DUCKDB_PATH):
-        os.makedirs(os.path.dirname(DUCKDB_PATH), exist_ok=True)
-    con = duckdb.connect(DUCKDB_PATH, read_only=read_only)
-    try:
-        if attach_sde and os.path.exists(SQLITE_PATH):
-            con.execute(f"ATTACH '{SQLITE_PATH}' AS sde (TYPE SQLITE);")
-        yield con
-    finally:
-        con.close()
-
-
 def resolve_type_ids(type_ids: list[int]) -> dict[int, str]:
     """Maps integer SDE typeID -> typeName."""
     clean_ids = sorted({int(t) for t in (type_ids or []) if str(t).isdigit()})
     if not clean_ids:
         return {}
     try:
-        with connect_analytics(read_only=True, attach_sde=True) as con:
+        with open_analytics_connection(read_only=True, attach_sde=True) as con:
             id_str = ",".join(str(t) for t in clean_ids)
             rows = con.execute(f"SELECT typeID, typeName FROM sde.invTypes WHERE typeID IN ({id_str})").fetchall()
             return {int(r[0]): str(r[1]) for r in rows}
@@ -63,7 +47,7 @@ def resolve_type_names(names: list[str], case_insensitive: bool = False) -> dict
     if not clean_names:
         return {}
     try:
-        with connect_analytics(read_only=True, attach_sde=True) as con:
+        with open_analytics_connection(read_only=True, attach_sde=True) as con:
             if case_insensitive:
                 quoted = ",".join("'" + n.lower().replace("'", "''") + "'" for n in clean_names)
                 rows = con.execute(
@@ -97,7 +81,7 @@ def resolve_sde_items(
     by_tid: dict[int, dict] = {}
     by_name: dict[str, dict] = {}
     try:
-        with connect_analytics(read_only=True, attach_sde=True) as con:
+        with open_analytics_connection(read_only=True, attach_sde=True) as con:
             clauses = []
             if clean_names:
                 in_names = ",".join("'" + n.lower().replace("'", "''") + "'" for n in clean_names)
@@ -138,7 +122,7 @@ def get_latest_ledger_targets(type_ids: list[int]) -> dict[int, dict]:
     if not clean_ids:
         return {}
     try:
-        with connect_analytics(read_only=True, attach_sde=False) as con:
+        with open_analytics_connection(read_only=True, attach_sde=False) as con:
             has_table = con.execute(
                 "SELECT count(*) FROM information_schema.tables WHERE table_name = 'ledger_history'"
             ).fetchone()[0]

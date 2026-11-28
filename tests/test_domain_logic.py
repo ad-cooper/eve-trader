@@ -7,7 +7,8 @@ from services.accounting import (
     calc_line_financials,
     match_fifo_lots,
 )
-from services.ledgers import get_desk_profile, evaluate_order_action
+from services.desk import Desk
+from services.order_advisor import evaluate_order_action
 from services.staging_diff import _detect_order_fill_events
 
 
@@ -37,7 +38,7 @@ def test_line_financials_and_fifo():
 
 
 def test_weekend_dip_hysteresis_prevents_false_cancel():
-    eg = get_desk_profile("evergreen")
+    eg = Desk.get_desk_profile("evergreen")
     assert eg.cancel_floor < eg.live_min_margin
 
     # Mild dip where live ask (99.5M) still leaves +2.72% margin (>= 2.0% cancel_floor) stays active
@@ -328,9 +329,8 @@ def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
     ]
 
     from services.accounting import calc_max_profitable_buy, round_down_eve, round_up_eve
-    from services.ledgers import get_desk_profile
 
-    eg_max = round_down_eve(calc_max_profitable_buy(100_000_000.0, get_desk_profile("evergreen").live_min_margin))
+    eg_max = round_down_eve(calc_max_profitable_buy(100_000_000.0, Desk.get_desk_profile("evergreen").live_min_margin))
     near_top_buy = round_up_eve(eg_max * 1.015)
 
     monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows, [], []))

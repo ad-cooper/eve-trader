@@ -1,13 +1,13 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from services.desk import Desk
 from services.ledgers import (
-    get_annotated_desks,
-    get_desk_profile,
     load_cached_orders,
     load_market_prices_cache,
     ORDERS_CACHE_FILE,
 )
+from services.order_advisor import get_annotated_desks
 from services.esi import (
     fetch_jita_book_top,
     fetch_character_orders,
@@ -55,7 +55,7 @@ def _get_hangar_buy_cancel_reasons(
         row = rows_by_tid.get(tid) or {}
         b_info = buys_lookup.get(str(tid)) or {}
         desk_type = str(row.get("desk_type") or "evergreen").lower()
-        cfg = get_desk_profile(desk_type)
+        cfg = Desk.get_desk_profile(desk_type)
         my_price = float(b_info.get("price") or row.get("my_price") or 0.0)
         vol_rem = int(b_info.get("volume_remain") or row.get("my_qty") or 0)
         vol_tot = int(b_info.get("volume_total") or vol_rem)
@@ -86,7 +86,7 @@ def _get_hangar_buy_cancel_reasons(
     for tid in overlapping_tids:
         row = rows_by_tid.get(tid) or {}
         desk_type = str(row.get("desk_type") or "evergreen").lower()
-        cfg = get_desk_profile(desk_type)
+        cfg = Desk.get_desk_profile(desk_type)
         p_info = market_prices.get(str(tid)) or {}
         live_ask = float(p_info.get("lowest_ask") or 0.0)
         target_sell = float(row.get("target_sell") or 0.0)
@@ -132,7 +132,7 @@ def _evaluate_sell_order_action(
     desk_upper = desk_type.upper()
     ref_cost = real_unit_cost if real_unit_cost > 0 else float(item.get("target_buy") or 0.0)
     target_sell = float(item.get("target_sell") or 0.0)
-    cfg = get_desk_profile(desk_type)
+    cfg = Desk.get_desk_profile(desk_type)
 
     if name in bl_items:
         return "CANCEL", {

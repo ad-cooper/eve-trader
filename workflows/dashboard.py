@@ -2,7 +2,8 @@ import os
 import json
 from services.esi import fetch_wallet_balance, load_sso_tokens
 from services.accounting import load_performance
-from services.ledgers import get_annotated_desks, load_sniper_deals, load_cached_orders
+from services.ledgers import load_sniper_deals, load_cached_orders
+from services.order_advisor import get_annotated_desks
 from workflows.scheduler import STATE, get_last_ledger_run_time, get_last_sniper_run_time
 from workflows.order_actions import get_order_actions
 

@@ -11,9 +11,11 @@ from services.accounting import (
     eve_tick,
     calc_projected_margin,
 )
+from services.desk import (
+    Desk,
+    IncumbentState
+)
 from services.ledgers import (
-    IncumbentState,
-    get_desk_profile,
     select_desk_candidates as v1_select_desk_candidates,
     compute_candidate_pricing as v1_compute_candidate_pricing,
     compute_line_sizing as v1_compute_line_sizing,
@@ -323,7 +325,7 @@ def v2_select_desk_candidates(
       - Tactical favors lumpy LP_FACTION & high-dump FARMED_RNG swings (5-10d cycle).
       - Hold favors inelastic FARMED_RNG & LP_FACTION cyclical troughs (10-21d cycle).
     """
-    cfg = get_desk_profile(desk_type)
+    cfg = Desk.get_desk_profile(desk_type)
     scfg = cfg.selection
     if "supply_class" not in df.columns:
         df = enrich_universe_fundamentals(df)
@@ -436,7 +438,7 @@ def v2_compute_candidate_pricing(
     V2 pricing uses `effective_clearing_ask` (ignoring thin <0.35d tourist lowballs)
     so transient lowball asks do not depress target exits or distort margins.
     """
-    scfg = get_desk_profile(desk_type).selection
+    scfg = Desk.get_desk_profile(desk_type).selection
     effective_p_info = dict(p_info or {})
     if effective_p_info.get("is_thin_lowball") and effective_p_info.get("effective_clearing_ask", 0.0) > 0:
         effective_p_info["lowest_ask"] = effective_p_info["effective_clearing_ask"]
@@ -462,7 +464,7 @@ def v2_evaluate_order_action(
     V2 buy-order evaluation: if live ask dipped only because of a thin lowball queue
     (<0.40 days of supply) on LP_FACTION / FARMED_RNG items, holds firm instead of cancelling.
     """
-    from services.ledgers import evaluate_order_action as v1_eval
+    from services.order_advisor import evaluate_order_action as v1_eval
 
     if (
         ask_days_of_supply is not None
@@ -471,7 +473,7 @@ def v2_evaluate_order_action(
         and csv_sell > 0
     ):
         base_margin = calc_projected_margin(my_price, csv_sell)
-        cfg = get_desk_profile(desk_type)
+        cfg = Desk.get_desk_profile(desk_type)
         if base_margin >= cfg.cancel_floor:
             if not top_buy or top_buy <= 0:
                 return "PATIENT", "AWAITING QUOTE"

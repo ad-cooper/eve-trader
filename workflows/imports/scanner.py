@@ -17,7 +17,8 @@ from services.esi import (
 )
 from services.ledgers import get_desk_claimed_type_ids, is_item_blacklisted
 from services.market import ensure_jita_asks, fetch_station_asks_bulk
-from services.sde import PACKAGED_SHIP_M3, connect_analytics, resolve_sde_items
+from services.sde import PACKAGED_SHIP_M3, resolve_sde_items
+from services.analytics_db import open_analytics_connection
 from services.staging_diff import get_observed_staging_velocity, process_snapshot_diff
 from services.storage import read_json, write_json
 from workflows.imports.freight import calc_courier_freight, calc_hisec_optimal_split

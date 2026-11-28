@@ -1,5 +1,6 @@
 import datetime
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 
@@ -7,6 +8,7 @@ import duckdb
 import pandas as pd
 import pytest
 
+import services.analytics_db as analytics_db
 import scripts.generate_ledgers as gen_led
 import services.exclusions as bl_mod
 import services.sde as sde_mod
@@ -68,11 +70,15 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     temp_duck = work_dir / "run_analytics.duckdb"
     shutil.copy2(fixture_duck, temp_duck)
 
-    def _connect_analytics(read_only: bool = False, attach_sde: bool = True):
+    @contextmanager
+    def _open_analytics_connection(read_only: bool = False, attach_sde: bool = True, db_path=None, sde_path=None):
         con = duckdb.connect(str(temp_duck), read_only=read_only)
-        if attach_sde and fixture_sqlite.exists():
-            con.execute(f"ATTACH '{fixture_sqlite}' AS sde (TYPE SQLITE);")
-        return con
+        try:
+            if attach_sde and fixture_sqlite.exists():
+                con.execute(f"ATTACH '{fixture_sqlite}' AS sde (TYPE SQLITE);")
+            yield con
+        finally:
+            con.close()
 
     fixture_orders = json.loads((work_dir / "inputs" / "character_orders.json").read_text(encoding="utf-8"))
     fixture_assets = json.loads((work_dir / "inputs" / "character_assets.json").read_text(encoding="utf-8"))
@@ -98,21 +104,16 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     monkeypatch.setattr(gen_led, "DUCKDB_PATH", str(temp_duck))
     monkeypatch.setattr(gen_led, "OUTPUT_DIR", str(actual_out))
     monkeypatch.setattr(gen_led, "MARKET_CACHE_FILE", str(work_dir / "inputs" / "market_prices_cache.json"))
-    monkeypatch.setattr(gen_led, "connect_analytics", _connect_analytics)
+    monkeypatch.setattr(analytics_db, "open_analytics_connection", _open_analytics_connection)
     monkeypatch.setattr(gen_led, "read_json", _fixture_read_json)
     monkeypatch.setattr("services.ledgers.read_json", _fixture_read_json)
     monkeypatch.setattr(sde_mod, "SQLITE_PATH", str(fixture_sqlite))
     monkeypatch.setattr(sde_mod, "DUCKDB_PATH", str(temp_duck))
     monkeypatch.setattr(bl_mod, "BLACKLIST_FILE", str(work_dir / "inputs" / "temporary_blacklist.json"))
-
+    monkeypatch.setattr("services.desk.read_json", _fixture_read_json)
     monkeypatch.setattr("services.strategy_versions.STRATEGY_CONFIG_FILE", str(work_dir / "strategy_config.json"))
     monkeypatch.setattr(
         "services.strategy_versions.get_version_output_dir",
-        lambda ver, base_dir="ledgers": str(actual_out),
-    )
-    monkeypatch.setattr(
-        gen_led,
-        "get_version_output_dir",
         lambda ver, base_dir="ledgers": str(actual_out),
     )
 

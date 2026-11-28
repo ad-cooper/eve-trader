@@ -41,6 +41,21 @@ def calc_net_proceeds(sell_price: float, exit_fee: float = TOTAL_EXIT_FEE) -> fl
     """Net ISK realized after broker fee and sales tax exit costs."""
     return sell_price * (1.0 - exit_fee)
 
+def load_recent_losing_typeids(min_loss_isk: float = 1_000_000.0) -> set[int]:
+    payload = load_performance() or {}
+    items = payload.get("items") or []
+    loss_cutoff = -abs(float(min_loss_isk))
+
+    losing_tids: set[int] = set()
+    for item in items:
+        try:
+            tid = int(item["type_id"])
+            profit = float(item.get("profit", 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if profit < loss_cutoff:
+            losing_tids.add(tid)
+    return losing_tids
 
 def calc_max_profitable_buy(
     sell_price: float,
@@ -277,4 +292,4 @@ def calculate_performance():
 
 
 def load_performance():
-    return read_json(PERF_CACHE_FILE)
+    return read_json(PERF_CACHE_FILE, default={})

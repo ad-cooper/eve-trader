@@ -271,7 +271,42 @@ def resolve_role_character(role: str = "cj6mt", default_name: str = "Skie Ankora
         )
     return target_name, token, int(char_id)
 
+def resolve_character_equity(
+    orders_cache_paths: tuple[str, ...] = ("ledgers/character_orders.json", "data/character_orders.json"),
+    wallet_cache_paths: tuple[str, ...] = ("data/wallet_cache.json", "ledgers/wallet_cache.json"),
+    min_valid_equity: float = 1.0e9,
+) -> tuple[float, float, float]:
+    """Returns (wallet, escrow, total_equity) using live ESI with local cache fallback."""
+    wallet = 0.0
+    escrow = 0.0
 
+    try:
+        wallet = float(fetch_wallet_balance() or 0.0)
+        orders = fetch_character_orders() or {}
+        escrow = float(orders.get("total_escrow", 0.0))
+    except Exception as e:
+        print(f"[!] Live ESI equity lookup failed: {e}")
+
+    if escrow <= 0.0:
+        for path in orders_cache_paths:
+            cached = float((read_json(path) or {}).get("total_escrow", 0.0))
+            if cached > 0:
+                print(f"[*] Recovered {cached/1e9:.2f}B ISK escrow from local cache ({path})")
+                escrow = cached
+                break
+
+    if wallet <= 0.0:
+        for path in wallet_cache_paths:
+            cached = float((read_json(path) or {}).get("balance", 0.0))
+            if cached > 0:
+                print(f"[*] Recovered {cached/1e9:.2f}B ISK wallet from local cache ({path})")
+                wallet = cached
+                break
+
+    total_equity = wallet + escrow
+    if total_equity > min_valid_equity:
+        print(f"[*] Dynamic equity resolved: {wallet/1e9:.2f}B Liquid + {escrow/1e9:.2f}B Escrow = {total_equity/1e9:.2f}B ISK")
+    return wallet, escrow, total_equity
 
 def fetch_character_orders():
     tokens = load_sso_tokens()

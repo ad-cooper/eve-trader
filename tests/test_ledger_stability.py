@@ -1,15 +1,18 @@
 import pandas as pd
 from services.ledgers import (
     resolve_desk_incumbents,
-    build_universe_exclusion_mask,
     select_desk_candidates,
     compute_candidate_pricing,
     compute_line_sizing,
-    annotate_desk_items,
+)
+from services.order_advisor import (
     _inject_orphaned_buys,
+    annotate_desk_items
 )
 import scripts.generate_ledgers as gen_led
-
+from services.desk import Desk
+from services.market_universe import build_universe_exclusion_mask
+from services.strategy_versions import get_strategy_version
 
 def _make_universe_row(
     type_id: int,
@@ -100,7 +103,7 @@ def test_sticky_incumbents_sort_ahead_of_higher_scoring_new_candidates():
     candidates, params = select_desk_candidates(df, "evergreen", mask, incumbents.desk_sticky_ids)
 
     assert list(candidates["type_id"]) == [301, 302]
-
+    strategy = get_strategy_version("v2")
     rows, _, claimed, sticky_kept = gen_led.allocate_desk_rows(
         candidates=candidates,
         desk_type="evergreen",
@@ -108,6 +111,7 @@ def test_sticky_incumbents_sort_ahead_of_higher_scoring_new_candidates():
         market_telemetry={"301": {"lowest_ask": 104_000_000.0}, "302": {"lowest_ask": 105_000_000.0}},
         desk_params=params,
         incumbents=incumbents,
+        strat=strategy
     )
     assert claimed == [301]
     assert sticky_kept == 1
@@ -146,9 +150,10 @@ def test_held_inventory_and_active_sells_never_dropped_on_margin_or_loss_or_stoc
     assert list(df[mask]["type_id"]) == [401]
 
     row = df[mask].iloc[0]
+    desk = Desk.get_desk_profile("hold")
     pricing = compute_candidate_pricing(
         row=row,
-        desk_type="hold",
+        desk_or_type=desk,
         p_info={"lowest_ask": None, "top_buy": 99_000_000.0},
         incumbents=incumbents,
         is_sticky=True,
@@ -174,10 +179,8 @@ def test_cross_desk_exclusivity_across_waterfall(monkeypatch):
     Items claimed by an upstream desk (Hold -> Tactical -> Evergreen) must never
     duplicate onto or flap to downstream desks across rebuilds.
     """
-    from services.ledgers import get_desk_profile
-
-    eg_cfg = get_desk_profile("evergreen")
-    tac_cfg = get_desk_profile("tactical")
+    eg_cfg = Desk.get_desk_profile("evergreen")
+    tac_cfg = Desk.get_desk_profile("tactical")
     eg_spread = max(14.5, eg_cfg.min_spread_pct + 0.5)
     eg_dump = max(0.0, tac_cfg.min_dump_freq_pct - 5.0)
 
@@ -186,9 +189,9 @@ def test_cross_desk_exclusivity_across_waterfall(monkeypatch):
         _make_universe_row(502, "Evergreen Workhorse", price_30d_m=50.0, price_180d_m=52.0, daily_vol=120.0, dump_freq=eg_dump, spread_pct=eg_spread),
     ])
 
-    monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {501: "hold", 502: "evergreen"}))
-    monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
-    monkeypatch.setattr(gen_led, "persist_desk_ledger", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Desk, "load_positions", lambda self, refresh=False: ({}, {}, {}, {501: "hold", 502: "evergreen"}))
+    monkeypatch.setattr(gen_led, "load_recent_losing_typeids", lambda: set())
+    monkeypatch.setattr(Desk, "persist_ledger", lambda *args, **kwargs: None)
 
     telemetry = {
         "501": {"lowest_ask": 165_000_000.0, "top_buy": 140_000_000.0},
@@ -274,10 +277,8 @@ def test_multi_ledger_cap_aware_roi_optimization(monkeypatch):
       2. Every allocated line across Hold, Tactical, and Evergreen clears its DeskProfile min_margin.
       3. Budget tails below min_line_cap cascade downstream instead of creating sub-threshold dust lines.
     """
-    from services.ledgers import get_desk_profile
-
-    eg_cfg = get_desk_profile("evergreen")
-    tac_cfg = get_desk_profile("tactical")
+    eg_cfg = Desk.get_desk_profile("evergreen")
+    tac_cfg = Desk.get_desk_profile("tactical")
     thin_spread = max(12.2, eg_cfg.min_spread_pct + 0.2)
     steady_dump = max(0.0, tac_cfg.min_dump_freq_pct - 5.0)
 
@@ -296,9 +297,9 @@ def test_multi_ledger_cap_aware_roi_optimization(monkeypatch):
     eg_cands, _ = select_desk_candidates(df, "evergreen", mask, set())
     assert list(eg_cands["type_id"])[0] == 702
 
-    monkeypatch.setattr(gen_led, "load_incumbent_positions", lambda: ({}, {}, {}, {}))
-    monkeypatch.setattr(gen_led, "load_recent_losing_tids", lambda: set())
-    monkeypatch.setattr(gen_led, "persist_desk_ledger", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Desk, "load_positions", lambda self, refresh=False: ({}, {}, {}, {501: "hold", 502: "evergreen"}))
+    monkeypatch.setattr(gen_led, "load_recent_losing_typeids", lambda: set())
+    monkeypatch.setattr(Desk, "persist_ledger", lambda *args, **kwargs: None)
 
     telemetry = {
         "701": {"lowest_ask": 106.0e6, "top_buy": 94.0e6},
