@@ -28,6 +28,7 @@ from constants import (
 )
 from services.desk import Desk, IncumbentState
 from services.desk_config import BUDGET_FILL_STOP_RATIO
+from services.esi import resolve_character_equity
 from services.market_universe import (
     build_universe_exclusion_mask,
     load_market_universe    
@@ -44,13 +45,26 @@ from services.strategy_versions import (
 from services.accounting import load_recent_losing_typeids
 
 def resolve_dynamic_budget(capital_arg: str) -> float:
-    """Resolves total trading budget from an explicit billion/ISK value or fallback."""
-    if capital_arg and capital_arg.lower() != "auto":
+    """
+    Resolves total trading budget.
+    - If explicit number (e.g. '75.0', '120'): converts billions to ISK (< 1000 treated as billions).
+    - If 'auto' (or invalid/empty): resolves wallet + escrow via resolve_character_equity()
+      above 1.0e9 ISK, falling back to DEFAULT_FALLBACK_BUDGET.
+    """
+    if capital_arg and capital_arg.strip().lower() != "auto":
         try:
             val = float(capital_arg)
             return val * 1e9 if val < 1000.0 else val
         except ValueError:
-            print(f"[!] Invalid capital argument '{capital_arg}', falling back to default.")
+            print(f"[!] Invalid capital argument '{capital_arg}', falling back to auto resolution.")
+
+    min_valid_equity = 1.0e9
+    try:
+        _, _, total_equity = resolve_character_equity(min_valid_equity=min_valid_equity)
+        if float(total_equity or 0.0) > min_valid_equity:
+            return float(total_equity)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f"[!] Dynamic equity lookup failed: {exc}")
 
     print(f"[*] Using fallback budget: {DEFAULT_FALLBACK_BUDGET/1e9:.1f}B ISK")
     return DEFAULT_FALLBACK_BUDGET
