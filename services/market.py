@@ -16,7 +16,6 @@ from services.accounting import calc_line_financials
 from services.esi import (
     create_esi_session as create_session,
     extract_lowest_sell_for_station,
-    extract_top_buy_for_station,
     fetch_station_book_top,
     fetch_wallet_transactions,
 )

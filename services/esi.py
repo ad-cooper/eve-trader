@@ -1,8 +1,6 @@
 import os
 import json
 import time
-import base64
-import urllib.parse
 import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,11 +14,8 @@ from services.storage import read_json, write_json
 
 from constants import (
     ASSETS_CACHE_FILE,
-    CALLBACK_URL,
-    CLIENT_ID,
     ESI_BASE_URL,
     ESI_HEADERS,
-    EVE_AUTH_URL,
     HISTORY_CACHE_FILE,
     ORDERS_CACHE_FILE,
     JITA_STATION_ID,
@@ -28,7 +23,6 @@ from constants import (
     JUMP_ORDER_RANGES,
     PERIMETER_SYSTEM_ID,
     REGION_THE_FORGE,
-    SCOPES,
     WALLET_CACHE_FILE,
     WALLET_TX_CACHE_FILE
 )

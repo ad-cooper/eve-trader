@@ -1,6 +1,6 @@
 import os
 import sqlite3
-import pandas as pd
+import pandas
 import scripts.generate_ledgers as gen_led
 from services.strategy_versions import (
     StrategyVersion,
@@ -17,8 +17,8 @@ from services.strategy_versions import (
 )
 from services.desk import Desk
 
-def _sample_universe() -> pd.DataFrame:
-    return pd.DataFrame([
+def _sample_universe() -> pandas.DataFrame:
+    return pandas.DataFrame([
         {
             "type_id": 801,
             "item_name": "Caracal",
@@ -150,7 +150,7 @@ def test_side_by_side_v1_and_v2_shadow_isolation_and_ai_registration(tmp_path, m
         out_dir = get_version_output_dir(self.strategy_version, base_dir=gen_led.OUTPUT_DIR)
         os.makedirs(out_dir, exist_ok=True)
         out_file = os.path.join(out_dir, f"{self.desk_type}_ledger.csv")
-        pd.DataFrame(ledger_rows).to_csv(out_file, index=False)
+        pandas.DataFrame(ledger_rows).to_csv(out_file, index=False)
 
     monkeypatch.setattr(Desk, "persist_ledger", _mock_persist_ledger)
 
@@ -227,7 +227,7 @@ def test_persist_desk_ledger_logs_strategy_version_to_duckdb(tmp_path, monkeypat
 def test_v2_rejects_ultra_low_volume_high_price_traps():
     from services.strategy_versions import v2_select_desk_candidates
 
-    df = pd.DataFrame([
+    df = pandas.DataFrame([
         {
             "type_id": 99901,
             "item_name": "Neophite",
@@ -261,7 +261,7 @@ def test_v2_rejects_ultra_low_volume_high_price_traps():
             "daily_turnover_m": 3640.0,
         },
     ])
-    mask = pd.Series(True, index=df.index)
+    mask = pandas.Series(True, index=df.index)
     cands, _ = v2_select_desk_candidates(df, "tactical", mask, set())
     picked_ids = set(cands["type_id"].astype(int))
     assert 99901 not in picked_ids

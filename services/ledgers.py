@@ -8,12 +8,6 @@ from services.accounting import (
 )
 from services.desk import Desk, IncumbentState
 from services.desk_config import DESK_PROFILES, DeskProfile
-from services.storage import (
-    load_desk_csv,
-    load_market_prices_cache, 
-    load_cached_orders,
-    read_json
-)
 
 def _resolve_desk_context(
     desk: Desk | str | None = None,

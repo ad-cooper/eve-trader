@@ -7,8 +7,6 @@ from services.sde import resolve_type_ids
 from constants import (
     BUY_SCC_SURCHARGE,
     PERF_CACHE_FILE,
-    SALES_TAX_RATE,
-    SELL_BROKER_FEE,
     TOTAL_EXIT_FEE,
 )
 

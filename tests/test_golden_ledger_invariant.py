@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 
 import duckdb
-import pandas as pd
+import pandas
 import pytest
 
 import constants
@@ -26,8 +26,8 @@ def _assert_csv_matches_golden(actual_csv: Path, expected_csv: Path) -> None:
     assert expected_csv.exists(), f"Missing golden file: {expected_csv}"
     assert actual_csv.exists(), f"Pipeline did not produce output CSV: {actual_csv}"
 
-    exp_df = pd.read_csv(expected_csv)
-    act_df = pd.read_csv(actual_csv)
+    exp_df = pandas.read_csv(expected_csv)
+    act_df = pandas.read_csv(actual_csv)
 
     assert list(act_df.columns) == list(exp_df.columns), (
         f"Column mismatch in {actual_csv.name}: {list(act_df.columns)} != {list(exp_df.columns)}"
@@ -40,8 +40,8 @@ def _assert_csv_matches_golden(actual_csv: Path, expected_csv: Path) -> None:
         return
 
     for col in exp_df.columns:
-        if pd.api.types.is_numeric_dtype(exp_df[col]):
-            pd.testing.assert_series_equal(
+        if pandas.api.types.is_numeric_dtype(exp_df[col]):
+            pandas.testing.assert_series_equal(
                 act_df[col].astype("float64"),
                 exp_df[col].astype("float64"),
                 check_names=False,
@@ -108,9 +108,8 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "MARKET_CACHE_FILE", str(work_dir / "inputs" / "market_prices_cache.json"))
     monkeypatch.setattr(analytics_db, "open_analytics_connection", _open_analytics_connection)
     monkeypatch.setattr(services.storage, "read_json", _fixture_read_json)
-    monkeypatch.setattr("services.ledgers.read_json", _fixture_read_json)
-    monkeypatch.setattr(sde_mod, "SQLITE_PATH", str(fixture_sqlite))
-    monkeypatch.setattr(sde_mod, "DUCKDB_PATH", str(temp_duck))
+    monkeypatch.setattr(constants, "SQLITE_PATH", str(fixture_sqlite))
+    monkeypatch.setattr(constants, "DUCKDB_PATH", str(temp_duck))
     monkeypatch.setattr(bl_mod, "BLACKLIST_FILE", str(work_dir / "inputs" / "temporary_blacklist.json"))
     monkeypatch.setattr("services.desk.read_json", _fixture_read_json)
     monkeypatch.setattr("services.strategy_versions.STRATEGY_CONFIG_FILE", str(work_dir / "strategy_config.json"))

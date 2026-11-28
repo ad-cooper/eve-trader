@@ -9,8 +9,7 @@ from services.accounting import (
 )
 from services.desk import Desk
 from services.esi import (
-    extract_top_buy_for_station,
-    fetch_station_book_top
+    extract_top_buy_for_station
 )
 from services.order_advisor import evaluate_order_action
 from services.staging_diff import _detect_order_fill_events

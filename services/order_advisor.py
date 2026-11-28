@@ -13,7 +13,6 @@ from services.exclusions import load_active_blacklist
 from services.storage import (
     load_all_desk_ledgers,
     load_cached_orders,
-    load_desk_csv,
     load_market_prices_cache
 )
 from services.strategy_versions import get_active_strategy_version, get_strategy_version

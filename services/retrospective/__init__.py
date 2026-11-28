@@ -1,13 +1,8 @@
 from services.retrospective.simulator import (
     DESK_ORDER,
-    _simulate_line_execution,
-    _simulate_waterfall_checkpoint,
-    _summarize_spread_compression_audit,
 )
 from services.retrospective.optimizer import (
     PROPOSALS_DIR,
-    _build_services_ledgers_diff,
-    _optimize_desk_profiles,
     run_local_retrospective,
 )
 from services.retrospective.autopilot import (

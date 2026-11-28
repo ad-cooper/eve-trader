@@ -5,14 +5,6 @@ import pandas as pd
 from contextlib import contextmanager
 from constants import DUCKDB_PATH, SQLITE_PATH
 
-
-from contextlib import contextmanager
-import duckdb
-import pandas as pd
-
-from constants import DUCKDB_PATH, SQLITE_PATH
-
-
 @contextmanager
 def open_analytics_connection(
     read_only: bool = True,

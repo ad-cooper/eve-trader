@@ -1,5 +1,4 @@
 import duckdb
-import math
 import pandas as pd
 
 from services.accounting import calc_net_proceeds, calc_unit_cost

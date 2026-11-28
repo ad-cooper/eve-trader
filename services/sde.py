@@ -1,14 +1,8 @@
-import duckdb
-import os
 import re
 
 from contextlib import contextmanager
 
 from services.analytics_db import open_analytics_connection
-from constants import (
-    DUCKDB_PATH,
-    SQLITE_PATH
-)
 
 # Packaged ship volumes (m3) by SDE groupID
 PACKAGED_SHIP_M3: dict[int, float] = {
