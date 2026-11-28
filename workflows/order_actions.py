@@ -11,7 +11,7 @@ from services.storage import (
 )
 from services.order_advisor import get_annotated_desks
 from services.esi import (
-    fetch_jita_book_top,
+    extract_top_buy_for_station,
     fetch_character_orders,
     load_cached_assets,
     fetch_character_assets,
@@ -234,7 +234,7 @@ def get_order_actions(desk: str = "all", refresh_live: bool = False) -> dict:
         })
         if active_tids:
             with ThreadPoolExecutor(max_workers=12) as ex:
-                for tid, top_b, low_s in ex.map(fetch_jita_book_top, active_tids):
+                for tid, top_b, low_s in ex.map(extract_top_buy_for_station, active_tids):
                     live_books[tid] = (top_b, low_s)
 
     sell_bumps: list[dict] = []

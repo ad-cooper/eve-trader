@@ -700,19 +700,6 @@ def fetch_structure_order_book(structure_id: int, access_token: str) -> tuple[di
                 entry["lowest_ask"] = price
     return book, all_orders
 
-
-def fetch_lowest_sell_order(session: requests.Session, type_id: int, station_id: int = JITA_STATION_ID, region_id: int = REGION_THE_FORGE):
-    url = f"{ESI_BASE_URL}/markets/{region_id}/orders/?datasource=tranquility&order_type=sell&type_id={type_id}"
-    try:
-        r = session.get(url, timeout=7)
-        if r.status_code == 200:
-            orders = [o for o in r.json() if o.get("location_id") == station_id]
-            if orders:
-                return type_id, min(o["price"] for o in orders)
-    except Exception:
-        pass
-    return type_id, None
-
 def extract_top_buy_for_station(
     orders: list[dict],
     station_id: int = JITA_STATION_ID,
@@ -748,39 +735,60 @@ def extract_top_buy_for_station(
 
     return max(competing) if competing else None
 
-
-def fetch_top_buy_order(
-    session: requests.Session,
-    type_id: int,
+def extract_lowest_sell_for_station(
+    orders: list[dict],
     station_id: int = JITA_STATION_ID,
+) -> float | None:
+    """Returns the lowest sell order price at `station_id` from a list of market order dicts."""
+    if not orders:
+        return None
+    prices = [
+        float(o["price"])
+        for o in orders
+        if o.get("location_id") == station_id and not o.get("is_buy_order", True)
+    ]
+    return min(prices) if prices else None
+
+
+def _fetch_region_type_orders(
+    type_id: int,
+    session: requests.Session | None = None,
+    order_type: str = "all",
     region_id: int = REGION_THE_FORGE,
-):
-    url = f"{ESI_BASE_URL}/markets/{region_id}/orders/?datasource=tranquility&order_type=buy&type_id={type_id}"
+    timeout: float = 8.0,
+) -> list[dict]:
+    client = session or requests
+    url = (
+        f"{ESI_BASE_URL}/markets/{region_id}/orders/"
+        f"?datasource=tranquility&order_type={order_type}&type_id={type_id}"
+    )
     try:
-        r = session.get(url, timeout=7)
-        if r.status_code == 200:
-            return type_id, extract_top_buy_for_station(r.json(), station_id=station_id)
+        res = client.get(url, headers=ESI_HEADERS, timeout=timeout)
+        if res.status_code == 200:
+            data = res.json()
+            return data if isinstance(data, list) else []
     except Exception:
         pass
-    return type_id, None
+    return []
 
-def fetch_jita_book_top(type_id: int, session: requests.Session | None = None) -> tuple[int, float, float]:
-    """Fetches (type_id, top_buy, lowest_sell) in Jita 4-4 via a single ESI order_type=all query."""
-    client = session or requests
-    try:
-        r = client.get(
-            f"{ESI_BASE_URL}/markets/{REGION_THE_FORGE}/orders/?datasource=tranquility&order_type=all&type_id={type_id}",
-            headers=ESI_HEADERS,
-            timeout=8,
-        )
-        if r.status_code != 200:
-            return type_id, 0.0, 0.0
-        orders = r.json()
-        top_buy = extract_top_buy_for_station(orders, station_id=JITA_STATION_ID) or 0.0
-        jita_sells = [o["price"] for o in orders if o.get("location_id") == JITA_STATION_ID and not o.get("is_buy_order")]
-        return type_id, top_buy, (min(jita_sells) if jita_sells else 0.0)
-    except Exception:
-        return type_id, 0.0, 0.0
+def fetch_station_book_top(
+    type_id: int,
+    session: requests.Session | None = None,
+    station_id: int = JITA_STATION_ID,
+    region_id: int = REGION_THE_FORGE,
+) -> tuple[int, float | None, float | None]:
+    """Fetches (type_id, top_buy, lowest_sell) for `station_id` in a single order_type=all call."""
+    orders = _fetch_region_type_orders(
+        type_id=type_id,
+        session=session,
+        order_type="all",
+        region_id=region_id,
+    )
+    if not orders:
+        return type_id, None, None
+    top_buy = extract_top_buy_for_station(orders=orders, station_id=station_id)
+    lowest_sell = extract_lowest_sell_for_station(orders=orders, station_id=station_id)
+    return type_id, top_buy, lowest_sell
 
 def fetch_universe_names(ids: list[int]) -> dict[int, str]:
     """Resolves EVE universe IDs to names via POST /universe/names/."""

@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from services.desk import Desk
 from services.order_advisor import get_annotated_desks
-from services.esi import fetch_jita_book_top
+from services.esi import fetch_station_book_top
 from services.accounting import (
     BUY_SCC_SURCHARGE,
     TOTAL_EXIT_FEE,
@@ -46,8 +46,8 @@ def audit_missing_buys(desk: str = "all") -> dict:
     tids = list({int(r["type_id"]) for r in unplaced if r.get("type_id")})
     books = {}
     with ThreadPoolExecutor(max_workers=12) as ex:
-        for tid, top_b, low_s in ex.map(fetch_jita_book_top, tids):
-            books[tid] = (top_b, low_s)
+        for tid, top_b, low_s in ex.map(fetch_station_book_top, tids):
+            books[tid] = (float(top_b or 0.0), float(low_s or 0.0))
 
     out_items = []
     skipped_small_count = 0

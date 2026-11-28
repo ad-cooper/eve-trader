@@ -129,9 +129,7 @@ def generate_desk_ledger(
     scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
     desk_obj = desk or Desk(
         desk_type=desk_type,
-        strategy_version=strategy_version,
-        output_dir=OUTPUT_DIR,
-        db_path=DUCKDB_PATH,
+        strategy_version=strategy_version
     )
     incumbents = desk_obj.resolve_incumbents(df=df, claimed_ids=claimed_ids)
     base_mask = build_universe_exclusion_mask(
@@ -187,9 +185,7 @@ def run_waterfall(
     desks = {
         d: Desk(
             desk_type=d,
-            strategy_version=strategy_version,
-            output_dir=OUTPUT_DIR,
-            db_path=DUCKDB_PATH,
+            strategy_version=strategy_version
         )
         for d in DESK_ORDER
     }
@@ -237,28 +233,33 @@ def run_waterfall(
     print(f"[+] Total Portfolio Deployed: {total_deployed/1e9:.2f}B / {total_budget/1e9:.2f}B ISK ({(total_deployed/total_budget)*100:.1f}%)")
     return outcomes
 
+def resolve_versions(version_arg: str | None) -> list[str]:
+    """Resolves strategy versions to execute in priority order (active version first)."""
+    active_v = get_active_strategy_version()
+    if not version_arg or version_arg.strip().lower() == "all":
+        return [active_v] + [v for v in list_strategy_versions() if v != active_v]
+    return [v.strip().lower() for v in version_arg.split(",") if v.strip()]
 
-def main():
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--desk", default="all", choices=["evergreen", "tactical", "hold", "all"])
     parser.add_argument("--capital", default="auto", help="Total portfolio capital in billions or 'auto' (e.g. 50.0, 89.5, 120.0, auto)")
     parser.add_argument("--version", default="all", help="Strategy version to run ('v1', 'v2', 'all', or registered ai-* version)")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
 
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     total_budget = resolve_dynamic_budget(args.capital)
     market_telemetry = load_cached_market_telemetry()
     df = load_market_universe()
 
     target_desks = set(DESK_ORDER) if args.desk == "all" else {args.desk}
     shared_snapshot_time = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    active_v = get_active_strategy_version()
 
-    if args.version.lower() == "all":
-        active_v = get_active_strategy_version()
-        versions_to_run = [active_v] + [v for v in list_strategy_versions() if v != active_v]
-    else:
-        versions_to_run = [v.strip().lower() for v in args.version.split(",") if v.strip()]
-
-    for ver in versions_to_run:
+    for ver in resolve_versions(args.version):
         try:
             run_waterfall(
                 df,
@@ -269,10 +270,6 @@ def main():
                 snapshot_time=shared_snapshot_time,
             )
         except Exception as e:
-            if ver == get_active_strategy_version():
+            if ver == active_v:
                 raise
             print(f"[!] Shadow version '{ver}' failed (non-blocking): {e}")
-
-
-if __name__ == "__main__":
-    main()

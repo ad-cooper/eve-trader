@@ -8,6 +8,10 @@ from services.accounting import (
     match_fifo_lots,
 )
 from services.desk import Desk
+from services.esi import (
+    extract_top_buy_for_station,
+    fetch_station_book_top
+)
 from services.order_advisor import evaluate_order_action
 from services.staging_diff import _detect_order_fill_events
 
@@ -85,8 +89,6 @@ def test_staging_diff_detects_all_fill_archetypes():
 
 
 def test_jita_buy_order_reachability_filtering():
-    from services.esi import extract_top_buy_for_station
-
     orders = [
         # Station-only order in Urlen (different system) -> must NOT match Jita 4-4
         {"location_id": 60003763, "system_id": 30000140, "range": "station", "price": 500_000_000.0, "is_buy_order": True},
@@ -157,7 +159,7 @@ def test_update_ledger_market_prices_uses_bulk_asks_and_targeted_esi(monkeypatch
         esi_polled.append(tid)
         return tid, 91.0, 99.5
 
-    monkeypatch.setattr(mkt_mod, "fetch_jita_book_top", fake_jita_book)
+    monkeypatch.setattr(mkt_mod, "fetch_station_book_top", fake_jita_book)
 
     result = mkt_mod.update_ledger_market_prices()
     # Only type_id 10 (the active buy order) should hit ESI; 20 & 30 are satisfied by bulk Fuzzwork asks
@@ -336,7 +338,7 @@ def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
     monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows, [], []))
     monkeypatch.setattr(
         bo,
-        "fetch_jita_book_top",
+        "fetch_station_book_top",
         lambda tid: (tid, 84_900_000.0, 97_000_000.0) if tid == 2001 else (tid, near_top_buy, 100_000_000.0),
     )
 
@@ -477,7 +479,7 @@ def test_missing_buys_filters_low_capital_and_low_profit_dust_orders(monkeypatch
     }
 
     monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows[:1], unplaced_rows[1:], []))
-    monkeypatch.setattr(bo, "fetch_jita_book_top", lambda tid: books[tid])
+    monkeypatch.setattr(bo, "fetch_station_book_top", lambda tid: books[tid])
 
     res = bo.audit_missing_buys(desk="all")
     assert res["total_items"] == 1
@@ -515,7 +517,7 @@ def test_missing_buys_uses_hold_recovery_target_and_skips_buried_margin_caps(mon
     }
 
     monkeypatch.setattr(bo, "get_annotated_desks", lambda: (unplaced_rows[1:], [], unplaced_rows[:1]))
-    monkeypatch.setattr(bo, "fetch_jita_book_top", lambda tid: books[tid])
+    monkeypatch.setattr(bo, "fetch_station_book_top", lambda tid: books[tid])
 
     res = bo.audit_missing_buys(desk="all")
     assert res["total_items"] == 1

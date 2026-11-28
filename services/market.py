@@ -15,8 +15,9 @@ from services.storage import (
 from services.accounting import calc_line_financials
 from services.esi import (
     create_esi_session as create_session,
-    fetch_lowest_sell_order,
-    fetch_jita_book_top,
+    extract_lowest_sell_for_station,
+    extract_top_buy_for_station,
+    fetch_station_book_top,
     fetch_wallet_transactions,
 )
 from services.sde import resolve_type_ids
@@ -76,11 +77,10 @@ def ensure_jita_asks(session: requests.Session, tids: list[int], jita_asks: dict
     still_missing = [tid for tid in missing if tid not in jita_asks]
     if still_missing:
         with ThreadPoolExecutor(max_workers=16) as ex:
-            futures = {ex.submit(fetch_lowest_sell_order, session, tid): tid for tid in still_missing}
+            futures = {ex.submit(extract_lowest_sell_for_station, session, tid): tid for tid in still_missing}
             for fut in as_completed(futures):
                 tid, ask = fut.result()
                 jita_asks[tid] = float(ask) if (ask and ask > 0) else None
-
 
 def update_ledger_market_prices():
     """
@@ -114,10 +114,10 @@ def update_ledger_market_prices():
     esi_books: dict[int, tuple[float, float]] = {}
     if esi_target_tids:
         with ThreadPoolExecutor(max_workers=12) as executor:
-            futures = {executor.submit(fetch_jita_book_top, tid, session): tid for tid in esi_target_tids}
+            futures = {executor.submit(fetch_station_book_top, tid, session): tid for tid in esi_target_tids}
             for fut in as_completed(futures):
                 tid, top_b, low_s = fut.result()
-                esi_books[tid] = (top_b, low_s)
+                esi_books[tid] = (float(top_b or 0.0), float(low_s or 0.0))
 
     prices = {}
     for tid in unique_tids:
@@ -134,7 +134,6 @@ def update_ledger_market_prices():
     write_json(MARKET_CACHE_FILE, prices)
 
     return prices
-
 
 def _query_wallet_buys(type_ids: list[int]) -> dict[int, list[dict]]:
     """Groups live ESI wallet buy transactions by type_id for cost-basis and hold-duration lookups."""
