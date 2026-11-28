@@ -13,7 +13,7 @@ from services.esi import (
 )
 from services.order_advisor import evaluate_order_action
 from services.staging_diff import _detect_order_fill_events
-
+from services.strategy_versions import compute_book_depth_stats
 
 def test_eve_tick_and_rounding():
     assert eve_tick(141_000_000.0) == 100_000.0
@@ -549,3 +549,14 @@ def test_performance_item_name_resolution_diagnostic(monkeypatch, tmp_path):
         assert tid in resolved and resolved[tid] and not str(resolved[tid]).startswith("Type "), (
             f"Missing or fallback name for type_id={tid}: {resolved.get(tid)!r}"
         )
+
+def test_book_depth_stats_distinguish_thin_lowball_from_saturation_wall():
+    thin = compute_book_depth_stats([(140_000_000.0, 1), (175_000_000.0, 20)], daily_vol_30d=12.0)
+    assert thin["is_thin_lowball"] is True
+    assert thin["effective_clearing_ask"] == 175_000_000.0
+    assert thin["ask_days_of_supply"] < 0.35
+
+    wall = compute_book_depth_stats([(150_600_000.0, 2), (151_000_000.0, 50)], daily_vol_30d=25.0)
+    assert wall["is_thin_lowball"] is False
+    assert wall["effective_clearing_ask"] == 151_000_000.0
+    assert wall["ask_days_of_supply"] >= 2.0

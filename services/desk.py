@@ -56,9 +56,9 @@ def resolve_desk_incumbents(
 @dataclass
 class Desk:
     desk_type: str
-    strategy_version: str = "v1"
     output_dir: str = OUTPUT_DIR
     db_path: str = DUCKDB_PATH
+    strategy_version: str = "v2", # This is deprecated but avoiding completely unwiring it for now
     profile: DeskProfile = field(init=False)
     _positions_cache: tuple[dict, dict, dict, dict] | None = field(default=None, repr=False)
 
@@ -178,9 +178,8 @@ class Desk:
             record_ledger_history_snapshot(
                 df_ledger=df_ledger,
                 desk_type=self.desk_type,
-                strategy_version=self.strategy_version,
                 snapshot_time=snapshot_time,
                 db_path=self.db_path,
             )
         except Exception as e:
-            print(f"[!] Failed to log {self.strategy_version} history to DuckDB: {e}")
+            print(f"[!] Failed to log history to DuckDB: {e}")

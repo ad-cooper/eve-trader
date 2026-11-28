@@ -12,7 +12,11 @@ from services.order_advisor import (
 import scripts.generate_ledgers as gen_led
 from services.desk import Desk
 from services.market_universe import build_universe_exclusion_mask
-from services.strategy_versions import get_strategy_version
+from services.strategy_versions import (
+    get_strategy_version,
+    v2_evaluate_order_action,
+    v2_evaluate_sell_collision
+)
 
 def _make_universe_row(
     type_id: int,
@@ -110,8 +114,7 @@ def test_sticky_incumbents_sort_ahead_of_higher_scoring_new_candidates():
         budget=220_000_000.0,
         market_telemetry={"301": {"lowest_ask": 104_000_000.0}, "302": {"lowest_ask": 105_000_000.0}},
         desk_params=params,
-        incumbents=incumbents,
-        strat=strategy
+        incumbents=incumbents
     )
     assert claimed == [301]
     assert sticky_kept == 1
@@ -312,3 +315,32 @@ def test_multi_ledger_cap_aware_roi_optimization(monkeypatch):
     assert 704 in outcomes["hold"][0]
     assert 703 in outcomes["tactical"][0]
     assert 702 in outcomes["evergreen"][0]
+
+def test_v2_holds_through_thin_lowballs_on_buys_and_sells():
+    b_code, b_label = v2_evaluate_order_action(
+        desk_type="tactical",
+        my_price=145_000_000.0,
+        top_buy=145_000_000.0,
+        t_sell=148_000_000.0,
+        dump_freq=45.0,
+        csv_sell=175_000_000.0,
+        live_ask=140_000_000.0,
+        ask_days_of_supply=0.10,
+        supply_class="FARMED_RNG",
+    )
+    assert b_code == "TOP_BOOK"
+    assert "THIN SUPPLY" in b_label
+
+    act, act_type, rec_sell, col = v2_evaluate_sell_collision(
+        desk="TACTICAL",
+        qty=3,
+        unit_cost=135_000_000.0,
+        lowest_ask=140_000_000.0,
+        active_orders=[{"price": 175_000_000.0, "volume_remain": 4}],
+        hold_meta={},
+        ask_days_of_supply=0.10,
+        supply_class="FARMED_RNG",
+    )
+    assert act == "HOLD WALL (THIN LOWBALL)"
+    assert rec_sell == 175_000_000.0
+    assert col["action"] == "HOLD_HANGAR"

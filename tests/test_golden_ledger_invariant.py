@@ -104,7 +104,7 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     monkeypatch.chdir(work_dir)
     monkeypatch.setattr(gen_led, "SQLITE_PATH", str(fixture_sqlite))
     monkeypatch.setattr(gen_led, "DUCKDB_PATH", str(temp_duck))
-    monkeypatch.setattr(gen_led, "OUTPUT_DIR", str(actual_out))
+    monkeypatch.setattr(constants, "OUTPUT_DIR", str(actual_out))
     monkeypatch.setattr(constants, "MARKET_CACHE_FILE", str(work_dir / "inputs" / "market_prices_cache.json"))
     monkeypatch.setattr(analytics_db, "open_analytics_connection", _open_analytics_connection)
     monkeypatch.setattr(services.storage, "read_json", _fixture_read_json)
@@ -125,7 +125,6 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
         total_budget=budget,
         market_telemetry=fixture_telemetry,
         target_desks={"hold", "tactical", "evergreen"},
-        strategy_version="v2",
         snapshot_time=snap_time,
     )
 

@@ -119,7 +119,6 @@ def query_earliest_buy_and_snapshot_dates(
 def record_ledger_history_snapshot(
     df_ledger: pd.DataFrame,
     desk_type: str,
-    strategy_version: str = "v1",
     snapshot_time=None,
     db_path: str | None = None,
 ) -> None:
@@ -134,7 +133,7 @@ def record_ledger_history_snapshot(
         df_history["supply_class"] = "LEGACY_V1"
     df_history.insert(0, "desk_type", desk_type)
     df_history.insert(0, "snapshot_time", snap_ts)
-    df_history["strategy_version"] = strategy_version
+    df_history["strategy_version"] = "v2" # This is deprecated for now, but we are keeping the v1/v2 data
 
     con = duckdb.connect(db_path) if db_path else duckdb.connect()
     try:

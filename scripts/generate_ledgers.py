@@ -23,7 +23,6 @@ from constants import (
     DEFAULT_FALLBACK_BUDGET,
     DESK_ORDER,
     DUCKDB_PATH,
-    OUTPUT_DIR,
     SQLITE_PATH,
 )
 from services.desk import Desk, IncumbentState
@@ -37,10 +36,10 @@ from services.market import (
     load_cached_market_telemetry
 )
 from services.strategy_versions import (
-    StrategyVersion,
-    get_active_strategy_version,
-    get_strategy_version,
-    list_strategy_versions,
+    enrich_universe_fundamentals as enrich_universe,
+    v1_compute_line_sizing as size_line,
+    v2_compute_candidate_pricing as price_candidate,
+    v2_select_desk_candidates as select_candidates,
 )
 from services.accounting import load_recent_losing_typeids
 
@@ -75,8 +74,7 @@ def allocate_desk_rows(
     budget: float,
     market_telemetry: dict,
     desk_params: dict,
-    incumbents: IncumbentState,
-    strat: StrategyVersion,
+    incumbents: IncumbentState
 ) -> tuple[list[dict], float, list[int], int]:
     """Assembles ledger row dicts for ranked candidates up to the desk ISK budget."""
     ledger_rows: list[dict] = []
@@ -94,11 +92,11 @@ def allocate_desk_rows(
         passes_desk = bool(row.get("passes_desk", False))
         p_info = market_telemetry.get(str(tid)) or {}
 
-        pricing = strat.price_candidate(row, desk_type, p_info, incumbents, is_sticky)
+        pricing = price_candidate(row, desk_type, p_info, incumbents, is_sticky)
         if pricing is None:
             continue
 
-        sizing = strat.size_line(row, pricing, desk_params, incumbents, is_sticky, passes_desk, remaining_budget)
+        sizing = size_line(row, pricing, desk_params, incumbents, is_sticky, passes_desk, remaining_budget)
         if sizing is None:
             continue
 
@@ -134,16 +132,12 @@ def generate_desk_ledger(
     market_telemetry: dict,
     claimed_ids: set,
     total_portfolio: float = 50.0e9,
-    strategy_version: str = "v1",
     snapshot_time=None,
     desk: Desk | None = None,
-    strat: StrategyVersion | None = None,
 ) -> tuple[list[int], float]:
-    strat_obj = strat or get_strategy_version(strategy_version)
     scale_factor = max(1.0, min(2.5, total_portfolio / 50.0e9))
     desk_obj = desk or Desk(
-        desk_type=desk_type,
-        strategy_version=strategy_version
+        desk_type=desk_type
     )
     incumbents = desk_obj.resolve_incumbents(df=df, claimed_ids=claimed_ids)
     base_mask = build_universe_exclusion_mask(
@@ -152,7 +146,7 @@ def generate_desk_ledger(
         incumbents=incumbents,
         losing_tids=load_recent_losing_typeids(),
     )
-    candidates, desk_params = strat_obj.select_candidates(
+    candidates, desk_params = select_candidates(
         df,
         desk_obj.desk_type,
         base_mask,
@@ -165,8 +159,7 @@ def generate_desk_ledger(
         budget=budget,
         market_telemetry=market_telemetry,
         desk_params=desk_params,
-        incumbents=incumbents,
-        strat=strat_obj,
+        incumbents=incumbents
     )
     desk_obj.persist_ledger(
         ledger_rows=ledger_rows,
@@ -183,7 +176,6 @@ def run_waterfall(
     total_budget: float,
     market_telemetry: dict,
     target_desks: set[str],
-    strategy_version: str = "v1",
     snapshot_time=None,
 ) -> dict[str, tuple[list[int], float]]:
     """
@@ -194,13 +186,9 @@ def run_waterfall(
     carried_slack = 0.0
     outcomes: dict[str, tuple[list[int], float]] = {}
 
-    strat = get_strategy_version(strategy_version)
-    df_enriched = strat.enrich_universe(df, SQLITE_PATH, DUCKDB_PATH)
+    df_enriched = enrich_universe(df, SQLITE_PATH, DUCKDB_PATH)
     desks = {
-        d: Desk(
-            desk_type=d,
-            strategy_version=strategy_version
-        )
+        d: Desk(desk_type=d)
         for d in DESK_ORDER
     }
 
@@ -208,8 +196,7 @@ def run_waterfall(
         f"{desks[d].desk_type.capitalize()} {(total_budget * desks[d].ratio)/1e9:.2f}B"
         for d in DESK_ORDER
     )
-    print(f"\n=== Running Dynamic Multi-Desk Waterfall [{strategy_version.upper()}] ({total_budget/1e9:.2f}B ISK Portfolio) ===")
-    print(f"[*] Strategy: {strat.description}")
+    print(f"\n=== Running Dynamic Multi-Desk Waterfall] ({total_budget/1e9:.2f}B ISK Portfolio) ===")
     print(f"[*] Base Allocation Targets: {base_summary}")
 
     for desk_name in DESK_ORDER:
@@ -229,10 +216,8 @@ def run_waterfall(
                 market_telemetry,
                 claimed_ids,
                 total_budget,
-                strategy_version=strategy_version,
                 snapshot_time=snapshot_time,
-                desk=desk_obj,
-                strat=strat,
+                desk=desk_obj
             )
         else:
             ids, deployed_cap = desk_obj.existing_state()
@@ -243,25 +228,15 @@ def run_waterfall(
 
     total_deployed = sum(cap for _, cap in outcomes.values())
     counts_summary = ", ".join(f"{len(outcomes[d][0])} {d.capitalize()}" for d in DESK_ORDER if d in outcomes)
-    print(f"\n=== Waterfall Complete [{strategy_version.upper()}]: {counts_summary} ===")
+    print(f"\n=== Waterfall Complete: {counts_summary} ===")
     print(f"[+] Total Portfolio Deployed: {total_deployed/1e9:.2f}B / {total_budget/1e9:.2f}B ISK ({(total_deployed/total_budget)*100:.1f}%)")
     return outcomes
-
-def resolve_versions(version_arg: str | None) -> list[str]:
-    """Resolves strategy versions to execute in priority order (active version first)."""
-    active_v = get_active_strategy_version()
-    if not version_arg or version_arg.strip().lower() == "all":
-        return [active_v] + [v for v in list_strategy_versions() if v != active_v]
-    return [v.strip().lower() for v in version_arg.split(",") if v.strip()]
-
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--desk", default="all", choices=["evergreen", "tactical", "hold", "all"])
     parser.add_argument("--capital", default="auto", help="Total portfolio capital in billions or 'auto' (e.g. 50.0, 89.5, 120.0, auto)")
-    parser.add_argument("--version", default="all", help="Strategy version to run ('v1', 'v2', 'all', or registered ai-* version)")
     return parser.parse_args(argv)
-
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
@@ -271,19 +246,11 @@ def main(argv: list[str] | None = None) -> None:
 
     target_desks = set(DESK_ORDER) if args.desk == "all" else {args.desk}
     shared_snapshot_time = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
-    active_v = get_active_strategy_version()
 
-    for ver in resolve_versions(args.version):
-        try:
-            run_waterfall(
-                df,
-                total_budget,
-                market_telemetry,
-                target_desks,
-                strategy_version=ver,
-                snapshot_time=shared_snapshot_time,
-            )
-        except Exception as e:
-            if ver == active_v:
-                raise
-            print(f"[!] Shadow version '{ver}' failed (non-blocking): {e}")
+    run_waterfall(
+        df,
+        total_budget,
+        market_telemetry,
+        target_desks,
+        snapshot_time=shared_snapshot_time,
+    )
