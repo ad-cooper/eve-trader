@@ -80,7 +80,6 @@ def test_end_to_end_point_in_time_replay_and_missed_winner_audit(tmp_path, monke
     report = replay.run_walkforward_replay(
         con=con,
         sde_meta_df=sde_meta,
-        versions=["v1", "v2"],
         days_back=20,
         step_days=5,
         horizon_days=12,
@@ -92,9 +91,10 @@ def test_end_to_end_point_in_time_replay_and_missed_winner_audit(tmp_path, monke
 
     df_trades = report["trades"]
     assert not df_trades.empty
-    assert set(df_trades["strategy_version"]) == {"v1", "v2"}
+    assert {"desk_type", "type_id", "supply_class", "realized_pnl"}.issubset(df_trades.columns)
+    assert set(df_trades["supply_class"]).issubset({"FARMED_RNG", "LP_FACTION", "MANUFACTURED"})
     assert 901 in set(df_trades["type_id"])
 
     missed_902 = [m for m in report["missed"] if m["type_id"] == 902]
     assert len(missed_902) >= 1
-    assert missed_902[0]["reasons"]["v2"] == "DISCOUNT_TO_180D_TOO_SHALLOW"
+    assert missed_902[0]["blocker"] == "DISCOUNT_TO_180D_TOO_SHALLOW"

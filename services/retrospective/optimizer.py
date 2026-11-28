@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
 
+from constants import (
+    DESK_CONFIG_PATH,
+    PROPOSALS_DIR,
+    TUNABLE_PROFILE_FIELDS
+)
 from services.exclusions import load_active_blacklist
 from services.desk_config import (
     DESK_PROFILES
@@ -23,9 +28,6 @@ from services.retrospective.simulator import (
     _simulate_waterfall_checkpoint,
     _summarize_spread_compression_audit,
 )
-
-PROPOSALS_DIR = "ledgers/ai_proposals"
-
 
 def _sanitize_json(obj):
     if isinstance(obj, dict):
@@ -120,13 +122,14 @@ def _optimize_desk_profiles(
 
     return best_profiles, change_log
 
-
-def _build_services_ledgers_diff(optimized_profiles: dict[str, DeskProfile]) -> str:
-    """Generates a line-accurate unified diff against services/ledgers.py."""
+def _build_desk_config_diff(optimized_profiles: dict[str, DeskProfile]) -> str:
+    """Generates a line-accurate unified diff against services/desk_config.py."""
     import difflib
 
-    src_path = Path("services/ledgers.py")
-    orig_lines = src_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    if not DESK_CONFIG_PATH.exists():
+        return ""
+
+    orig_lines = DESK_CONFIG_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
     new_lines = list(orig_lines)
 
     current_desk = None
@@ -139,32 +142,22 @@ def _build_services_ledgers_diff(optimized_profiles: dict[str, DeskProfile]) -> 
         if stripped == "),":
             current_desk = None
 
-        if current_desk:
+        if current_desk and current_desk in optimized_profiles:
             cfg = optimized_profiles[current_desk]
-            for field_name in (
-                "vol_pct",
-                "min_margin",
-                "live_min_margin",
-                "min_turnover_m",
-                "min_spread_pct",
-                "min_dump_freq_pct",
-                "max_vwap_ratio_180d",
-            ):
+            for field_name in TUNABLE_PROFILE_FIELDS:
                 prefix = f"        {field_name}="
                 if line.startswith(prefix):
                     val = getattr(cfg, field_name)
                     new_lines[idx] = f"{prefix}{val},\n"
 
-    diff = "".join(
+    return "".join(
         difflib.unified_diff(
             orig_lines,
             new_lines,
-            fromfile="a/services/ledgers.py",
-            tofile="b/services/ledgers.py",
+            fromfile="a/services/desk_config.py",
+            tofile="b/services/desk_config.py",
         )
     )
-    return diff
-
 
 def run_local_retrospective(
     lookback_days: int = 45,
@@ -186,7 +179,7 @@ def run_local_retrospective(
         desk_sticky_ids=set(),
     )
 
-    with open_analytics_connection(read_only=True, attach_sde=False) as con:
+    with open_analytics_connection(read_only=True, attach_sde=True) as con:
         row = con.execute("SELECT MAX(date) FROM forge_market_history").fetchone()
         max_date = row[0] if row else None
         if max_date is None:

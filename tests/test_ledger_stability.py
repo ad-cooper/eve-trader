@@ -13,7 +13,6 @@ import scripts.generate_ledgers as gen_led
 from services.desk import Desk
 from services.market_universe import build_universe_exclusion_mask
 from services.strategy_versions import (
-    get_strategy_version,
     v2_evaluate_order_action,
     v2_evaluate_sell_collision
 )
@@ -107,7 +106,6 @@ def test_sticky_incumbents_sort_ahead_of_higher_scoring_new_candidates():
     candidates, params = select_desk_candidates(df, "evergreen", mask, incumbents.desk_sticky_ids)
 
     assert list(candidates["type_id"]) == [301, 302]
-    strategy = get_strategy_version("v2")
     rows, _, claimed, sticky_kept = gen_led.allocate_desk_rows(
         candidates=candidates,
         desk_type="evergreen",

@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 import os
 import pandas as pd
 
-from constants import DUCKDB_PATH, OUTPUT_DIR
+import constants
 from services.analytics_db import record_ledger_history_snapshot
 from services.desk_config import DESK_PROFILES, DeskProfile
 from services.storage import read_json
@@ -56,9 +56,6 @@ def resolve_desk_incumbents(
 @dataclass
 class Desk:
     desk_type: str
-    output_dir: str = OUTPUT_DIR
-    db_path: str = DUCKDB_PATH
-    strategy_version: str = "v2", # This is deprecated but avoiding completely unwiring it for now
     profile: DeskProfile = field(init=False)
     _positions_cache: tuple[dict, dict, dict, dict] | None = field(default=None, repr=False)
 
@@ -78,8 +75,11 @@ class Desk:
 
     @property
     def ledger_dir(self) -> str:
-        from services.strategy_versions import get_version_output_dir
-        return get_version_output_dir(self.strategy_version, base_dir=self.output_dir)
+        return constants.OUTPUT_DIR
+
+    @property
+    def ledger_path(self) -> str:
+        return os.path.join(self.ledger_dir, f"{self.desk_type}_ledger.csv")
 
     @property
     def ledger_path(self) -> str:
@@ -103,20 +103,6 @@ class Desk:
         ids = df_existing["type_id"].dropna().astype(int).tolist()
         cap = float(df_existing["capital"].fillna(0.0).sum()) if "capital" in df_existing.columns else 0.0
         return ids, cap
-
-    @classmethod
-    def load_existing_desk_state(
-        cls,
-        desk_type: str,
-        strategy_version: str = "v1",
-        base_dir: str = OUTPUT_DIR,
-    ) -> tuple[list[int], float]:
-        """Reads claimed type_ids and deployed capital from an existing desk CSV."""
-        return cls(
-            desk_type=desk_type,
-            strategy_version=strategy_version,
-            output_dir=base_dir,
-        ).existing_state()
 
     def load_positions(self, refresh: bool = False) -> tuple[dict, dict, dict, dict]:
         if self._positions_cache is not None and not refresh:
@@ -169,7 +155,7 @@ class Desk:
         df_ledger = pd.DataFrame(ledger_rows)
         df_ledger.to_csv(self.ledger_path, index=False)
         print(
-            f"[+][{self.strategy_version}] Saved {len(ledger_rows)} lines to {self.ledger_path} "
+            f"[+] Saved {len(ledger_rows)} lines to {self.ledger_path} "
             f"({sticky_kept} sticky | Allocated: {allocated_cap/1e9:.2f}B / {budget/1e9:.2f}B)"
         )
         if df_ledger.empty:
@@ -179,7 +165,6 @@ class Desk:
                 df_ledger=df_ledger,
                 desk_type=self.desk_type,
                 snapshot_time=snapshot_time,
-                db_path=self.db_path,
             )
         except Exception as e:
             print(f"[!] Failed to log history to DuckDB: {e}")

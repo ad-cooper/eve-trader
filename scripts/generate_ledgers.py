@@ -37,7 +37,7 @@ from services.market import (
 )
 from services.strategy_versions import (
     enrich_universe_fundamentals as enrich_universe,
-    v1_compute_line_sizing as size_line,
+    v2_compute_line_sizing as size_line,
     v2_compute_candidate_pricing as price_candidate,
     v2_select_desk_candidates as select_candidates,
 )

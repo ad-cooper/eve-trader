@@ -5,8 +5,9 @@ Slices DuckDB & SQLite FIRST, switches DB paths/connections, then calls load_mar
 and run_waterfall() for v1 and v2.
 """
 from __future__ import annotations
-
+import constants
 import datetime
+import duckdb
 import json
 import os
 import re
@@ -14,8 +15,6 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
-
-import duckdb
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -349,31 +348,30 @@ def main(history_days: int = 195) -> None:
     expected_root = FIXTURE_DIR / "expected"
     expected_root.mkdir(parents=True, exist_ok=True)
 
+    orig_const_out_dir = getattr(constants, "OUTPUT_DIR", None)
     try:
         # Called AFTER slicing and wiring fixture DBs
         universe_df = gen_led.load_market_universe()
 
-        for ver in ("v1", "v2"):
-            ver_out = expected_root / ver
-            ver_out.mkdir(parents=True, exist_ok=True)
-            gen_led.OUTPUT_DIR = str(ver_out)
-            strat_mod.get_version_output_dir = lambda v, base_dir="ledgers", out=str(ver_out): out
-            gen_led.run_waterfall(
-                df=universe_df,
-                total_budget=GOLDEN_BUDGET,
-                market_telemetry=telemetry,
-                target_desks={"hold", "tactical", "evergreen"},
-                strategy_version=ver,
-                snapshot_time=FIXED_SNAPSHOT,
-            )
+        out_dir = expected_root / "v2"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        constants.OUTPUT_DIR = str(out_dir)
+
+        gen_led.run_waterfall(
+            df=universe_df,
+            total_budget=GOLDEN_BUDGET,
+            market_telemetry=telemetry,
+            target_desks={"hold", "tactical", "evergreen"},
+            snapshot_time=FIXED_SNAPSHOT,
+        )
     finally:
         analytics_db.open_analytics_connection = orig_analytics_conn
         if orig_gen_conn is not None:
             gen_led.open_analytics_connection = orig_gen_conn
         gen_led.read_json = orig_read_json
         gen_led.load_active_blacklist = orig_load_bl
-        strat_mod.get_version_output_dir = orig_get_ver_out_dir
-
+        if orig_const_out_dir is not None:
+            constants.OUTPUT_DIR = orig_const_out_dir
     manifest = {
         "snapshot_time": FIXED_SNAPSHOT.isoformat(),
         "budget": GOLDEN_BUDGET,

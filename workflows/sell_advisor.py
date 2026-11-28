@@ -4,7 +4,7 @@ from services.accounting import (
     eve_tick,
     round_down_eve,
     calc_net_proceeds,
-    calc_unit_cost
+    calc_unit_cost,
 )
 from services.desk import Desk
 from services.esi import (
@@ -16,7 +16,7 @@ from services.esi import (
 from constants import (
     JITA_STATION_ID,
     ORDERS_CACHE_FILE,
-    TOTAL_EXIT_FEE as EXIT_FEE_JITA
+    TOTAL_EXIT_FEE as EXIT_FEE_JITA,
 )
 from services.sde import (
     parse_eve_item_lines as parse_multisell_export_text,
@@ -30,6 +30,7 @@ from services.market import (
     get_active_sell_orders_map,
     get_hold_desk_params,
 )
+from services.strategy_versions import v2_evaluate_sell_collision
 
 
 def _collect_advisor_targets(raw_text: str | None = None, force_refresh: bool = False) -> list[dict]:
@@ -263,26 +264,18 @@ def _evaluate_advisor_item(target: dict, ctx: dict) -> dict:
     active_orders = ctx["active_sells_map"].get(tid, [])
 
     if active_orders:
-        from services.strategy_versions import get_active_strategy_version, get_strategy_version
-        active_ver = get_active_strategy_version()
-        if active_ver != "v1":
-            strat = get_strategy_version(active_ver)
-            p_depth = (ctx.get("depth_map") or {}).get(tid) or {}
-            s_class = (hist or {}).get("supply_class") or "MANUFACTURED"
-            action, action_type, rec_sell, collision_info = strat.evaluate_sell_collision(
-                desk,
-                qty,
-                unit_cost,
-                lowest_ask,
-                active_orders,
-                hold_meta,
-                ask_days_of_supply=p_depth.get("ask_days_of_supply"),
-                supply_class=s_class,
-            )
-        else:
-            action, action_type, rec_sell, collision_info = _resolve_collision_strategy(
-                desk, qty, unit_cost, lowest_ask, active_orders, hold_meta
-            )
+        p_depth = (ctx.get("depth_map") or {}).get(tid) or {}
+        s_class = (hist or {}).get("supply_class") or "MANUFACTURED"
+        action, action_type, rec_sell, collision_info = v2_evaluate_sell_collision(
+            desk,
+            qty,
+            unit_cost,
+            lowest_ask,
+            active_orders,
+            hold_meta,
+            ask_days_of_supply=p_depth.get("ask_days_of_supply"),
+            supply_class=s_class,
+        )
     else:
         action, action_type, rec_sell = _resolve_unlisted_strategy(
             desk, unit_cost, lowest_ask, target_sell, hold_meta
@@ -396,5 +389,3 @@ def evaluate_hangar_inventory(raw_text: str = None, force_refresh: bool = False)
     }
     evaluated = [_evaluate_advisor_item(t, ctx) for t in targets]
     return _summarize_advisor_results(evaluated)
-
-

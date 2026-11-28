@@ -14,6 +14,7 @@ from services.retrospective.optimizer import (
 
 from constants import (
     AUTOPILOT_BRANCH,
+    DESK_CONFIG_PATH,
     DESK_ORDER,
     PROPOSALS_DIR
 )
@@ -47,7 +48,8 @@ def check_autopilot_allowed() -> tuple[bool, str, str]:
 def _bundle_local_codebase() -> str:
     """Reads the core trading engine, pricing, accounting, and test files directly from disk."""
     target_files = [
-        "services/ledgers.py",
+        DESK_CONFIG_PATH,
+        "services/strategy_versions.py",
         "scripts/generate_ledgers.py",
         "services/accounting.py",
         "tests/test_strategy_engines.py",
@@ -304,12 +306,11 @@ def run_hybrid_code_review(
     result["saved_to"] = out_path
     return result
 
-
-def _apply_approved_stage1_to_ledgers(
-    ledgers_src: str,
+def _apply_approved_stage1_to_desk_config(
+    desk_config_src: str,
     approved_params: list[dict],
 ) -> tuple[str, list[dict]]:
-    """Applies Gemini-approved Stage 1 DeskProfile scalar updates onto services/ledgers.py source."""
+    """Applies Gemini-approved Stage 1 DeskProfile scalar updates onto services/desk_config.py source."""
     updated_profiles = dict(DESK_PROFILES)
     applied: list[dict] = []
     allowed_fields = {
@@ -350,9 +351,9 @@ def _apply_approved_stage1_to_ledgers(
         })
 
     if not applied:
-        return ledgers_src, []
+        return desk_config_src, []
 
-    orig_lines = ledgers_src.splitlines(keepends=True)
+    orig_lines = desk_config_src.splitlines(keepends=True)
     new_lines = list(orig_lines)
     current_desk = None
 
@@ -374,7 +375,6 @@ def _apply_approved_stage1_to_ledgers(
 
     return "".join(new_lines), applied
 
-
 def _apply_proposals_in_memory(
     proposals: list[dict],
     unit_tests: list[dict],
@@ -386,7 +386,8 @@ def _apply_proposals_in_memory(
     import ast
 
     allowed_files = {
-        "services/ledgers.py",
+        DESK_CONFIG_PATH,
+        "services/strategy_versions.py",
         "scripts/generate_ledgers.py",
         "services/accounting.py",
     }
@@ -432,7 +433,7 @@ def _apply_proposals_in_memory(
         existing_test = (
             Path(test_path).read_text(encoding="utf-8")
             if Path(test_path).exists()
-            else "import pytest\nfrom services.ledgers import DESK_PROFILES\n\n"
+            else "import pytest\nfrom services.desk_config import DESK_PROFILES\n\n"
         )
         added_blocks = []
         for ut in unit_tests:
@@ -553,10 +554,13 @@ def create_and_merge_github_pr(
 
     applied_s1_records = []
     if apply_s1 and approved_s1:
-        base_ledgers = updated_files.get("services/ledgers.py") or Path("services/ledgers.py").read_text(encoding="utf-8")
-        patched_ledgers, applied_s1_records = _apply_approved_stage1_to_ledgers(base_ledgers, approved_s1)
-        if applied_s1_records:
-            updated_files["services/ledgers.py"] = patched_ledgers
+        base_cfg = updated_files.get(DESK_CONFIG_PATH)
+        if base_cfg is None and Path(DESK_CONFIG_PATH).exists():
+            base_cfg = Path(DESK_CONFIG_PATH).read_text(encoding="utf-8")
+        if base_cfg is not None:
+            patched_cfg, applied_s1_records = _apply_approved_stage1_to_desk_config(base_cfg, approved_s1)
+            if applied_s1_records:
+                updated_files[DESK_CONFIG_PATH] = patched_cfg
     if not updated_files:
         return {
             "status": "no_applicable_changes",

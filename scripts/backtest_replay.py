@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Point-in-Time Walk-Forward Replay & Missed-Winner Hindsight Auditor
-===================================================================
+Point-in-Time Walk-Forward Replay & Missed-Winner Hindsight Auditor (v2)
+========================================================================
 1. Steps backward through historical dates in DuckDB (`forge_market_history`)
    with strict zero-lookahead point-in-time metric slicing (`date <= as_of_date`).
-2. Runs `v1`, `v2`, and any registered `ai-*` strategy versions side-by-side on
-   identical historical universes and simulates day-by-day chronological fills,
-   target exits, take-profits, and time-stops.
+2. Runs the `v2` multi-desk waterfall on identical historical universes and
+   simulates day-by-day chronological fills, target exits, take-profits, and
+   time-stops.
 3. Audits the entire Jita universe in hindsight to surface the highest-profit
    trades that occurred during the window and pinpoints the exact rule that
-   blocked each winner in `v1` vs. `v2`.
+   blocked each winner in `v2`.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from services.accounting import (
 )
 from services.exclusions import load_active_blacklist
 from services.desk_config import (
-    DESK_PROFILES
+    DESK_PROFILES,
 )
 from services.desk import (
     Desk,
@@ -38,16 +38,18 @@ from services.desk import (
 )
 from services.market_universe import build_universe_exclusion_mask
 from services.strategy_versions import (
-    get_strategy_version,
-    list_strategy_versions,
     enrich_universe_fundamentals,
+    v2_compute_candidate_pricing,
+    v2_compute_line_sizing,
+    v2_select_desk_candidates,
 )
 
 from constants import (
     DESK_ORDER,
     DUCKDB_PATH,
-    SQLITE_PATH
+    SQLITE_PATH,
 )
+
 DESK_RATIOS = {k: cfg.ratio for k, cfg in DESK_PROFILES.items()}
 
 
@@ -248,7 +250,6 @@ def simulate_trade_trajectory(
         if vol <= 0:
             continue
 
-        # 1. Limit buy fill phase
         newly_filled_today = 0
         if day_idx <= buy_cutoff and filled_qty < qty and low > 0 and low <= target_buy:
             part = fill_participation if low < target_buy else (fill_participation * 0.6)
@@ -265,7 +266,6 @@ def simulate_trade_trajectory(
         eligible_to_sell = held_qty if day_idx > first_fill_day else max(0, held_qty - newly_filled_today)
         days_held = day_idx - first_fill_day
 
-        # 2. Target sell exit
         if eligible_to_sell > 0 and high >= target_sell:
             sell_cap = max(1, int(vol * fill_participation))
             sell_now = min(eligible_to_sell, sell_cap)
@@ -280,7 +280,6 @@ def simulate_trade_trajectory(
                 break
             continue
 
-        # 3. Early / late-cycle take-profit exit
         if eligible_to_sell > 0 and avg > 0:
             late_cycle_days = max(take_profit_days + 1, int(max_hold_days * 0.65))
             avg_net = calc_net_proceeds(avg)
@@ -300,7 +299,6 @@ def simulate_trade_trajectory(
                     break
                 continue
 
-        # 4. Time-stop liquidation
         if days_held >= max_hold_days and eligible_to_sell > 0:
             liq_price = avg if avg > 0 else (low if low > 0 else target_buy)
             sold_qty += eligible_to_sell
@@ -347,9 +345,8 @@ def simulate_trade_trajectory(
     }
 
 
-def simulate_version_on_date(
+def simulate_v2_on_date(
     df_pit: pd.DataFrame,
-    strategy_version: str,
     total_budget: float,
     bl_items: set[str],
     bl_groups: set[str],
@@ -358,11 +355,10 @@ def simulate_version_on_date(
     duckdb_path: str = DUCKDB_PATH,
 ) -> tuple[list[dict], pd.DataFrame]:
     """
-    Runs a clean-slate multi-desk waterfall for `strategy_version` on a single historical
-    point-in-time universe snapshot `df_pit` (zero future telemetry or live order leakage).
+    Runs a clean-slate v2 multi-desk waterfall on a single historical point-in-time
+    universe snapshot `df_pit` (zero future telemetry or live order leakage).
     """
-    strat = get_strategy_version(strategy_version)
-    df_enriched = strat.enrich_universe(df_pit, sqlite_path, duckdb_path)
+    df_enriched = enrich_universe_fundamentals(df_pit, sqlite_path, duckdb_path)
 
     empty_incumbents = IncumbentState(
         active_buys={},
@@ -387,7 +383,7 @@ def simulate_version_on_date(
             bl_meta=bl_meta,
             losing_tids=None,
         )
-        candidates, desk_params = strat.select_candidates(
+        candidates, desk_params = v2_select_desk_candidates(
             df_enriched,
             desk,
             base_mask,
@@ -402,11 +398,11 @@ def simulate_version_on_date(
                 break
 
             tid = int(row["type_id"])
-            pricing = strat.price_candidate(row, desk, {}, empty_incumbents, False)
+            pricing = v2_compute_candidate_pricing(row, desk, {}, empty_incumbents, False)
             if pricing is None:
                 continue
 
-            sizing = strat.size_line(
+            sizing = v2_compute_line_sizing(
                 row,
                 pricing,
                 desk_params,
@@ -421,11 +417,10 @@ def simulate_version_on_date(
             allocated_cap += sizing["capital"]
             claimed_ids.add(tid)
             picks.append({
-                "strategy_version": strategy_version,
                 "desk_type": desk,
                 "type_id": tid,
                 "name": row["item_name"],
-                "supply_class": str(row.get("supply_class") or "LEGACY_V1"),
+                "supply_class": str(row.get("supply_class") or "UNKNOWN"),
                 "natural_cycle_days": float(row.get("natural_cycle_days") or Desk.get_desk_profile(desk).max_hold_days),
                 "qty": int(sizing["qty"]),
                 "target_buy": round(float(pricing["target_buy"]), 2),
@@ -445,11 +440,10 @@ def simulate_version_on_date(
 def diagnose_rejection_reason(
     row: pd.Series,
     desk: str,
-    strategy_version: str,
     base_mask_val: bool,
     picked_ids_by_desk: dict[str, set[int]],
 ) -> str:
-    """Pinpoints the exact first rule that prevented `row` from being selected on `desk`."""
+    """Pinpoints the exact first v2 rule that prevented `row` from being selected on `desk`."""
     tid = int(row["type_id"])
     for upstream in DESK_ORDER:
         if upstream == desk:
@@ -466,6 +460,7 @@ def diagnose_rejection_reason(
         return "EXCLUDED_BLACKLIST_OR_CATEGORY"
 
     cfg = Desk.get_desk_profile(desk)
+    scfg = cfg.selection
     price_val = float(row[cfg.price_col])
     if not (cfg.min_price_m <= price_val <= cfg.max_price_m):
         return "PRICE_OUT_OF_RANGE"
@@ -474,33 +469,33 @@ def diagnose_rejection_reason(
     p20_val = float(row.get("p20_low_m_30d") or 0.0)
     swing_amp = ((float(row["price_m_30d"]) - p20_val) / p20_val * 100.0) if p20_val > 0 else 0.0
     if float(row["avg_spread_30d"]) < cfg.min_spread_pct and not (
-        strategy_version == "v2" and desk in ("tactical", "hold") and swing_amp >= 14.0
+        desk in ("tactical", "hold") and swing_amp >= scfg.swing_amp_min_pct
     ):
         return "SPREAD_TOO_NARROW"
     if cfg.min_history_days > 0 and int(row["total_history_days"]) < cfg.min_history_days:
         return "INSUFFICIENT_HISTORY"
 
-    s_class = str(row.get("supply_class") or "LEGACY_V1")
+    s_class = str(row.get("supply_class") or "UNKNOWN")
     if desk == "evergreen":
         if cfg.min_daily_vol > 0 and float(row["daily_vol_30d"]) < cfg.min_daily_vol:
             return "DAILY_VOL_TOO_LOW"
-        if strategy_version == "v2" and not (s_class == "MANUFACTURED" or float(row["daily_turnover_m"]) >= 120.0):
+        if not (s_class == "MANUFACTURED" or float(row["daily_turnover_m"]) >= scfg.turnover_archetype_floor_m):
             return "V2_SUPPLY_CLASS_FILTERED"
     elif desk == "tactical":
-        min_df = max(22.0, cfg.min_dump_freq_pct - 5.0) if strategy_version == "v2" else cfg.min_dump_freq_pct
+        min_df = max(scfg.min_dump_freq_floor_pct, cfg.min_dump_freq_pct - scfg.dump_freq_floor_offset_pct)
         if float(row["dump_freq_pct"]) < min_df:
             return "DUMP_FREQ_TOO_LOW"
-        if strategy_version == "v2" and not (s_class in ("LP_FACTION", "FARMED_RNG") or float(row["dump_freq_pct"]) >= 45.0):
+        if not (s_class in ("LP_FACTION", "FARMED_RNG") or float(row["dump_freq_pct"]) >= scfg.non_archetype_min_dump_freq_pct):
             return "V2_SUPPLY_CLASS_FILTERED"
     else:  # hold
-        if cfg.max_vwap_ratio_180d is not None and float(row["price_m_30d"]) > float(row["price_m_180d"]) * cfg.max_vwap_ratio_180d:
+        ratio_cap = cfg.max_vwap_ratio_180d if cfg.max_vwap_ratio_180d is not None else 0.90
+        if float(row["price_m_30d"]) > float(row["price_m_180d"]) * ratio_cap:
             return "DISCOUNT_TO_180D_TOO_SHALLOW"
-        if strategy_version == "v2" and s_class not in ("FARMED_RNG", "LP_FACTION"):
+        if s_class not in ("FARMED_RNG", "LP_FACTION"):
             return "V2_SUPPLY_CLASS_FILTERED"
 
-    strat = get_strategy_version(strategy_version)
     empty_inc = IncumbentState({}, {}, {}, set(), set())
-    pricing = strat.price_candidate(row, desk, {}, empty_inc, False)
+    pricing = v2_compute_candidate_pricing(row, desk, {}, empty_inc, False)
     if pricing is None or float(pricing["net_margin"]) < cfg.min_margin:
         return "NET_MARGIN_BELOW_FLOOR"
 
@@ -511,7 +506,7 @@ def audit_missed_winners(
     df_pit_enriched: pd.DataFrame,
     bars_map: dict[int, list[dict]],
     as_of_date: str,
-    picks_by_version: dict[str, list[dict]],
+    picks: list[dict],
     bl_items: set[str],
     bl_groups: set[str],
     bl_meta: dict,
@@ -519,7 +514,7 @@ def audit_missed_winners(
 ) -> list[dict]:
     """
     Scans the entire eligible point-in-time Jita universe to find the most profitable
-    trades that occurred over `bars_map` and diagnoses why `v1` and `v2` missed them.
+    trades that occurred over `bars_map` and diagnoses why `v2` missed them.
     """
     empty_inc = IncumbentState({}, {}, {}, set(), set())
     base_mask = build_universe_exclusion_mask(
@@ -532,22 +527,19 @@ def audit_missed_winners(
         losing_tids=None,
     )
 
-    picked_sets: dict[str, dict[str, set[int]]] = {}
-    all_picked_union: dict[str, set[int]] = {}
-    for ver, plist in picks_by_version.items():
-        by_d: dict[str, set[int]] = {d: set() for d in DESK_ORDER}
-        union_tids: set[int] = set()
-        for p in plist:
-            by_d[p["desk_type"]].add(int(p["type_id"]))
-            union_tids.add(int(p["type_id"]))
-        picked_sets[ver] = by_d
-        all_picked_union[ver] = union_tids
+    picked_by_desk: dict[str, set[int]] = {d: set() for d in DESK_ORDER}
+    picked_union: set[int] = set()
+    for p in picks:
+        picked_by_desk[p["desk_type"]].add(int(p["type_id"]))
+        picked_union.add(int(p["type_id"]))
 
     missed_records: list[dict] = []
     scan_df = df_pit_enriched[base_mask & (df_pit_enriched["daily_turnover_m"] >= 10.0)]
 
     for idx, row in scan_df.iterrows():
         tid = int(row["type_id"])
+        if tid in picked_union:
+            continue
         future_bars = bars_map.get(tid)
         if not future_bars:
             continue
@@ -595,32 +587,21 @@ def audit_missed_winners(
         if sim["realized_pnl"] < min_profit_isk:
             continue
 
-        reasons = {}
-        any_missed = False
-        for ver in picks_by_version:
-            if tid in all_picked_union[ver]:
-                reasons[ver] = "PICKED"
-            else:
-                any_missed = True
-                reasons[ver] = diagnose_rejection_reason(
-                    row, bench_desk, ver, bool(base_mask.loc[idx]), picked_sets[ver]
-                )
-
-        if any_missed:
-            missed_records.append({
-                "as_of_date": as_of_date,
-                "desk": bench_desk.upper(),
-                "type_id": tid,
-                "name": row["item_name"],
-                "supply_class": str(row.get("supply_class") or "UNKNOWN"),
-                "qty": sim["filled_qty"],
-                "buy_price": round(t_buy, 2),
-                "sell_price": round(t_sell, 2),
-                "deployed_capital": sim["deployed_capital"],
-                "realized_pnl": sim["realized_pnl"],
-                "roi_pct": sim["roi_pct"],
-                "reasons": reasons,
-            })
+        blocker = diagnose_rejection_reason(row, bench_desk, bool(base_mask.loc[idx]), picked_by_desk)
+        missed_records.append({
+            "as_of_date": as_of_date,
+            "desk": bench_desk.upper(),
+            "type_id": tid,
+            "name": row["item_name"],
+            "supply_class": str(row.get("supply_class") or "UNKNOWN"),
+            "qty": sim["filled_qty"],
+            "buy_price": round(t_buy, 2),
+            "sell_price": round(t_sell, 2),
+            "deployed_capital": sim["deployed_capital"],
+            "realized_pnl": sim["realized_pnl"],
+            "roi_pct": sim["roi_pct"],
+            "blocker": blocker,
+        })
 
     return missed_records
 
@@ -628,7 +609,6 @@ def audit_missed_winners(
 def run_walkforward_replay(
     con: duckdb.DuckDBPyConnection,
     sde_meta_df: pd.DataFrame,
-    versions: list[str],
     days_back: int = 45,
     step_days: int = 5,
     horizon_days: int = 14,
@@ -637,8 +617,8 @@ def run_walkforward_replay(
     duckdb_path: str = DUCKDB_PATH,
 ) -> dict:
     """
-    Executes a multi-date point-in-time walk-forward replay comparing `versions`
-    side-by-side plus a hindsight audit of missed winners.
+    Executes a multi-date point-in-time walk-forward replay for `v2` plus a
+    hindsight audit of missed winners.
     """
     max_date_row = con.execute("SELECT MAX(date) FROM forge_market_history").fetchone()
     if not max_date_row or max_date_row[0] is None:
@@ -667,51 +647,40 @@ def run_walkforward_replay(
             continue
 
         bars_map = fetch_forward_bars_map(con, dt_str, horizon_days)
-        picks_by_ver: dict[str, list[dict]] = {}
-        enriched_for_audit = df_pit
+        picks, df_enr = simulate_v2_on_date(
+            df_pit,
+            total_budget=budget,
+            bl_items=bl_items,
+            bl_groups=bl_groups,
+            bl_meta=bl_meta,
+            sqlite_path=sqlite_path,
+            duckdb_path=duckdb_path,
+        )
 
-        for ver in versions:
-            picks, df_enr = simulate_version_on_date(
-                df_pit,
-                strategy_version=ver,
-                total_budget=budget,
-                bl_items=bl_items,
-                bl_groups=bl_groups,
-                bl_meta=bl_meta,
-                sqlite_path=sqlite_path,
-                duckdb_path=duckdb_path,
+        for p in picks:
+            cfg = Desk.get_desk_profile(p["desk_type"])
+            hold_days = int(round(p["natural_cycle_days"]))
+            sim = simulate_trade_trajectory(
+                future_bars=bars_map.get(p["type_id"], []),
+                qty=p["qty"],
+                target_buy=p["target_buy"],
+                target_sell=p["target_sell"],
+                max_hold_days=hold_days,
+                take_profit_days=cfg.take_profit_days,
+                take_profit_roi=cfg.take_profit_roi,
             )
-            picks_by_ver[ver] = picks
-            if ver == "v2" or enriched_for_audit is df_pit:
-                enriched_for_audit = df_enr
-
-            for p in picks:
-                cfg = Desk.get_desk_profile(p["desk_type"])
-                hold_days = int(round(p["natural_cycle_days"])) if ver == "v2" else cfg.max_hold_days
-                sim = simulate_trade_trajectory(
-                    future_bars=bars_map.get(p["type_id"], []),
-                    qty=p["qty"],
-                    target_buy=p["target_buy"],
-                    target_sell=p["target_sell"],
-                    max_hold_days=hold_days,
-                    take_profit_days=cfg.take_profit_days,
-                    take_profit_roi=cfg.take_profit_roi,
-                )
-                trade_logs.append({
-                    **p,
-                    "as_of_date": dt_str,
-                    **sim,
-                })
-
-        if "supply_class" not in enriched_for_audit.columns:
-            enriched_for_audit = enrich_universe_fundamentals(enriched_for_audit, sqlite_path=sqlite_path)
+            trade_logs.append({
+                **p,
+                "as_of_date": dt_str,
+                **sim,
+            })
 
         missed_all.extend(
             audit_missed_winners(
-                enriched_for_audit,
+                df_enr,
                 bars_map,
                 dt_str,
-                picks_by_ver,
+                picks,
                 bl_items,
                 bl_groups,
                 bl_meta,
@@ -720,7 +689,6 @@ def run_walkforward_replay(
 
     return {
         "eval_dates": [str(d) for d in eval_dates],
-        "versions": versions,
         "trades": pd.DataFrame(trade_logs),
         "missed": missed_all,
     }
@@ -728,108 +696,94 @@ def run_walkforward_replay(
 
 def print_replay_report(report: dict) -> None:
     eval_dates = report["eval_dates"]
-    versions = report["versions"]
     df_trades: pd.DataFrame = report["trades"]
     missed: list[dict] = report["missed"]
 
-    print("\n" + "=" * 102)
-    print(f"POINT-IN-TIME WALK-FORWARD REPLAY ({len(eval_dates)} Decision Dates: {eval_dates[0]} -> {eval_dates[-1]})")
-    print("=" * 102)
+    print("\n" + "=" * 96)
+    print(f"POINT-IN-TIME WALK-FORWARD REPLAY [V2] ({len(eval_dates)} Decision Dates: {eval_dates[0]} -> {eval_dates[-1]})")
+    print("=" * 96)
 
     if df_trades.empty:
         print("[!] No simulated trades generated in replay window.")
         return
 
     header = (
-        f"{'DESK':<10} | {'VER':<8} | {'ORDERS':>6} | {'FILL %':>6} | {'HIT %':>6} | "
+        f"{'DESK':<10} | {'ORDERS':>6} | {'FILL %':>6} | {'HIT %':>6} | "
         f"{'TP %':>5} | {'STOP %':>6} | {'DEPLOYED':>10} | {'REALIZED PNL':>12} | {'REALIZED ROI':>12}"
     )
     print(header)
     print("-" * len(header))
 
     for desk in DESK_ORDER:
-        for ver in versions:
-            sub = df_trades[(df_trades["desk_type"] == desk) & (df_trades["strategy_version"] == ver)]
-            if sub.empty:
-                continue
-            n_orders = len(sub)
-            filled = sub[sub["filled_qty"] > 0]
-            fill_pct = (len(filled) / n_orders) * 100.0 if n_orders > 0 else 0.0
-            hit_pct = (len(sub[sub["status"] == "TARGET_HIT"]) / max(1, len(filled))) * 100.0
-            tp_pct = (len(sub[sub["status"] == "TAKE_PROFIT"]) / max(1, len(filled))) * 100.0
-            stop_pct = (len(sub[sub["status"] == "TIME_STOP"]) / max(1, len(filled))) * 100.0
-            deployed = float(filled["deployed_capital"].sum())
-            realized = float(filled["realized_pnl"].sum())
-            roi = (realized / deployed * 100.0) if deployed > 0 else 0.0
-            print(
-                f"{desk.upper():<10} | {ver:<8} | {n_orders:>6} | {fill_pct:>5.1f}% | {hit_pct:>5.1f}% | "
-                f"{tp_pct:>4.1f}% | {stop_pct:>5.1f}% | {deployed/1e9:>8.2f}B | {realized/1e9:>+10.2f}B | {roi:>11.2f}%"
-            )
-        print("-" * len(header))
-
-    print("\n=== PORTFOLIO TOTALS BY VERSION ===")
-    for ver in versions:
-        sub = df_trades[df_trades["strategy_version"] == ver]
+        sub = df_trades[df_trades["desk_type"] == desk]
+        if sub.empty:
+            continue
+        n_orders = len(sub)
         filled = sub[sub["filled_qty"] > 0]
+        fill_pct = (len(filled) / n_orders) * 100.0 if n_orders > 0 else 0.0
+        hit_pct = (len(sub[sub["status"] == "TARGET_HIT"]) / max(1, len(filled))) * 100.0
+        tp_pct = (len(sub[sub["status"] == "TAKE_PROFIT"]) / max(1, len(filled))) * 100.0
+        stop_pct = (len(sub[sub["status"] == "TIME_STOP"]) / max(1, len(filled))) * 100.0
         deployed = float(filled["deployed_capital"].sum())
         realized = float(filled["realized_pnl"].sum())
-        mtm = float(filled["mtm_pnl"].sum())
         roi = (realized / deployed * 100.0) if deployed > 0 else 0.0
         print(
-            f"  {ver.upper():<8}: {len(filled):>4}/{len(sub):<4} filled | Deployed: {deployed/1e9:>7.2f}B | "
-            f"Realized P&L: {realized/1e9:>+7.2f}B ({roi:>+6.2f}% ROI) | Total MTM P&L: {mtm/1e9:>+7.2f}B"
+            f"{desk.upper():<10} | {n_orders:>6} | {fill_pct:>5.1f}% | {hit_pct:>5.1f}% | "
+            f"{tp_pct:>4.1f}% | {stop_pct:>5.1f}% | {deployed/1e9:>8.2f}B | {realized/1e9:>+10.2f}B | {roi:>11.2f}%"
         )
+
+    print("-" * len(header))
+    filled_all = df_trades[df_trades["filled_qty"] > 0]
+    deployed_all = float(filled_all["deployed_capital"].sum())
+    realized_all = float(filled_all["realized_pnl"].sum())
+    mtm_all = float(filled_all["mtm_pnl"].sum())
+    roi_all = (realized_all / deployed_all * 100.0) if deployed_all > 0 else 0.0
+    print(
+        f"  TOTAL   : {len(filled_all):>4}/{len(df_trades):<4} filled | Deployed: {deployed_all/1e9:>7.2f}B | "
+        f"Realized P&L: {realized_all/1e9:>+7.2f}B ({roi_all:>+6.2f}% ROI) | Total MTM P&L: {mtm_all/1e9:>+7.2f}B"
+    )
 
     if not missed:
         print("\n[*] No major missed winners (>15M realized profit) found outside selected portfolios.")
         return
 
-    print("\n" + "=" * 102)
-    print("HINDSIGHT MISSED-WINNER RULE DIAGNOSTICS (What Better Rules Would Have Captured)")
-    print("=" * 102)
+    print("\n" + "=" * 96)
+    print("HINDSIGHT MISSED-WINNER RULE DIAGNOSTICS [V2]")
+    print("=" * 96)
 
-    for ver in versions:
-        ver_missed = [m for m in missed if m["reasons"].get(ver) != "PICKED"]
-        ver_rescued = [m for m in missed if m["reasons"].get(ver) == "PICKED"]
-        blocker_stats: dict[str, list[float]] = {}
-        for m in ver_missed:
-            r = m["reasons"].get(ver, "UNKNOWN")
-            blocker_stats.setdefault(r, []).append(m["realized_pnl"])
+    blocker_stats: dict[str, list[float]] = {}
+    for m in missed:
+        r = m.get("blocker", "UNKNOWN")
+        blocker_stats.setdefault(r, []).append(m["realized_pnl"])
 
-        print(f"\n[{ver.upper()}] Captured {len(ver_rescued)}/{len(missed)} top market opportunities | Missed {len(ver_missed)}:")
-        for reason, pnls in sorted(blocker_stats.items(), key=lambda x: -sum(x[1]))[:6]:
-            print(f"  - {reason:<34}: {len(pnls):>3} opportunities | {sum(pnls)/1e9:>+6.2f}B missed realized profit")
+    for reason, pnls in sorted(blocker_stats.items(), key=lambda x: -sum(x[1]))[:6]:
+        print(f"  - {reason:<34}: {len(pnls):>3} opportunities | {sum(pnls)/1e9:>+6.2f}B missed realized profit")
 
     print("\n=== TOP 15 MISSED PROFIT OPPORTUNITIES (CHRONOLOGICAL SIMULATION) ===")
-    v_cols = " | ".join(f"{v.upper() + ' BLOCKER':<28}" for v in versions)
-    m_header = f"{'DATE':<10} | {'DESK':<9} | {'SUPPLY':<12} | {'ITEM NAME':<34} | {'PROFIT':>9} | {'ROI':>6} | {v_cols}"
+    m_header = f"{'DATE':<10} | {'DESK':<9} | {'SUPPLY':<12} | {'ITEM NAME':<34} | {'PROFIT':>9} | {'ROI':>6} | {'V2 BLOCKER':<28}"
     print(m_header)
     print("-" * len(m_header))
     for m in sorted(missed, key=lambda x: -x["realized_pnl"])[:15]:
-        v_vals = " | ".join(f"{m['reasons'].get(v, '--'):<28}" for v in versions)
         print(
             f"{m['as_of_date']:<10} | {m['desk']:<9} | {m['supply_class']:<12} | {m['name'][:34]:<34} | "
-            f"{m['realized_pnl']/1e6:>+7.1f}M | {m['roi_pct']:>5.1f}% | {v_vals}"
+            f"{m['realized_pnl']/1e6:>+7.1f}M | {m['roi_pct']:>5.1f}% | {m['blocker']:<28}"
         )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Point-in-time walk-forward replay & missed-winner auditor.")
-    parser.add_argument("--versions", default="", help="Comma-separated strategy versions (default: all registered)")
+    parser = argparse.ArgumentParser(description="Point-in-time walk-forward replay & missed-winner auditor (v2).")
     parser.add_argument("--days-back", type=int, default=45, help="Total historical lookback window in days (default: 45)")
     parser.add_argument("--step-days", type=int, default=5, help="Days between simulated decision dates (default: 5)")
     parser.add_argument("--horizon-days", type=int, default=14, help="Forward execution horizon per decision date (default: 14)")
     parser.add_argument("--budget", type=float, default=50.0, help="Simulated portfolio budget in billions ISK (default: 50.0)")
     args = parser.parse_args()
 
-    versions = [v.strip().lower() for v in args.versions.split(",") if v.strip()] if args.versions else list_strategy_versions()
     sde_meta_df = load_sde_item_metadata(SQLITE_PATH)
     con = duckdb.connect(DUCKDB_PATH, read_only=True)
     try:
         report = run_walkforward_replay(
             con=con,
             sde_meta_df=sde_meta_df,
-            versions=versions,
             days_back=args.days_back,
             step_days=args.step_days,
             horizon_days=args.horizon_days,

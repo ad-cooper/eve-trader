@@ -112,11 +112,6 @@ def test_golden_ledger_waterfall_v2_invariant(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "DUCKDB_PATH", str(temp_duck))
     monkeypatch.setattr(bl_mod, "BLACKLIST_FILE", str(work_dir / "inputs" / "temporary_blacklist.json"))
     monkeypatch.setattr("services.desk.read_json", _fixture_read_json)
-    monkeypatch.setattr("services.strategy_versions.STRATEGY_CONFIG_FILE", str(work_dir / "strategy_config.json"))
-    monkeypatch.setattr(
-        "services.strategy_versions.get_version_output_dir",
-        lambda ver, base_dir="ledgers": str(actual_out),
-    )
 
     universe_df = gen_led.load_market_universe()
 

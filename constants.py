@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 # --- Paths & Cache Files ---
 DATA_DIR = "data"
@@ -12,6 +13,19 @@ JEVEASSETS_CSV_PATH = "data/jeveassets_transactions.csv"
 BLACKLIST_FILE = "data/temporary_blacklist.json"
 STRATEGY_CONFIG_FILE = "data/strategy_config.json"
 EMPTY_DUMP_CACHE = "data/.everef_pending_dumps.json"
+
+# ai reasoning
+DESK_CONFIG_PATH = Path("services/desk_config.py")
+TUNABLE_PROFILE_FIELDS = (
+    "vol_pct",
+    "min_margin",
+    "live_min_margin",
+    "min_turnover_m",
+    "min_spread_pct",
+    "min_dump_freq_pct",
+    "max_vwap_ratio_180d",
+)
+PROPOSALS_DIR = "ledgers/ai_proposals"
 
 SSO_TOKEN_FILE = "ledgers/sso_token.json"
 ORDERS_CACHE_FILE = "ledgers/character_orders.json"

@@ -11,9 +11,11 @@ from services.desk import Desk
 from services.esi import (
     extract_top_buy_for_station
 )
-from services.order_advisor import evaluate_order_action
 from services.staging_diff import _detect_order_fill_events
-from services.strategy_versions import compute_book_depth_stats
+from services.strategy_versions import (
+    compute_book_depth_stats,
+    v2_evaluate_order_action
+)
 
 def test_eve_tick_and_rounding():
     assert eve_tick(141_000_000.0) == 100_000.0
@@ -45,7 +47,7 @@ def test_weekend_dip_hysteresis_prevents_false_cancel():
     assert eg.cancel_floor < eg.live_min_margin
 
     # Mild dip where live ask (99.5M) still leaves +2.72% margin (>= 2.0% cancel_floor) stays active
-    code_mild, _ = evaluate_order_action(
+    code_mild, _ = v2_evaluate_order_action(
         desk_type="evergreen",
         my_price=92_000_000.0,
         top_buy=92_000_000.0,
@@ -57,7 +59,7 @@ def test_weekend_dip_hysteresis_prevents_false_cancel():
     assert code_mild in ("TOP_BOOK", "PATIENT")
 
     # Compressed live ask (98M -> +1.17% < 2.0% cancel_floor) cancels despite stale 105M csv_sell
-    code_comp, label_comp = evaluate_order_action(
+    code_comp, label_comp = v2_evaluate_order_action(
         desk_type="evergreen",
         my_price=92_000_000.0,
         top_buy=92_000_000.0,
@@ -284,7 +286,7 @@ def test_order_actions_bumps_and_cancels(monkeypatch):
 
 def test_profitable_hold_and_weekend_dip_orders_are_not_cancelled():
     # Hold buy order at +23.9% margin stays PATIENT even when live ask recovers >92% of 180d target
-    code_hold, label_hold = evaluate_order_action(
+    code_hold, label_hold = v2_evaluate_order_action(
         desk_type="hold",
         my_price=71_070_000.0,
         top_buy=72_850_000.0,
@@ -298,7 +300,7 @@ def test_profitable_hold_and_weekend_dip_orders_are_not_cancelled():
     assert "HOLD FIRM" in label_hold
 
     # Evergreen buy order at 50.13M when live ask crashes to 48M (-9.06% live margin) MUST cancel
-    code_eg, label_eg = evaluate_order_action(
+    code_eg, label_eg = v2_evaluate_order_action(
         desk_type="evergreen",
         my_price=50_130_000.0,
         top_buy=50_400_000.0,
@@ -363,7 +365,7 @@ def test_missing_buys_never_overpays_stale_csv_target_buy(monkeypatch):
 
 def test_hold_desk_dip_orders_evaluate_against_recovery_target():
     # Hold dip order with +26.5% upside to 180d target (83M) stays active even when depressed dip live_ask is 67M
-    code, _ = evaluate_order_action(
+    code, _ = v2_evaluate_order_action(
         desk_type="hold",
         my_price=62_540_000.0,
         top_buy=63_830_000.0,

@@ -15,7 +15,7 @@ from services.storage import (
     load_cached_orders,
     load_market_prices_cache
 )
-from services.strategy_versions import get_active_strategy_version, get_strategy_version
+from services.strategy_versions import v2_evaluate_order_action
 
 def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_buy: float, sells: dict) -> tuple:
     """Determines target buy, target sell, and recommended quantity per desk strategy."""
@@ -76,65 +76,7 @@ def resolve_target_prices(item: dict, desk_type: str, live_ask: float, live_top_
 
     return round(t_buy, 2), round(t_sell, 2), qty
 
-
-def evaluate_order_action(
-    desk_type: str,
-    my_price: float,
-    top_buy: float,
-    t_sell: float,
-    dump_freq: float,
-    proximity_pct: float = None,
-    csv_sell: float = 0.0,
-    live_ask: float = None,
-) -> tuple:
-    """Evaluates whether an active order is winning, viable to bump, or needs cancellation (with weekend-dip hysteresis)."""
-    cfg = Desk.get_desk_profile(desk_type)
-    min_margin = cfg.live_min_margin
-    cancel_floor = cfg.cancel_floor
-    if desk_type in ("evergreen", "tactical") and live_ask and float(live_ask) > 0:
-        effective_sell = min(t_sell, float(live_ask))
-    else:
-        effective_sell = t_sell
-    max_buy = calc_max_profitable_buy(effective_sell, min_margin)
-    max_hold_buy = calc_max_profitable_buy(effective_sell, cancel_floor)
-    cur_margin = calc_projected_margin(my_price, effective_sell)
-
-    if max_hold_buy > 0 and my_price > (max_hold_buy * 1.005):
-        return "CANCEL_OVERPRICED", f"OVERBID ({cur_margin:.1f}% LIVE MARGIN - CANCEL)"
-
-    if desk_type == "hold" and proximity_pct is not None and proximity_pct > 92.0 and cur_margin < min_margin:
-        return "CANCEL_RECOVERED", f"DIP RECOVERED ({cur_margin:.1f}% MARGIN - CANCEL)"
-
-    if not top_buy or top_buy <= 0:
-        return "PATIENT", "AWAITING QUOTE"
-
-    if my_price >= (top_buy - 0.01):
-        return "TOP_BOOK", "TOP BID (WINNING)"
-
-    next_bid = top_buy + 0.01
-    proj_margin = calc_projected_margin(next_bid, effective_sell)
-    outbid_pct = ((top_buy - my_price) / my_price * 100.0) if my_price > 0 else 100.0
-
-    if desk_type == "hold":
-        in_active_dip = proximity_pct is not None and proximity_pct <= 82.0
-        if in_active_dip and outbid_pct >= 1.5 and top_buy <= max_buy and proj_margin >= min_margin:
-            return "BUMP_VIABLE", f"BUMP DIP (+{proj_margin:.1f}%)"
-        return "PATIENT", "HOLD FIRM (WAIT DUMP)"
-
-    min_outbid_pct = 1.0 if desk_type == "tactical" else 0.5
-    if outbid_pct >= min_outbid_pct and top_buy <= max_buy and proj_margin >= min_margin:
-        return "BUMP_VIABLE", f"BUMP VIABLE (+{proj_margin:.1f}%)"
-    if desk_type in ("evergreen", "tactical"):
-        my_margin = calc_projected_margin(my_price, effective_sell)
-        if my_margin < cancel_floor:
-            return "CANCEL_OVERPRICED", f"COMPRESSED ({my_margin:.1f}% MARGIN - CANCEL)"
-        return "PATIENT", f"OUTBID (HOLD +{my_margin:.1f}%)"
-
-    return "CANCEL_CEILING", "CEILING REACHED (CANCEL)"
-
-
 def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: dict, sells: dict) -> list:
-    from services.strategy_versions import get_active_strategy_version, get_strategy_version
     profile = Desk.get_desk_profile(desk_type)
     lcfg = getattr(profile, "live_pricing", None) or LiveOrderPricing()
 
@@ -172,23 +114,18 @@ def annotate_desk_items(items: list, desk_type: str, market_prices: dict, buys: 
             item["escrow"] = float(b.get("escrow", item.get("capital", 0.0)))
             item["price_synced"] = abs(b["price"] - t_buy) / t_buy < lcfg.price_sync_tolerance if t_buy > 0 else True
             dump_f = float(item.get("dump_freq", 0.0))
-            active_ver = get_active_strategy_version()
-            if active_ver != "v1":
-                strat = get_strategy_version(active_ver)
-                code, label = strat.evaluate_buy_order(
-                    desk_type,
-                    b["price"],
-                    live_top_buy or 0.0,
-                    t_sell,
-                    dump_f,
-                    item.get("proximity_pct"),
-                    orig_csv_sell,
-                    live_ask,
-                    ask_days_of_supply=p_info.get("ask_days_of_supply"),
-                    supply_class=str(item.get("supply_class") or "MANUFACTURED"),
-                )
-            else:
-                code, label = evaluate_order_action(desk_type, b["price"], live_top_buy or 0.0, t_sell, dump_f, item.get("proximity_pct"), orig_csv_sell, live_ask)
+            code, label = v2_evaluate_order_action(
+                desk_type,
+                b["price"],
+                live_top_buy or 0.0,
+                t_sell,
+                dump_f,
+                item.get("proximity_pct"),
+                orig_csv_sell,
+                live_ask,
+                ask_days_of_supply=p_info.get("ask_days_of_supply"),
+                supply_class=str(item.get("supply_class") or "MANUFACTURED"),
+            )
             item["action_code"] = code
             item["action_text"] = label
         elif tid in sells:
